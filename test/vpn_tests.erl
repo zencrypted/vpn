@@ -8,11 +8,13 @@ api_stubs_test() ->
 vpn_tun_exports_test() ->
     ?assertMatch({module, vpn_tun}, code:ensure_loaded(vpn_tun)),
     ?assert(erlang:function_exported(vpn_tun, open, 2)),
+    ?assert(erlang:function_exported(vpn_tun, open, 3)),
     ?assert(erlang:function_exported(vpn_tun, close, 1)),
     ?assert(erlang:function_exported(vpn_tun, devname, 1)),
     ?assert(erlang:function_exported(vpn_tun, write, 2)),
     ?assert(erlang:function_exported(vpn_tun, start_link, 2)),
     ?assert(erlang:function_exported(vpn_tun, start_link, 3)),
+    ?assert(erlang:function_exported(vpn_tun, start_link, 4)),
     ?assert(erlang:function_exported(vpn_tun, stop, 1)).
 
 vpn_udp_exports_test() ->
@@ -25,6 +27,7 @@ vpn_udp_exports_test() ->
 vpn_link_exports_test() ->
     ?assertMatch({module, vpn_link}, code:ensure_loaded(vpn_link)),
     ?assert(erlang:function_exported(vpn_link, start_link, 5)),
+    ?assert(erlang:function_exported(vpn_link, start_link, 6)),
     ?assert(erlang:function_exported(vpn_link, stop, 1)),
     ?assert(erlang:function_exported(vpn_link, stats, 1)),
     ?assert(erlang:function_exported(vpn_link, reset_stats, 1)).

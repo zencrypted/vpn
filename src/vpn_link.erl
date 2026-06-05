@@ -5,11 +5,14 @@
 
 -behaviour(gen_server).
 
--export([start_link/5, stop/1, stats/1, reset_stats/1]).
+-export([start_link/5, start_link/6, stop/1, stats/1, reset_stats/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 start_link(TunName, TunIp, LocalUdpPort, RemoteIp, RemoteUdpPort) ->
-    Args = {TunName, TunIp, LocalUdpPort, RemoteIp, RemoteUdpPort},
+    start_link(TunName, TunIp, tap, LocalUdpPort, RemoteIp, RemoteUdpPort).
+
+start_link(TunName, TunIp, Mode, LocalUdpPort, RemoteIp, RemoteUdpPort) ->
+    Args = {TunName, TunIp, Mode, LocalUdpPort, RemoteIp, RemoteUdpPort},
     gen_server:start_link(?MODULE, Args, []).
 
 stop(Pid) ->
@@ -21,11 +24,11 @@ stats(Pid) ->
 reset_stats(Pid) ->
     gen_server:call(Pid, reset_stats).
 
-init({TunName, TunIp, LocalUdpPort, RemoteIp, RemoteUdpPort}) ->
+init({TunName, TunIp, Mode, LocalUdpPort, RemoteIp, RemoteUdpPort}) ->
     process_flag(trap_exit, true),
     case vpn_udp:start_link(LocalUdpPort, self()) of
         {ok, UdpPid} ->
-            init_tun(UdpPid, TunName, TunIp, RemoteIp, RemoteUdpPort);
+            init_tun(UdpPid, TunName, TunIp, Mode, RemoteIp, RemoteUdpPort);
         {error, Reason} ->
             {stop, Reason}
     end.
@@ -44,8 +47,9 @@ handle_info({vpn_tun_packet, TunPid, Packet},
             State = #{tun_pid := TunPid,
                       udp_pid := UdpPid,
                       remote_ip := RemoteIp,
-                      remote_udp_port := RemoteUdpPort}) ->
-    Kind = packet_kind(Packet),
+                      remote_udp_port := RemoteUdpPort,
+                      mode := Mode}) ->
+    Kind = packet_kind(Packet, Mode),
     Size = byte_size(Packet),
     logger:info("vpn_link tun_rx kind=~p size=~p", [Kind, Size]),
     State1 = incr_counters(State, tun_rx_packets, tun_rx_bytes, Size),
@@ -62,8 +66,8 @@ handle_info({vpn_tun_packet, TunPid, Packet},
 handle_info({vpn_tun_packet, _OtherTunPid, _Packet}, State) ->
     {noreply, State};
 handle_info({vpn_udp_packet, UdpPid, Ip, Port, Packet},
-            State = #{udp_pid := UdpPid, tun_pid := TunPid}) ->
-    Kind = packet_kind(Packet),
+            State = #{udp_pid := UdpPid, tun_pid := TunPid, mode := Mode}) ->
+    Kind = packet_kind(Packet, Mode),
     Size = byte_size(Packet),
     logger:info("vpn_link udp_rx kind=~p from ~s:~p size=~p",
                 [Kind, format_ip(Ip), Port, Size]),
@@ -92,11 +96,12 @@ terminate(_Reason, State) ->
     stop_worker(maps:get(udp_pid, State, undefined), fun vpn_udp:stop/1),
     ok.
 
-init_tun(UdpPid, TunName, TunIp, RemoteIp, RemoteUdpPort) ->
-    case vpn_tun:start_link(TunName, TunIp, self()) of
+init_tun(UdpPid, TunName, TunIp, Mode, RemoteIp, RemoteUdpPort) ->
+    case vpn_tun:start_link(TunName, TunIp, self(), Mode) of
         {ok, TunPid} ->
             {ok, maps:merge(#{udp_pid => UdpPid,
                               tun_pid => TunPid,
+                              mode => Mode,
                               remote_ip => RemoteIp,
                               remote_udp_port => RemoteUdpPort},
                             zero_counters())};
@@ -146,7 +151,12 @@ incr_counters(State, PacketKey, ByteKey, Size) ->
     State#{PacketKey := maps:get(PacketKey, State) + 1,
            ByteKey := maps:get(ByteKey, State) + Size}.
 
-packet_kind(Packet) when byte_size(Packet) >= 14 ->
+packet_kind(Packet, tap) ->
+    ethernet_packet_kind(Packet);
+packet_kind(Packet, tun) ->
+    ip_packet_kind(Packet).
+
+ethernet_packet_kind(Packet) when byte_size(Packet) >= 14 ->
     case Packet of
         <<_:12/binary, 16#0806:16/big, _/binary>> ->
             arp;
@@ -157,7 +167,14 @@ packet_kind(Packet) when byte_size(Packet) >= 14 ->
         _ ->
             unknown
     end;
-packet_kind(_Packet) ->
+ethernet_packet_kind(_Packet) ->
+    unknown.
+
+ip_packet_kind(<<4:4, _/bitstring>> = Packet) ->
+    ipv4_packet_kind(Packet);
+ip_packet_kind(<<6:4, _/bitstring>>) ->
+    ipv6;
+ip_packet_kind(_Packet) ->
     unknown.
 
 ipv4_packet_kind(<<FirstByte, _:8/binary, Protocol, Rest/binary>>) ->
