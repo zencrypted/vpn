@@ -1,20 +1,29 @@
 %%%-------------------------------------------------------------------
-%% @doc Future TUN/TAP integration layer.
+%% @doc Thin TUN/TAP wrapper around tuncer.
 %%%-------------------------------------------------------------------
 -module(vpn_tun).
 
--export([open/1, close/1, read/1, write/2]).
+-export([open/2, close/1, devname/1]).
 
-%% TODO: Add tunctl integration here when the TUN/TAP layer is implemented.
+open(Name, Ip) ->
+    case tuncer:create(Name, [tap, no_pi, {active, true}]) of
+        {ok, Ref} ->
+            up_or_destroy(Ref, Ip);
+        {error, Reason} ->
+            {error, Reason}
+    end.
 
-open(_Options) ->
-    {error, not_implemented}.
+close(Ref) ->
+    tuncer:destroy(Ref).
 
-close(_Tun) ->
-    {error, not_implemented}.
+devname(Ref) ->
+    tuncer:devname(Ref).
 
-read(_Tun) ->
-    {error, not_implemented}.
-
-write(_Tun, _Packet) ->
-    {error, not_implemented}.
+up_or_destroy(Ref, Ip) ->
+    case tuncer:up(Ref, Ip) of
+        ok ->
+            {ok, Ref};
+        {error, Reason} ->
+            _ = tuncer:destroy(Ref),
+            {error, Reason}
+    end.
