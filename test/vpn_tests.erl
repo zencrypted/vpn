@@ -2,8 +2,12 @@
 
 -include_lib("eunit/include/eunit.hrl").
 
-api_stubs_test() ->
-    ?assertMatch({error, not_implemented}, vpn_peer:new([])).
+vpn_peer_exports_test() ->
+    ?assertMatch({module, vpn_peer}, code:ensure_loaded(vpn_peer)),
+    ?assert(erlang:function_exported(vpn_peer, start_link, 1)),
+    ?assert(erlang:function_exported(vpn_peer, stop, 1)),
+    ?assert(erlang:function_exported(vpn_peer, stats, 1)),
+    ?assert(erlang:function_exported(vpn_peer, reset_stats, 1)).
 
 vpn_tun_exports_test() ->
     ?assertMatch({module, vpn_tun}, code:ensure_loaded(vpn_tun)),

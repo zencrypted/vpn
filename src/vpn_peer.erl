@@ -1,18 +1,115 @@
 %%%-------------------------------------------------------------------
-%% @doc Future peer/session abstraction.
+%% @doc Runtime peer abstraction over vpn_link.
 %%%-------------------------------------------------------------------
 -module(vpn_peer).
 
--export([new/1, connect/1, disconnect/1, status/1]).
+-behaviour(gen_server).
 
-new(_Options) ->
-    {error, not_implemented}.
+-export([start_link/1, stop/1, stats/1, reset_stats/1]).
+-export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
-connect(_Peer) ->
-    {error, not_implemented}.
+start_link(Config) ->
+    gen_server:start_link(?MODULE, Config, []).
 
-disconnect(_Peer) ->
-    {error, not_implemented}.
+stop(Pid) ->
+    gen_server:stop(Pid).
 
-status(_Peer) ->
-    {error, not_implemented}.
+stats(Pid) ->
+    gen_server:call(Pid, stats).
+
+reset_stats(Pid) ->
+    gen_server:call(Pid, reset_stats).
+
+init(Config) ->
+    process_flag(trap_exit, true),
+    case validate_config(Config) of
+        ok ->
+            start_link_from_config(Config);
+        {error, Reason} ->
+            {stop, Reason}
+    end.
+
+handle_call(stats, _From, State = #{id := Id,
+                                    config := Config,
+                                    link_pid := LinkPid}) ->
+    LinkStats = vpn_link:stats(LinkPid),
+    {reply, #{id => Id, config => Config, link => LinkStats}, State};
+handle_call(reset_stats, _From, State = #{link_pid := LinkPid}) ->
+    {reply, vpn_link:reset_stats(LinkPid), State};
+handle_call(_Request, _From, State) ->
+    {reply, {error, not_implemented}, State}.
+
+handle_cast(_Request, State) ->
+    {noreply, State}.
+
+handle_info({'EXIT', LinkPid, Reason}, State = #{link_pid := LinkPid}) ->
+    {stop, {link_exit, Reason}, State};
+handle_info(_Message, State) ->
+    {noreply, State}.
+
+terminate(_Reason, State) ->
+    stop_link(maps:get(link_pid, State, undefined)),
+    ok.
+
+start_link_from_config(Config) ->
+    Id = maps:get(id, Config),
+    Mode = maps:get(mode, Config),
+    IfName = maps:get(ifname, Config),
+    Ip = maps:get(ip, Config),
+    LocalUdpPort = maps:get(local_udp_port, Config),
+    RemoteIp = maps:get(remote_ip, Config),
+    RemoteUdpPort = maps:get(remote_udp_port, Config),
+    case vpn_link:start_link(IfName, Ip, Mode, LocalUdpPort, RemoteIp, RemoteUdpPort) of
+        {ok, LinkPid} ->
+            {ok, #{id => Id, config => Config, link_pid => LinkPid}};
+        {error, Reason} ->
+            {stop, Reason}
+    end.
+
+validate_config(Config) when is_map(Config) ->
+    case missing_key(Config) of
+        none ->
+            validate_mode(maps:get(mode, Config));
+        {missing, Key} ->
+            {error, {missing_config_key, Key}}
+    end;
+validate_config(_Config) ->
+    {error, invalid_config}.
+
+missing_key(Config) ->
+    Required = [id,
+                mode,
+                ifname,
+                ip,
+                local_udp_port,
+                remote_ip,
+                remote_udp_port],
+    missing_key(Config, Required).
+
+missing_key(_Config, []) ->
+    none;
+missing_key(Config, [Key | Rest]) ->
+    case maps:is_key(Key, Config) of
+        true ->
+            missing_key(Config, Rest);
+        false ->
+            {missing, Key}
+    end.
+
+validate_mode(tap) ->
+    ok;
+validate_mode(tun) ->
+    ok;
+validate_mode(Mode) ->
+    {error, {invalid_mode, Mode}}.
+
+stop_link(undefined) ->
+    ok;
+stop_link(LinkPid) ->
+    case is_process_alive(LinkPid) of
+        true ->
+            _ = vpn_link:stop(LinkPid),
+            ok;
+        false ->
+            ok
+    end.
