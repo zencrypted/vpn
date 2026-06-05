@@ -1,5 +1,5 @@
 %%%-------------------------------------------------------------------
-%% @doc One-way TUN to UDP link.
+%% @doc Bidirectional TUN to UDP link.
 %%%-------------------------------------------------------------------
 -module(vpn_link).
 
@@ -17,7 +17,7 @@ stop(Pid) ->
 
 init({TunName, TunIp, LocalUdpPort, RemoteIp, RemoteUdpPort}) ->
     process_flag(trap_exit, true),
-    case vpn_udp:start_link(LocalUdpPort) of
+    case vpn_udp:start_link(LocalUdpPort, self()) of
         {ok, UdpPid} ->
             init_tun(UdpPid, TunName, TunIp, RemoteIp, RemoteUdpPort);
         {error, Reason} ->
@@ -45,6 +45,20 @@ handle_info({vpn_tun_packet, TunPid, Packet},
             {noreply, State}
     end;
 handle_info({vpn_tun_packet, _OtherTunPid, _Packet}, State) ->
+    {noreply, State};
+handle_info({vpn_udp_packet, UdpPid, Ip, Port, Packet},
+            State = #{udp_pid := UdpPid, tun_pid := TunPid}) ->
+    case vpn_tun:write(TunPid, Packet) of
+        ok ->
+            logger:info("vpn_link wrote UDP packet from ~p:~p to TUN: ~p bytes",
+                        [Ip, Port, byte_size(Packet)]),
+            {noreply, State};
+        {error, Reason} ->
+            logger:error("vpn_link failed to write UDP packet to TUN: ~p",
+                         [Reason]),
+            {noreply, State}
+    end;
+handle_info({vpn_udp_packet, _OtherUdpPid, _Ip, _Port, _Packet}, State) ->
     {noreply, State};
 handle_info({'EXIT', TunPid, Reason}, State = #{tun_pid := TunPid}) ->
     {stop, {tun_exit, Reason}, State};

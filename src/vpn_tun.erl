@@ -5,7 +5,7 @@
 
 -behaviour(gen_server).
 
--export([open/2, close/1, devname/1]).
+-export([open/2, close/1, devname/1, write/2]).
 -export([start_link/2, start_link/3, stop/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
@@ -32,14 +32,24 @@ start_link(Name, Ip, OwnerPid) ->
 stop(Pid) ->
     gen_server:stop(Pid).
 
+write(Pid, Packet) when is_binary(Packet) ->
+    gen_server:call(Pid, {write, Packet}).
+
 init({Name, Ip, OwnerPid}) ->
     case open(Name, Ip) of
         {ok, Ref} ->
-            {ok, #{ref => Ref, name => Name, ip => Ip, owner => OwnerPid}};
+            Fd = tuncer:getfd(Ref),
+            {ok, #{ref => Ref,
+                   fd => Fd,
+                   name => Name,
+                   ip => Ip,
+                   owner => OwnerPid}};
         {error, Reason} ->
             {stop, Reason}
     end.
 
+handle_call({write, Packet}, _From, State = #{fd := Fd}) ->
+    {reply, normalize_write_reply(tuncer:write(Fd, Packet)), State};
 handle_call(_Request, _From, State) ->
     {reply, {error, not_implemented}, State}.
 
@@ -75,3 +85,10 @@ maybe_send_packet(_Packet, #{owner := undefined}) ->
 maybe_send_packet(Packet, #{owner := OwnerPid}) ->
     OwnerPid ! {vpn_tun_packet, self(), Packet},
     ok.
+
+normalize_write_reply(ok) ->
+    ok;
+normalize_write_reply({error, Reason}) ->
+    {error, Reason};
+normalize_write_reply({ok, Size}) ->
+    {error, {partial_write, Size}}.

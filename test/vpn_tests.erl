@@ -10,6 +10,7 @@ vpn_tun_exports_test() ->
     ?assert(erlang:function_exported(vpn_tun, open, 2)),
     ?assert(erlang:function_exported(vpn_tun, close, 1)),
     ?assert(erlang:function_exported(vpn_tun, devname, 1)),
+    ?assert(erlang:function_exported(vpn_tun, write, 2)),
     ?assert(erlang:function_exported(vpn_tun, start_link, 2)),
     ?assert(erlang:function_exported(vpn_tun, start_link, 3)),
     ?assert(erlang:function_exported(vpn_tun, stop, 1)).
