@@ -112,6 +112,97 @@ ipv6
 unknown
 ```
 
+## TUN Mode Validation
+
+### 1. Start shell
+
+```sh
+rebar3 shell
+```
+
+### 2. Start endpoint B
+
+```erlang
+{ok, B} =
+    vpn_link:start_link(
+        <<"tun1">>,
+        "10.20.20.2",
+        tun,
+        5556,
+        {127,0,0,1},
+        5555).
+```
+
+### 3. Start endpoint A
+
+```erlang
+{ok, A} =
+    vpn_link:start_link(
+        <<"tun0">>,
+        "10.20.20.1",
+        tun,
+        5555,
+        {127,0,0,1},
+        5556).
+```
+
+### 4. Reset counters
+
+```erlang
+vpn_link:reset_stats(A).
+vpn_link:reset_stats(B).
+```
+
+### 5. Run validation ping
+
+```sh
+ping -4 -c 10 10.20.20.2
+```
+
+Expected result:
+
+```text
+10 packets transmitted
+10 packets received
+0% packet loss
+```
+
+### 6. Inspect statistics
+
+```erlang
+vpn_link:stats(A).
+vpn_link:stats(B).
+```
+
+Example healthy result:
+
+```erlang
+#{
+  tun_rx_packets => N,
+  udp_tx_packets => N,
+  udp_rx_packets => N,
+  tun_tx_packets => N
+}
+```
+
+Packet counters should be approximately symmetric between both endpoints.
+
+### 7. Packet diagnostics
+
+Current packet classification:
+
+```text
+arp
+ipv4_icmp_echo_request
+ipv4_icmp_echo_reply
+ipv4_udp
+ipv4_other
+ipv6
+unknown
+```
+
+Diagnostics are intended for tunnel validation and troubleshooting.
+
 ## Notes
 
 - No Elixir.
