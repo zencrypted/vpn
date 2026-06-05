@@ -6,7 +6,7 @@
 -behaviour(gen_server).
 
 -export([open/2, close/1, devname/1]).
--export([start_link/2, stop/1]).
+-export([start_link/2, start_link/3, stop/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 open(Name, Ip) ->
@@ -24,15 +24,18 @@ devname(Ref) ->
     tuncer:devname(Ref).
 
 start_link(Name, Ip) ->
-    gen_server:start_link(?MODULE, {Name, Ip}, []).
+    start_link(Name, Ip, undefined).
+
+start_link(Name, Ip, OwnerPid) ->
+    gen_server:start_link(?MODULE, {Name, Ip, OwnerPid}, []).
 
 stop(Pid) ->
     gen_server:stop(Pid).
 
-init({Name, Ip}) ->
+init({Name, Ip, OwnerPid}) ->
     case open(Name, Ip) of
         {ok, Ref} ->
-            {ok, #{ref => Ref, name => Name, ip => Ip}};
+            {ok, #{ref => Ref, name => Name, ip => Ip, owner => OwnerPid}};
         {error, Reason} ->
             {stop, Reason}
     end.
@@ -45,6 +48,7 @@ handle_cast(_Request, State) ->
 
 handle_info({tuntap, Ref, Packet}, State = #{ref := Ref}) ->
     logger:info("vpn_tun received packet: ~p bytes", [byte_size(Packet)]),
+    maybe_send_packet(Packet, State),
     {noreply, State};
 handle_info({tuntap, _OtherRef, _Packet}, State) ->
     {noreply, State};
@@ -65,3 +69,9 @@ up_or_destroy(Ref, Ip) ->
             _ = tuncer:destroy(Ref),
             {error, Reason}
     end.
+
+maybe_send_packet(_Packet, #{owner := undefined}) ->
+    ok;
+maybe_send_packet(Packet, #{owner := OwnerPid}) ->
+    OwnerPid ! {vpn_tun_packet, self(), Packet},
+    ok.
