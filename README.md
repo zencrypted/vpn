@@ -14,6 +14,20 @@ The current local validation path is:
 TUN/TAP <-> Erlang <-> UDP <-> Erlang <-> TUN/TAP
 ```
 
+Runtime layering:
+
+```text
+vpn_peer
+    |
+vpn_link
+    |
+vpn_udp
+vpn_tun
+```
+
+`vpn_peer` is the stable public runtime API. `vpn_link` is a lower-level
+transport component.
+
 X.509 PKI integration is expected to use `synrc/ca` in a later milestone.
 
 ## Modules
@@ -25,7 +39,7 @@ X.509 PKI integration is expected to use `synrc/ca` in a later milestone.
 - `vpn_udp` - UDP transport worker.
 - `vpn_link` - bidirectional TUN/TAP to UDP link.
 - `vpn_udp_sink` - local UDP test sink.
-- `vpn_peer` - future peer/session abstraction.
+- `vpn_peer` - public runtime peer abstraction.
 
 ## Build
 
@@ -37,6 +51,66 @@ rebar3 compile
 
 ```sh
 rebar3 eunit
+```
+
+## Peer-Based Validation
+
+Use `vpn_peer` for runtime validation. It owns the peer config and wraps the
+lower-level `vpn_link`.
+
+```erlang
+PeerB = #{
+    id => peer_b,
+    mode => tun,
+    ifname => <<"tun1">>,
+    ip => "10.20.20.2",
+    local_udp_port => 5556,
+    remote_ip => {127,0,0,1},
+    remote_udp_port => 5555
+}.
+
+PeerA = #{
+    id => peer_a,
+    mode => tun,
+    ifname => <<"tun0">>,
+    ip => "10.20.20.1",
+    local_udp_port => 5555,
+    remote_ip => {127,0,0,1},
+    remote_udp_port => 5556
+}.
+```
+
+Start both peers and reset counters:
+
+```erlang
+{ok, B} = vpn_peer:start_link(PeerB).
+{ok, A} = vpn_peer:start_link(PeerA).
+
+vpn_peer:reset_stats(A).
+vpn_peer:reset_stats(B).
+```
+
+Run validation ping from another terminal:
+
+```sh
+ping -4 -c 10 10.20.20.2
+```
+
+Inspect peer statistics:
+
+```erlang
+vpn_peer:stats(A).
+vpn_peer:stats(B).
+```
+
+Returned statistics include peer metadata and link counters:
+
+```erlang
+#{
+    id => PeerId,
+    config => Config,
+    link => LinkStats
+}
 ```
 
 ## Local Tunnel Validation
