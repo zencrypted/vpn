@@ -48,6 +48,11 @@ vpn_crypto_exports_test() ->
     ?assert(erlang:function_exported(vpn_crypto, encode, 2)),
     ?assert(erlang:function_exported(vpn_crypto, decode, 2)).
 
+vpn_frame_exports_test() ->
+    ?assertMatch({module, vpn_frame}, code:ensure_loaded(vpn_frame)),
+    ?assert(erlang:function_exported(vpn_frame, encode, 3)),
+    ?assert(erlang:function_exported(vpn_frame, decode, 1)).
+
 vpn_udp_sink_exports_test() ->
     ?assertMatch({module, vpn_udp_sink}, code:ensure_loaded(vpn_udp_sink)),
     ?assert(erlang:function_exported(vpn_udp_sink, start_link, 1)),

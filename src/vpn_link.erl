@@ -58,12 +58,11 @@ handle_info({vpn_tun_packet, _OtherTunPid, _Packet}, State) ->
     {noreply, State};
 handle_info({vpn_udp_packet, UdpPid, Ip, Port, Packet},
             State = #{udp_pid := UdpPid, tun_pid := TunPid, mode := Mode}) ->
-    Kind = packet_kind(Packet, Mode),
     Size = byte_size(Packet),
-    logger:info("vpn_link udp_rx kind=~p from ~s:~p size=~p",
-                [Kind, format_ip(Ip), Port, Size]),
+    logger:info("vpn_link udp_rx from ~s:~p size=~p",
+                [format_ip(Ip), Port, Size]),
     State1 = incr_counters(State, udp_rx_packets, udp_rx_bytes, Size),
-    decode_and_write(Packet, Kind, Size, TunPid, State1);
+    decode_and_write(Packet, Mode, TunPid, State1);
 handle_info({vpn_udp_packet, _OtherUdpPid, _Ip, _Port, _Packet}, State) ->
     {noreply, State};
 handle_info({'EXIT', TunPid, Reason}, State = #{tun_pid := TunPid}) ->
@@ -85,6 +84,8 @@ init_tun(UdpPid, TunName, TunIp, Mode, RemoteIp, RemoteUdpPort) ->
                               tun_pid => TunPid,
                               mode => Mode,
                               crypto => vpn_crypto:new(),
+                              tx_seq => 0,
+                              rx_seq => 0,
                               remote_ip => RemoteIp,
                               remote_udp_port => RemoteUdpPort},
                             zero_counters())};
@@ -110,11 +111,13 @@ encode_and_send(Packet,
                 UdpPid,
                 RemoteIp,
                 RemoteUdpPort,
-                State = #{crypto := Crypto0}) ->
-    case vpn_crypto:encode(Packet, Crypto0) of
+                State = #{crypto := Crypto0, tx_seq := Seq}) ->
+    Frame = vpn_frame:encode(undefined, Seq, Packet),
+    logger:debug("vpn_frame tx seq=~p", [Seq]),
+    case vpn_crypto:encode(Frame, Crypto0) of
         {ok, EncodedPacket, Crypto1} ->
             State1 = State#{crypto := Crypto1},
-            send_encoded(EncodedPacket, Kind, Size, UdpPid, RemoteIp, RemoteUdpPort, State1);
+            send_encoded(EncodedPacket, Kind, Size, Seq, UdpPid, RemoteIp, RemoteUdpPort, State1);
         {error, Reason, Crypto1} ->
             logger:error("vpn_link failed to encode packet: ~p", [Reason]),
             {noreply, State#{crypto := Crypto1}};
@@ -123,28 +126,41 @@ encode_and_send(Packet,
             {noreply, State}
     end.
 
-send_encoded(EncodedPacket, Kind, Size, UdpPid, RemoteIp, RemoteUdpPort, State) ->
+send_encoded(EncodedPacket, Kind, Size, Seq, UdpPid, RemoteIp, RemoteUdpPort, State) ->
     case vpn_udp:send(UdpPid, RemoteIp, RemoteUdpPort, EncodedPacket) of
         ok ->
             logger:info("vpn_link udp_tx kind=~p to ~s:~p size=~p",
                         [Kind, format_ip(RemoteIp), RemoteUdpPort, Size]),
             State1 = incr_counters(State, udp_tx_packets, udp_tx_bytes, Size),
-            {noreply, State1};
+            {noreply, State1#{tx_seq := Seq + 1}};
         {error, Reason} ->
             logger:error("vpn_link failed to forward packet: ~p", [Reason]),
             {noreply, State}
     end.
 
-decode_and_write(Packet, Kind, Size, TunPid, State = #{crypto := Crypto0}) ->
+decode_and_write(Packet, Mode, TunPid, State = #{crypto := Crypto0}) ->
     case vpn_crypto:decode(Packet, Crypto0) of
-        {ok, DecodedPacket, Crypto1} ->
+        {ok, DecodedFrame, Crypto1} ->
             State1 = State#{crypto := Crypto1},
-            write_decoded(DecodedPacket, Kind, Size, TunPid, State1);
+            decode_frame_and_write(DecodedFrame, Mode, TunPid, State1);
         {error, Reason, Crypto1} ->
             logger:error("vpn_link failed to decode packet: ~p", [Reason]),
             {noreply, State#{crypto := Crypto1}};
         {error, Reason} ->
             logger:error("vpn_link failed to decode packet: ~p", [Reason]),
+            {noreply, State}
+    end.
+
+decode_frame_and_write(DecodedFrame, Mode, TunPid, State) ->
+    case vpn_frame:decode(DecodedFrame) of
+        {ok, #{seq := Seq, payload := DecodedPacket}} ->
+            logger:debug("vpn_frame rx seq=~p", [Seq]),
+            State1 = State#{rx_seq := Seq},
+            Kind = packet_kind(DecodedPacket, Mode),
+            Size = byte_size(DecodedPacket),
+            write_decoded(DecodedPacket, Kind, Size, TunPid, State1);
+        {error, Reason} ->
+            logger:error("vpn_link failed to decode frame: ~p", [Reason]),
             {noreply, State}
     end.
 
