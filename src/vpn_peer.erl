@@ -5,7 +5,7 @@
 
 -behaviour(gen_server).
 
--export([start_link/1, stop/1, stats/1, reset_stats/1]).
+-export([start_link/1, stop/1, stats/1, reset_stats/1, identity/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 start_link(Config) ->
@@ -19,6 +19,9 @@ stats(Pid) ->
 
 reset_stats(Pid) ->
     gen_server:call(Pid, reset_stats).
+
+identity(Pid) ->
+    gen_server:call(Pid, identity).
 
 init(Config) ->
     process_flag(trap_exit, true),
@@ -36,6 +39,8 @@ handle_call(stats, _From, State = #{id := Id,
     {reply, #{id => Id, config => Config, link => LinkStats}, State};
 handle_call(reset_stats, _From, State = #{link_pid := LinkPid}) ->
     {reply, vpn_link:reset_stats(LinkPid), State};
+handle_call(identity, _From, State = #{identity := Identity}) ->
+    {reply, Identity, State};
 handle_call(_Request, _From, State) ->
     {reply, {error, not_implemented}, State}.
 
@@ -59,9 +64,13 @@ start_link_from_config(Config) ->
     LocalUdpPort = maps:get(local_udp_port, Config),
     RemoteIp = maps:get(remote_ip, Config),
     RemoteUdpPort = maps:get(remote_udp_port, Config),
+    Identity = identity_from_config(Config),
     case vpn_link:start_link(IfName, Ip, Mode, LocalUdpPort, RemoteIp, RemoteUdpPort) of
         {ok, LinkPid} ->
-            {ok, #{id => Id, config => Config, link_pid => LinkPid}};
+            {ok, #{id => Id,
+                   config => Config,
+                   identity => Identity,
+                   link_pid => LinkPid}};
         {error, Reason} ->
             {stop, Reason}
     end.
@@ -102,6 +111,12 @@ validate_mode(tun) ->
     ok;
 validate_mode(Mode) ->
     {error, {invalid_mode, Mode}}.
+
+identity_from_config(Config) ->
+    #{id => maps:get(id, Config),
+      name => maps:get(name, Config, undefined),
+      certificate_path => maps:get(certificate_path, Config, undefined),
+      private_key_path => maps:get(private_key_path, Config, undefined)}.
 
 stop_link(undefined) ->
     ok;
