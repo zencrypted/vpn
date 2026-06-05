@@ -99,16 +99,18 @@ ping -4 -c 10 10.20.20.2
 Inspect peer statistics:
 
 ```erlang
+vpn_peer:identity(A).
+vpn_peer:config(A).
 vpn_peer:stats(A).
 vpn_peer:stats(B).
 ```
 
-Returned statistics include peer metadata and link counters:
+`identity/1` returns identity metadata, `config/1` returns operational
+configuration without certificate paths, and `stats/1` returns runtime counters:
 
 ```erlang
 #{
     id => PeerId,
-    config => Config,
     link => LinkStats
 }
 ```

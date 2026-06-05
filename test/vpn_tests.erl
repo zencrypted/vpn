@@ -8,7 +8,8 @@ vpn_peer_exports_test() ->
     ?assert(erlang:function_exported(vpn_peer, stop, 1)),
     ?assert(erlang:function_exported(vpn_peer, stats, 1)),
     ?assert(erlang:function_exported(vpn_peer, reset_stats, 1)),
-    ?assert(erlang:function_exported(vpn_peer, identity, 1)).
+    ?assert(erlang:function_exported(vpn_peer, identity, 1)),
+    ?assert(erlang:function_exported(vpn_peer, config, 1)).
 
 vpn_tun_exports_test() ->
     ?assertMatch({module, vpn_tun}, code:ensure_loaded(vpn_tun)),
