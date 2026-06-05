@@ -70,6 +70,7 @@ start_link_from_config(Config) ->
     Identity = identity_from_config(Config),
     case vpn_link:start_link(IfName, Ip, Mode, LocalUdpPort, RemoteIp, RemoteUdpPort) of
         {ok, LinkPid} ->
+            logger:info("vpn_peer started: ~p", [Id]),
             {ok, #{id => Id,
                    config => Config,
                    identity => Identity,

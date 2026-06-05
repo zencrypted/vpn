@@ -19,5 +19,12 @@ init([]) ->
         intensity => 1,
         period => 5
     },
-    ChildSpecs = [],
+    ChildSpecs = [
+        #{id => vpn_peer_sup,
+          start => {vpn_peer_sup, start_link, []},
+          restart => permanent,
+          shutdown => infinity,
+          type => supervisor,
+          modules => [vpn_peer_sup]}
+    ],
     {ok, {SupFlags, ChildSpecs}}.

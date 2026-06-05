@@ -115,6 +115,58 @@ configuration without certificate paths, and `stats/1` returns runtime counters:
 }
 ```
 
+## Config Driven Startup
+
+Peers can be started from application configuration. Add `peers` under the `vpn`
+application environment:
+
+```erlang
+{vpn, [
+    {peers, [
+        #{
+            id => peer_a,
+            name => <<"Peer A">>,
+            mode => tun,
+            ifname => <<"tun0">>,
+            ip => "10.20.20.1",
+            local_udp_port => 5555,
+            remote_ip => {127,0,0,1},
+            remote_udp_port => 5556,
+            certificate_path => "priv/certs/peer_a.crt",
+            private_key_path => "priv/certs/peer_a.key"
+        },
+        #{
+            id => peer_b,
+            mode => tun,
+            ifname => <<"tun1">>,
+            ip => "10.20.20.2",
+            local_udp_port => 5556,
+            remote_ip => {127,0,0,1},
+            remote_udp_port => 5555
+        }
+    ]}
+]}.
+```
+
+When the application starts, `vpn_peer_sup` reads:
+
+```erlang
+application:get_env(vpn, peers, []).
+```
+
+Then it starts and supervises one `vpn_peer` child per config entry. With no
+configured peers, the application boots normally.
+
+Start the shell and inspect configured children:
+
+```sh
+rebar3 shell
+```
+
+```erlang
+supervisor:which_children(vpn_peer_sup).
+```
+
 ## Local Tunnel Validation
 
 The Erlang VM must have permission to create and configure TAP interfaces. Give
