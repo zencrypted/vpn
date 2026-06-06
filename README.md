@@ -62,6 +62,7 @@ lower-level `vpn_link`.
 PeerB = #{
     id => peer_b,
     remote_peer_id => peer_a,
+    psk => <<"0123456789abcdef0123456789abcdef">>,
     mode => tun,
     ifname => <<"tun1">>,
     ip => "10.20.20.2",
@@ -73,6 +74,7 @@ PeerB = #{
 PeerA = #{
     id => peer_a,
     remote_peer_id => peer_b,
+    psk => <<"0123456789abcdef0123456789abcdef">>,
     mode => tun,
     ifname => <<"tun0">>,
     ip => "10.20.20.1",
@@ -129,6 +131,7 @@ application environment:
             id => peer_a,
             name => <<"Peer A">>,
             remote_peer_id => peer_b,
+            psk => <<"0123456789abcdef0123456789abcdef">>,
             mode => tun,
             ifname => <<"tun0">>,
             ip => "10.20.20.1",
@@ -141,6 +144,7 @@ application environment:
         #{
             id => peer_b,
             remote_peer_id => peer_a,
+            psk => <<"0123456789abcdef0123456789abcdef">>,
             mode => tun,
             ifname => <<"tun1">>,
             ip => "10.20.20.2",
