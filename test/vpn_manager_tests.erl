@@ -25,6 +25,42 @@ read_api_test_() ->
               ?_assertEqual({error, not_found}, vpn_manager:find_peer(unknown_peer))]
      end}.
 
+status_test_() ->
+    {setup,
+     fun start_peer_sup/0,
+     fun stop_peer_sup/1,
+     fun(_SupPid) ->
+             [?_test(begin
+                          ?assertEqual([peer_a, peer_b], vpn_manager:list_peers()),
+                          ?assertMatch(#{configured := [peer_a, peer_b],
+                                         running := [peer_a, peer_b],
+                                         peers := #{peer_a := #{running := true,
+                                                               identity := #{peer_id := peer_a},
+                                                               stats := #{id := peer_a}},
+                                                    peer_b := #{running := true}}},
+                                       vpn_manager:status()),
+                          ?assertMatch(#{running := true,
+                                         identity := #{peer_id := peer_a},
+                                         config := #{id := peer_a},
+                                         stats := #{id := peer_a}},
+                                       vpn_manager:peer_status(peer_a)),
+                          ?assertEqual(ok, vpn_manager:stop_peer(peer_a)),
+                          ?assertEqual(#{running => false}, vpn_manager:peer_status(peer_a)),
+                          ?assertMatch(#{configured := [peer_a, peer_b],
+                                         running := [peer_b],
+                                         peers := #{peer_a := #{running := false},
+                                                    peer_b := #{running := true}}},
+                                       vpn_manager:status()),
+                          application:set_env(vpn, peers, [peer_config(peer_b),
+                                                           peer_config(peer_c)]),
+                          ?assertMatch(#{configured := [peer_b, peer_c],
+                                         running := [peer_b],
+                                         peers := #{peer_b := #{running := true},
+                                                    peer_c := #{running := false}}},
+                                       vpn_manager:status())
+                      end)]
+     end}.
+
 lifecycle_test_() ->
     {setup,
      fun start_peer_sup/0,

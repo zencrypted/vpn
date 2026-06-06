@@ -5,6 +5,8 @@
 
 -export([list_peers/0,
          running_peers/0,
+         status/0,
+         peer_status/1,
          peer_info/1,
          peer_stats/1,
          start_peer/1,
@@ -18,6 +20,21 @@ list_peers() ->
 
 running_peers() ->
     running_peer_ids().
+
+status() ->
+    Configured = list_peers(),
+    Running = running_peers(),
+    #{configured => Configured,
+      running => Running,
+      peers => maps:from_list([{PeerId, peer_status(PeerId)} || PeerId <- Configured])}.
+
+peer_status(PeerId) ->
+    case lists:member(PeerId, running_peers()) of
+        true ->
+            running_peer_status(PeerId);
+        false ->
+            #{running => false}
+    end.
 
 peer_info(PeerId) ->
     case find_peer(PeerId) of
@@ -35,6 +52,24 @@ peer_stats(PeerId) ->
             vpn_peer:stats(Pid);
         {error, not_found} ->
             {error, not_found}
+    end.
+
+running_peer_status(PeerId) ->
+    case peer_info(PeerId) of
+        #{identity := Identity, config := Config} ->
+            case peer_stats(PeerId) of
+                #{id := _PeerId} = Stats ->
+                    #{running => true,
+                      identity => Identity,
+                      config => Config,
+                      stats => Stats};
+                {error, Reason} ->
+                    #{running => false,
+                      error => Reason}
+            end;
+        {error, Reason} ->
+            #{running => false,
+              error => Reason}
     end.
 
 reload_config() ->

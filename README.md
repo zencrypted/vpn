@@ -65,6 +65,8 @@ intended to become the backend surface for the future N2O/EXO admin UI.
 ```erlang
 vpn_manager:list_peers().
 vpn_manager:running_peers().
+vpn_manager:status().
+vpn_manager:peer_status(peer_a).
 vpn_manager:peer_info(peer_a).
 vpn_manager:peer_stats(peer_a).
 
@@ -75,6 +77,15 @@ vpn_manager:reload_config().
 
 `list_peers/0` returns configured peers from application config.
 `running_peers/0` returns currently active supervised peers.
+`status/0` returns an aggregate snapshot for dashboard consumers:
+
+```erlang
+#{
+    configured => [peer_a, peer_b],
+    running => [peer_a, peer_b],
+    peers => #{peer_a => #{running => true}}
+}
+```
 
 `peer_info/1` returns identity and operational config:
 
