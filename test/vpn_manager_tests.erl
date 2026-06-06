@@ -46,24 +46,30 @@ reload_config_test_() ->
      fun start_peer_sup/0,
      fun stop_peer_sup/1,
      fun(_SupPid) ->
-             application:set_env(vpn, peers, [peer_config(peer_b), peer_config(peer_c)]),
-             Reload1 = vpn_manager:reload_config(),
-             application:set_env(vpn, peers, [peer_config(peer_b),
-                                              peer_config(peer_c),
-                                              failing_peer_config(peer_fail)]),
-             Reload2 = vpn_manager:reload_config(),
-             [?_assertEqual(#{started => [peer_c],
-                              stopped => [peer_a],
-                              failed => [],
-                              unchanged => [peer_b]},
-                            Reload1),
-              ?_assertEqual([peer_b, peer_c], lists:sort(vpn_manager:running_peers())),
-              ?_assertEqual(#{started => [],
-                              stopped => [],
-                              failed => [{peer_fail, test_start_failed}],
-                              unchanged => [peer_b, peer_c]},
-                            Reload2),
-              ?_assertEqual([peer_b, peer_c], lists:sort(vpn_manager:running_peers()))]
+             [?_test(begin
+                          application:set_env(vpn, peers, [peer_config(peer_b),
+                                                           peer_config(peer_c)]),
+                          Reload1 = vpn_manager:reload_config(),
+                          ?assertEqual(#{started => [peer_c],
+                                         stopped => [peer_a],
+                                         failed => [],
+                                         unchanged => [peer_b]},
+                                       Reload1),
+                          ?assertEqual([peer_b, peer_c],
+                                       lists:sort(vpn_manager:running_peers())),
+
+                          application:set_env(vpn, peers, [peer_config(peer_b),
+                                                           peer_config(peer_c),
+                                                           failing_peer_config(peer_fail)]),
+                          Reload2 = vpn_manager:reload_config(),
+                          ?assertEqual(#{started => [],
+                                         stopped => [],
+                                         failed => [{peer_fail, test_start_failed}],
+                                         unchanged => [peer_b, peer_c]},
+                                       Reload2),
+                          ?assertEqual([peer_b, peer_c],
+                                       lists:sort(vpn_manager:running_peers()))
+                      end)]
      end}.
 
 start_peer_sup() ->
