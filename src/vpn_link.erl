@@ -13,15 +13,15 @@ start_link(TunName, TunIp, LocalUdpPort, RemoteIp, RemoteUdpPort) ->
     start_link(TunName, TunIp, tap, LocalUdpPort, RemoteIp, RemoteUdpPort).
 
 start_link(TunName, TunIp, Mode, LocalUdpPort, RemoteIp, RemoteUdpPort) ->
-    start_link(TunName,
-               TunIp,
-               Mode,
-               LocalUdpPort,
-               RemoteIp,
-               RemoteUdpPort,
-               undefined,
-               undefined,
-               default_psk()).
+    gen_server:start_link(?MODULE,
+                          {psk_required,
+                           TunName,
+                           TunIp,
+                           Mode,
+                           LocalUdpPort,
+                           RemoteIp,
+                           RemoteUdpPort},
+                          []).
 
 start_link(TunName,
            TunIp,
@@ -31,15 +31,17 @@ start_link(TunName,
            RemoteUdpPort,
            PeerId,
            RemotePeerId) ->
-    start_link(TunName,
-               TunIp,
-               Mode,
-               LocalUdpPort,
-               RemoteIp,
-               RemoteUdpPort,
-               PeerId,
-               RemotePeerId,
-               default_psk()).
+    gen_server:start_link(?MODULE,
+                          {psk_required,
+                           TunName,
+                           TunIp,
+                           Mode,
+                           LocalUdpPort,
+                           RemoteIp,
+                           RemoteUdpPort,
+                           PeerId,
+                           RemotePeerId},
+                          []).
 
 start_link(TunName,
            TunIp,
@@ -70,6 +72,10 @@ stats(Pid) ->
 reset_stats(Pid) ->
     gen_server:call(Pid, reset_stats).
 
+init({psk_required, _TunName, _TunIp, _Mode, _LocalUdpPort, _RemoteIp, _RemoteUdpPort}) ->
+    {stop, psk_required};
+init({psk_required, _TunName, _TunIp, _Mode, _LocalUdpPort, _RemoteIp, _RemoteUdpPort, _PeerId, _RemotePeerId}) ->
+    {stop, psk_required};
 init({TunName, TunIp, Mode, LocalUdpPort, RemoteIp, RemoteUdpPort, PeerId, RemotePeerId, Psk}) ->
     process_flag(trap_exit, true),
     case vpn_udp:start_link(LocalUdpPort, self()) of
@@ -341,6 +347,3 @@ format_ip({A, B, C, D}) ->
     io_lib:format("~B.~B.~B.~B", [A, B, C, D]);
 format_ip(Ip) ->
     io_lib:format("~p", [Ip]).
-
-default_psk() ->
-    <<"00000000000000000000000000000000">>.

@@ -3,19 +3,11 @@
 %%%-------------------------------------------------------------------
 -module(vpn_crypto).
 
--export([new/0, new/1, new/2, encode/2, decode/2]).
+-export([new/2, encode/2, decode/2]).
 
 -define(KEY_SIZE, 32).
 -define(NONCE_SIZE, 12).
 -define(TAG_SIZE, 16).
-
-new() ->
-    new(<<0:?KEY_SIZE/unit:8>>).
-
-new(Psk) when is_binary(Psk), byte_size(Psk) =:= ?KEY_SIZE ->
-    new(Psk, undefined);
-new(Psk) ->
-    erlang:error({invalid_psk, Psk}).
 
 new(Psk, PeerId) when is_binary(Psk), byte_size(Psk) =:= ?KEY_SIZE ->
     #{psk => Psk, peer_id => peer_id_to_binary(PeerId)};

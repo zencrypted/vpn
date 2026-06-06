@@ -3,7 +3,7 @@
   {vsn, "0.1.0"},
   {registered, []},
   {mod, {vpn_app, []}},
-  {applications, [kernel, stdlib, tunctl]},
+  {applications, [kernel, stdlib, crypto, tunctl]},
   {env, []},
   {modules, []},
   {licenses, ["MIT"]},
