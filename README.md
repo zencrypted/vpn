@@ -3,8 +3,8 @@
 VPN Overlay Network for the Zencrypted ecosystem.
 
 This repository currently contains a minimal Erlang/OTP VPN dataplane prototype.
-It intentionally does not implement encryption, peer/session management, or PKI
-logic yet.
+It currently uses a temporary PSK encrypted dataplane. It intentionally does not
+implement peer/session management, CA/PKI, or key exchange yet.
 
 ## Architecture
 
@@ -118,6 +118,64 @@ configuration without certificate paths, and `stats/1` returns runtime counters:
     link => LinkStats
 }
 ```
+
+## Encrypted PSK Dataplane
+
+Required peer config fields:
+
+```text
+id
+remote_peer_id
+psk
+mode
+ifname
+ip
+local_udp_port
+remote_ip
+remote_udp_port
+```
+
+Packet pipeline:
+
+```text
+TUN -> vpn_frame -> vpn_crypto -> UDP
+UDP -> vpn_crypto -> vpn_frame -> peer validation -> TUN
+```
+
+Successful validation:
+
+```sh
+rebar3 compile
+rebar3 eunit
+rebar3 shell
+ping -4 -c 10 10.20.20.2
+```
+
+Expected ping result:
+
+```text
+10 packets transmitted
+10 packets received
+0% packet loss
+```
+
+Expected link stats:
+
+```erlang
+#{
+    crypto_failures => 0,
+    frames_rejected => 0,
+    frames_accepted => N
+}
+```
+
+where `N > 0`.
+
+Negative PSK test: set different `psk` values for `peer_a` and `peer_b`.
+Expected result: ping fails and `crypto_failures` increases.
+
+The PSK is temporary and will later be replaced by CA/PKI-based key
+establishment.
 
 ## Config Driven Startup
 
@@ -344,4 +402,4 @@ Diagnostics are intended for tunnel validation and troubleshooting.
 - No Elixir.
 - No umbrella project.
 - No external framework dependencies.
-- No encryption or CA/PKI logic yet.
+- No CA/PKI logic or key exchange yet.
