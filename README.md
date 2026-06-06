@@ -42,6 +42,7 @@ certificates are signed by the local development CA fixture.
 - `vpn_link` - bidirectional TUN/TAP to UDP link.
 - `vpn_udp_sink` - local UDP test sink.
 - `vpn_peer` - public runtime peer abstraction.
+- `vpn_manager` - read-only management API for supervised peers.
 - `vpn_trust_store` - development CA certificate trust store.
 
 ## Build
@@ -54,6 +55,33 @@ rebar3 compile
 
 ```sh
 rebar3 eunit
+```
+
+## VPN Management API
+
+`vpn_manager` is the initial read-only management layer for supervised peers. It
+is intended to become the backend surface for the future N2O/EXO admin UI.
+
+```erlang
+vpn_manager:list_peers().
+vpn_manager:peer_info(peer_a).
+vpn_manager:peer_stats(peer_a).
+```
+
+`peer_info/1` returns identity and operational config:
+
+```erlang
+#{
+    id => peer_a,
+    identity => IdentityInfo,
+    config => Config
+}
+```
+
+Unknown peers return:
+
+```erlang
+{error, not_found}
 ```
 
 ## Peer-Based Validation
