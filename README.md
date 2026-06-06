@@ -126,6 +126,33 @@ untouched:
 The management API can start, stop, and reload configured peers. It does not
 create, delete, persist, or hot-update peer configuration yet.
 
+## Certificate Inventory
+
+`vpn_manager` exposes certificate inventory helpers for administration screens:
+
+```erlang
+vpn_manager:certificates().
+vpn_manager:certificate_info(peer_a).
+```
+
+An inventory entry includes runtime state and safe certificate metadata:
+
+```erlang
+#{
+    peer_id => peer_a,
+    running => true,
+    trusted => true,
+    key_match => true,
+    subject => Subject,
+    issuer => Issuer,
+    serial_number => Serial,
+    certificate_path => "priv/certs/peer_a.crt"
+}
+```
+
+The inventory uses already-loaded peer identity data for running peers. It does
+not re-read private keys or re-run trust validation for every request.
+
 ## Peer-Based Validation
 
 Use `vpn_peer` for runtime validation. It owns the peer config and wraps the

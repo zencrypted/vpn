@@ -25,6 +25,43 @@ read_api_test_() ->
               ?_assertEqual({error, not_found}, vpn_manager:find_peer(unknown_peer))]
      end}.
 
+certificate_inventory_test_() ->
+    {setup,
+     fun start_peer_sup/0,
+     fun stop_peer_sup/1,
+     fun(_SupPid) ->
+             [?_test(begin
+                          ?assertMatch(#{peer_id := peer_a,
+                                         running := true,
+                                         trusted := true,
+                                         key_match := true,
+                                         subject := {subject, peer_a},
+                                         issuer := {issuer, peer_a},
+                                         serial_number := 1001,
+                                         certificate_path := "priv/certs/peer_a.crt"},
+                                       vpn_manager:certificate_info(peer_a)),
+                          ?assertMatch(#{peer_id := peer_b,
+                                         running := true,
+                                         trusted := true,
+                                         key_match := true,
+                                         subject := {subject, peer_b},
+                                         issuer := {issuer, peer_b},
+                                         serial_number := 1002},
+                                       vpn_manager:certificate_info(peer_b)),
+                          ?assertEqual({error, not_found},
+                                       vpn_manager:certificate_info(unknown_peer)),
+                          Certificates = vpn_manager:certificates(),
+                          ?assertEqual([peer_a, peer_b],
+                                       lists:sort([maps:get(peer_id, Entry)
+                                                   || Entry <- Certificates])),
+                          ?assertEqual(ok, vpn_manager:stop_peer(peer_a)),
+                          ?assertMatch(#{peer_id := peer_a,
+                                         running := false,
+                                         certificate_path := "priv/certs/peer_a.crt"},
+                                       vpn_manager:certificate_info(peer_a))
+                      end)]
+     end}.
+
 status_test_() ->
     {setup,
      fun start_peer_sup/0,
@@ -36,7 +73,10 @@ status_test_() ->
                                          running := [peer_a, peer_b],
                                          peers := #{peer_a := #{running := true,
                                                                identity := #{peer_id := peer_a},
-                                                               stats := #{id := peer_a}},
+                                                               stats := #{id := peer_a},
+                                                               certificate := #{subject := {subject, peer_a},
+                                                                                trusted := true,
+                                                                                key_match := true}},
                                                     peer_b := #{running := true}}},
                                        vpn_manager:status()),
                           ?assertMatch(#{running := true,
@@ -139,7 +179,12 @@ init(Config) ->
 handle_call(identity_info, _From, State = #{id := PeerId}) ->
     {reply, #{peer_id => PeerId,
               certificate_path => "priv/certs/" ++ atom_to_list(PeerId) ++ ".crt",
-              private_key_path => "priv/certs/" ++ atom_to_list(PeerId) ++ ".key"},
+              private_key_path => "priv/certs/" ++ atom_to_list(PeerId) ++ ".key",
+              certificate => #{subject => {subject, PeerId},
+                               issuer => {issuer, PeerId},
+                               serial_number => serial_number(PeerId),
+                               not_before => {utcTime, "260606000000Z"},
+                               not_after => {utcTime, "270606000000Z"}}},
      State};
 handle_call(config, _From, State = #{id := PeerId, config := Config}) ->
     {reply, maps:with([id, mode, ifname, ip], Config#{id => PeerId}), State};
@@ -165,10 +210,18 @@ peer_config(PeerId) ->
       peer_module => ?MODULE,
       mode => tun,
       ifname => list_to_binary(atom_to_list(PeerId)),
-      ip => "10.20.20.1"}.
+      ip => "10.20.20.1",
+      certificate_path => "priv/certs/" ++ atom_to_list(PeerId) ++ ".crt"}.
 
 failing_peer_config(PeerId) ->
     (peer_config(PeerId))#{peer_module => vpn_manager_failing_peer}.
+
+serial_number(peer_a) ->
+    1001;
+serial_number(peer_b) ->
+    1002;
+serial_number(_PeerId) ->
+    9999.
 
 wait_until_stopped(_SupPid, 0) ->
     ok;

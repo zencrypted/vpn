@@ -7,6 +7,9 @@
          running_peers/0,
          status/0,
          peer_status/1,
+         certificates/0,
+         certificate_info/1,
+         certificate_status/1,
          peer_info/1,
          peer_stats/1,
          start_peer/1,
@@ -27,6 +30,25 @@ status() ->
     #{configured => Configured,
       running => Running,
       peers => maps:from_list([{PeerId, peer_status(PeerId)} || PeerId <- Configured])}.
+
+certificates() ->
+    [certificate_status(PeerId) || PeerId <- list_peers()].
+
+certificate_info(PeerId) ->
+    case lists:member(PeerId, list_peers()) of
+        true ->
+            certificate_status(PeerId);
+        false ->
+            {error, not_found}
+    end.
+
+certificate_status(PeerId) ->
+    case lists:member(PeerId, running_peers()) of
+        true ->
+            running_certificate_status(PeerId);
+        false ->
+            stopped_certificate_status(PeerId)
+    end.
 
 peer_status(PeerId) ->
     case lists:member(PeerId, running_peers()) of
@@ -62,7 +84,8 @@ running_peer_status(PeerId) ->
                     #{running => true,
                       identity => Identity,
                       config => Config,
-                      stats => Stats};
+                      stats => Stats,
+                      certificate => certificate_summary(Identity)};
                 {error, Reason} ->
                     #{running => false,
                       error => Reason}
@@ -71,6 +94,55 @@ running_peer_status(PeerId) ->
             #{running => false,
               error => Reason}
     end.
+
+running_certificate_status(PeerId) ->
+    case peer_info(PeerId) of
+        #{identity := Identity} ->
+            certificate_entry(PeerId, true, Identity);
+        {error, Reason} ->
+            #{peer_id => PeerId,
+              running => false,
+              error => Reason}
+    end.
+
+stopped_certificate_status(PeerId) ->
+    Base = #{peer_id => PeerId,
+             running => false},
+    case find_peer_config(PeerId) of
+        {ok, PeerConfig} ->
+            case maps:find(certificate_path, PeerConfig) of
+                {ok, CertificatePath} ->
+                    Base#{certificate_path => CertificatePath};
+                error ->
+                    Base
+            end;
+        {error, not_found} ->
+            Base#{error => not_found}
+    end.
+
+certificate_entry(PeerId, Running, Identity) ->
+    Certificate = maps:get(certificate, Identity, #{}),
+    #{peer_id => PeerId,
+      running => Running,
+      trusted => true,
+      key_match => true,
+      subject => maps:get(subject, Certificate, undefined),
+      issuer => maps:get(issuer, Certificate, undefined),
+      serial_number => maps:get(serial_number, Certificate, undefined),
+      not_before => maps:get(not_before, Certificate, undefined),
+      not_after => maps:get(not_after, Certificate, undefined),
+      certificate_path => maps:get(certificate_path, Identity, undefined)}.
+
+certificate_summary(Identity) ->
+    Certificate = maps:get(certificate, Identity, #{}),
+    #{trusted => true,
+      key_match => true,
+      subject => maps:get(subject, Certificate, undefined),
+      issuer => maps:get(issuer, Certificate, undefined),
+      serial_number => maps:get(serial_number, Certificate, undefined),
+      not_before => maps:get(not_before, Certificate, undefined),
+      not_after => maps:get(not_after, Certificate, undefined),
+      certificate_path => maps:get(certificate_path, Identity, undefined)}.
 
 reload_config() ->
     ConfiguredIds = configured_peer_ids(),
