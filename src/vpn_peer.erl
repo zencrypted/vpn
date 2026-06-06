@@ -46,7 +46,7 @@ handle_call(reset_stats, _From, State = #{link_pid := LinkPid}) ->
 handle_call(identity, _From, State = #{identity := Identity}) ->
     {reply, Identity, State};
 handle_call(identity_info, _From, State = #{identity_info := IdentityInfo}) ->
-    {reply, IdentityInfo, State};
+    {reply, vpn_identity:safe_info(IdentityInfo), State};
 handle_call(config, _From, State = #{config := Config}) ->
     {reply, runtime_config(Config), State};
 handle_call(_Request, _From, State) ->
