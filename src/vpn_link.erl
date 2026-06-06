@@ -131,7 +131,7 @@ init_tun(UdpPid, TunName, TunIp, Mode, RemoteIp, RemoteUdpPort, PeerId, RemotePe
                               mode => Mode,
                               peer_id => normalize_peer_id(PeerId),
                               remote_peer_id => normalize_peer_id(RemotePeerId),
-                              crypto => vpn_crypto:new(Psk),
+                              crypto => vpn_crypto:new(Psk, normalize_peer_id(PeerId)),
                               tx_seq => 0,
                               rx_seq => 0,
                               remote_ip => RemoteIp,

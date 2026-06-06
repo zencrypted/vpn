@@ -49,6 +49,7 @@ vpn_crypto_exports_test() ->
     ?assertMatch({module, vpn_crypto}, code:ensure_loaded(vpn_crypto)),
     ?assert(erlang:function_exported(vpn_crypto, new, 0)),
     ?assert(erlang:function_exported(vpn_crypto, new, 1)),
+    ?assert(erlang:function_exported(vpn_crypto, new, 2)),
     ?assert(erlang:function_exported(vpn_crypto, encode, 2)),
     ?assert(erlang:function_exported(vpn_crypto, decode, 2)).
 
