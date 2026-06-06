@@ -59,14 +59,21 @@ rebar3 eunit
 
 ## VPN Management API
 
-`vpn_manager` is the initial read-only management layer for supervised peers. It
-is intended to become the backend surface for the future N2O/EXO admin UI.
+`vpn_manager` is the initial management layer for supervised peers. It is
+intended to become the backend surface for the future N2O/EXO admin UI.
 
 ```erlang
 vpn_manager:list_peers().
+vpn_manager:running_peers().
 vpn_manager:peer_info(peer_a).
 vpn_manager:peer_stats(peer_a).
+
+vpn_manager:stop_peer(peer_a).
+vpn_manager:start_peer(peer_a).
 ```
+
+`list_peers/0` returns configured peers from application config.
+`running_peers/0` returns currently active supervised peers.
 
 `peer_info/1` returns identity and operational config:
 
@@ -83,6 +90,15 @@ Unknown peers return:
 ```erlang
 {error, not_found}
 ```
+
+Starting an already running peer returns:
+
+```erlang
+{error, already_started}
+```
+
+The management API can start and stop configured peers. It does not create,
+delete, persist, or reload peer configuration yet.
 
 ## Peer-Based Validation
 

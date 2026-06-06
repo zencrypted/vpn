@@ -26,13 +26,19 @@ vpn_trust_store_exports_test() ->
 vpn_manager_exports_test() ->
     ?assertMatch({module, vpn_manager}, code:ensure_loaded(vpn_manager)),
     ?assert(erlang:function_exported(vpn_manager, list_peers, 0)),
+    ?assert(erlang:function_exported(vpn_manager, running_peers, 0)),
     ?assert(erlang:function_exported(vpn_manager, peer_info, 1)),
     ?assert(erlang:function_exported(vpn_manager, peer_stats, 1)),
+    ?assert(erlang:function_exported(vpn_manager, start_peer, 1)),
+    ?assert(erlang:function_exported(vpn_manager, stop_peer, 1)),
+    ?assert(erlang:function_exported(vpn_manager, peer_running, 1)),
     ?assert(erlang:function_exported(vpn_manager, find_peer, 1)).
 
 vpn_peer_sup_exports_test() ->
     ?assertMatch({module, vpn_peer_sup}, code:ensure_loaded(vpn_peer_sup)),
-    ?assert(erlang:function_exported(vpn_peer_sup, start_link, 0)).
+    ?assert(erlang:function_exported(vpn_peer_sup, start_link, 0)),
+    ?assert(erlang:function_exported(vpn_peer_sup, start_peer, 1)),
+    ?assert(erlang:function_exported(vpn_peer_sup, stop_peer, 1)).
 
 vpn_tun_exports_test() ->
     ?assertMatch({module, vpn_tun}, code:ensure_loaded(vpn_tun)),
