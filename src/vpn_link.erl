@@ -153,8 +153,8 @@ decode_and_write(Packet, Mode, TunPid, State = #{crypto := Crypto0}) ->
 
 decode_frame_and_write(DecodedFrame, Mode, TunPid, State) ->
     case vpn_frame:decode(DecodedFrame) of
-        {ok, #{seq := Seq, payload := DecodedPacket}} ->
-            logger:debug("vpn_frame rx seq=~p", [Seq]),
+        {ok, #{seq := Seq, peer_id := PeerId, payload := DecodedPacket}} ->
+            logger:debug("vpn_frame rx seq=~p peer_id=~p", [Seq, PeerId]),
             State1 = State#{rx_seq := Seq},
             Kind = packet_kind(DecodedPacket, Mode),
             Size = byte_size(DecodedPacket),
