@@ -5,7 +5,7 @@
 
 -include_lib("public_key/include/OTP-PUB-KEY.hrl").
 
--export([load/1, safe_info/1]).
+-export([load/1, safe_info/1, verify_key_match/1]).
 
 load(Config) when is_map(Config) ->
     case required_identity_key(Config) of
@@ -79,16 +79,56 @@ load_key(Config,
          CertificateMetadata) ->
     case file:read_file(KeyPath) of
         {ok, KeyPem} ->
-            {ok, #{peer_id => maps:get(id, Config),
-                   certificate_path => CertPath,
-                   private_key_path => KeyPath,
-                   ca_certificate_path => CaPath,
-                   certificate_pem => CertPem,
-                   private_key_pem => KeyPem,
-                   x509_certificate => Certificate,
-                   certificate => CertificateMetadata}};
+            load_private_key(Config,
+                             CertPath,
+                             KeyPath,
+                             CaPath,
+                             CertPem,
+                             Certificate,
+                             CertificateMetadata,
+                             KeyPem);
         {error, Reason} ->
             {error, {private_key_read_failed, KeyPath, Reason}}
+    end.
+
+load_private_key(Config,
+                 CertPath,
+                 KeyPath,
+                 CaPath,
+                 CertPem,
+                 Certificate,
+                 CertificateMetadata,
+                 KeyPem) ->
+    case parse_private_key_public_part(KeyPem) of
+        {ok, PrivateKeyPublicPart} ->
+            Identity = #{peer_id => maps:get(id, Config),
+                         certificate_path => CertPath,
+                         private_key_path => KeyPath,
+                         ca_certificate_path => CaPath,
+                         certificate_pem => CertPem,
+                         private_key_pem => KeyPem,
+                         x509_certificate => Certificate,
+                         private_key_public_part => PrivateKeyPublicPart,
+                         certificate => CertificateMetadata},
+            case verify_key_match(Identity) of
+                ok ->
+                    {ok, Identity};
+                {error, Reason} ->
+                    {error, Reason}
+            end;
+        {error, Reason} ->
+            {error, {private_key_parse_failed, KeyPath, Reason}}
+    end.
+
+verify_key_match(#{x509_certificate := Certificate,
+                   private_key_public_part := PrivateKeyPublicPart}) ->
+    case certificate_public_key(Certificate) of
+        {ok, PrivateKeyPublicPart} ->
+            ok;
+        {ok, _CertificatePublicKey} ->
+            {error, key_mismatch};
+        {error, Reason} ->
+            {error, Reason}
     end.
 
 parse_certificate(CertPem) ->
@@ -123,6 +163,33 @@ certificate_metadata(#'OTPCertificate'{tbsCertificate = Tbs}) ->
            not_after => NotAfter}};
 certificate_metadata(_Certificate) ->
     {error, invalid_certificate}.
+
+parse_private_key_public_part(KeyPem) ->
+    try
+        case public_key:pem_decode(KeyPem) of
+            [Entry | _] ->
+                private_key_public_part(public_key:pem_entry_decode(Entry));
+            [] ->
+                {error, no_pem_entry}
+        end
+    catch
+        Class:ParseReason ->
+            {error, {Class, ParseReason}}
+    end.
+
+certificate_public_key(#'OTPCertificate'{tbsCertificate = #'OTPTBSCertificate'{
+                                           subjectPublicKeyInfo = #'OTPSubjectPublicKeyInfo'{
+                                             subjectPublicKey = PublicKey}}}) ->
+    {ok, PublicKey};
+certificate_public_key(_Certificate) ->
+    {error, unsupported_certificate_key}.
+
+private_key_public_part(#'RSAPrivateKey'{modulus = Modulus,
+                                         publicExponent = PublicExponent}) ->
+    {ok, #'RSAPublicKey'{modulus = Modulus,
+                         publicExponent = PublicExponent}};
+private_key_public_part(_PrivateKey) ->
+    {error, unsupported_private_key}.
 
 required_identity_key(Config) ->
     required_identity_key(Config, [certificate_path, private_key_path, ca_certificate_path]).

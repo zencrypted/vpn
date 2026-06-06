@@ -15,7 +15,8 @@ vpn_peer_exports_test() ->
 vpn_identity_exports_test() ->
     ?assertMatch({module, vpn_identity}, code:ensure_loaded(vpn_identity)),
     ?assert(erlang:function_exported(vpn_identity, load, 1)),
-    ?assert(erlang:function_exported(vpn_identity, safe_info, 1)).
+    ?assert(erlang:function_exported(vpn_identity, safe_info, 1)),
+    ?assert(erlang:function_exported(vpn_identity, verify_key_match, 1)).
 
 vpn_trust_store_exports_test() ->
     ?assertMatch({module, vpn_trust_store}, code:ensure_loaded(vpn_trust_store)),

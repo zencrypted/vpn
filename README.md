@@ -212,6 +212,17 @@ This is only local trust-store verification. It does not implement CRL, OCSP,
 enrollment, certificate renewal, key exchange, or replacement of the temporary
 PSK dataplane.
 
+## Certificate Ownership Verification
+
+A trusted certificate alone is insufficient. During peer startup,
+`vpn_identity` also parses the configured private key and verifies that its
+public part matches the public key in the configured certificate.
+
+For example, configuring `peer_a.crt` with `peer_b.key` causes peer startup to
+fail with a key mismatch. This check proves local certificate/key ownership for
+the development fixtures; it does not implement certificate-based session keys
+or a handshake yet.
+
 ## Config Driven Startup
 
 Peers can be started from application configuration. Add `peers` under the `vpn`
