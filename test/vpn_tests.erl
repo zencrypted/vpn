@@ -31,6 +31,7 @@ vpn_manager_exports_test() ->
     ?assert(erlang:function_exported(vpn_manager, peer_stats, 1)),
     ?assert(erlang:function_exported(vpn_manager, start_peer, 1)),
     ?assert(erlang:function_exported(vpn_manager, stop_peer, 1)),
+    ?assert(erlang:function_exported(vpn_manager, reload_config, 0)),
     ?assert(erlang:function_exported(vpn_manager, peer_running, 1)),
     ?assert(erlang:function_exported(vpn_manager, find_peer, 1)).
 

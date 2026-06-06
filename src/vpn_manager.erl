@@ -9,15 +9,15 @@
          peer_stats/1,
          start_peer/1,
          stop_peer/1,
+         reload_config/0,
          peer_running/1,
          find_peer/1]).
 
 list_peers() ->
-    [maps:get(id, PeerConfig) || PeerConfig <- configured_peers()].
+    configured_peer_ids().
 
 running_peers() ->
-    [PeerId || {{vpn_peer, PeerId}, Pid, worker, _Modules} <- peer_children(),
-               is_pid(Pid)].
+    running_peer_ids().
 
 peer_info(PeerId) ->
     case find_peer(PeerId) of
@@ -36,6 +36,16 @@ peer_stats(PeerId) ->
         {error, not_found} ->
             {error, not_found}
     end.
+
+reload_config() ->
+    ConfiguredIds = configured_peer_ids(),
+    RunningIds = running_peer_ids(),
+    ToStop = RunningIds -- ConfiguredIds,
+    ToStart = ConfiguredIds -- RunningIds,
+    Unchanged = RunningIds -- ToStop,
+    StopResult = collect_stop_results(ToStop, #{started => [], stopped => [], failed => []}),
+    StartResult = collect_start_results(ToStart, StopResult),
+    StartResult#{unchanged => Unchanged}.
 
 start_peer(PeerId) ->
     case peer_running(PeerId) of
@@ -81,6 +91,8 @@ start_configured_peer(PeerId) ->
                     {ok, Pid};
                 {error, {already_started, _Pid}} ->
                     {error, already_started};
+                {error, {Reason, {child, _Pid, _Id, _Start, _Restart, _Significant, _Shutdown, _Type, _Modules}}} ->
+                    {error, Reason};
                 {error, Reason} ->
                     {error, Reason}
             end;
@@ -96,6 +108,36 @@ find_peer_config(PeerId) ->
         [] ->
             {error, not_found}
     end.
+
+collect_stop_results([], Acc) ->
+    Acc;
+collect_stop_results([PeerId | Rest], Acc) ->
+    case stop_peer(PeerId) of
+        ok ->
+            collect_stop_results(Rest, append_result(stopped, PeerId, Acc));
+        {error, Reason} ->
+            collect_stop_results(Rest, append_result(failed, {PeerId, Reason}, Acc))
+    end.
+
+collect_start_results([], Acc) ->
+    Acc;
+collect_start_results([PeerId | Rest], Acc) ->
+    case start_peer(PeerId) of
+        {ok, _Pid} ->
+            collect_start_results(Rest, append_result(started, PeerId, Acc));
+        {error, Reason} ->
+            collect_start_results(Rest, append_result(failed, {PeerId, Reason}, Acc))
+    end.
+
+append_result(Key, Value, Acc) ->
+    maps:update_with(Key, fun(Values) -> Values ++ [Value] end, [Value], Acc).
+
+configured_peer_ids() ->
+    lists:sort([maps:get(id, PeerConfig) || PeerConfig <- configured_peers()]).
+
+running_peer_ids() ->
+    lists:sort([PeerId || {{vpn_peer, PeerId}, Pid, worker, _Modules} <- peer_children(),
+                          is_pid(Pid)]).
 
 configured_peers() ->
     application:get_env(vpn, peers, []).

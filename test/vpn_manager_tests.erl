@@ -41,6 +41,31 @@ lifecycle_test_() ->
               ?_assertEqual({error, not_found}, vpn_manager:start_peer(missing_peer))]
      end}.
 
+reload_config_test_() ->
+    {setup,
+     fun start_peer_sup/0,
+     fun stop_peer_sup/1,
+     fun(_SupPid) ->
+             application:set_env(vpn, peers, [peer_config(peer_b), peer_config(peer_c)]),
+             Reload1 = vpn_manager:reload_config(),
+             application:set_env(vpn, peers, [peer_config(peer_b),
+                                              peer_config(peer_c),
+                                              failing_peer_config(peer_fail)]),
+             Reload2 = vpn_manager:reload_config(),
+             [?_assertEqual(#{started => [peer_c],
+                              stopped => [peer_a],
+                              failed => [],
+                              unchanged => [peer_b]},
+                            Reload1),
+              ?_assertEqual([peer_b, peer_c], lists:sort(vpn_manager:running_peers())),
+              ?_assertEqual(#{started => [],
+                              stopped => [],
+                              failed => [{peer_fail, test_start_failed}],
+                              unchanged => [peer_b, peer_c]},
+                            Reload2),
+              ?_assertEqual([peer_b, peer_c], lists:sort(vpn_manager:running_peers()))]
+     end}.
+
 start_peer_sup() ->
     application:set_env(vpn, peers, peer_configs()),
     case vpn_peer_sup:start_link() of
@@ -99,6 +124,9 @@ peer_config(PeerId) ->
       mode => tun,
       ifname => list_to_binary(atom_to_list(PeerId)),
       ip => "10.20.20.1"}.
+
+failing_peer_config(PeerId) ->
+    (peer_config(PeerId))#{peer_module => vpn_manager_failing_peer}.
 
 wait_until_stopped(_SupPid, 0) ->
     ok;

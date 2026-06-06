@@ -70,6 +70,7 @@ vpn_manager:peer_stats(peer_a).
 
 vpn_manager:stop_peer(peer_a).
 vpn_manager:start_peer(peer_a).
+vpn_manager:reload_config().
 ```
 
 `list_peers/0` returns configured peers from application config.
@@ -97,8 +98,22 @@ Starting an already running peer returns:
 {error, already_started}
 ```
 
-The management API can start and stop configured peers. It does not create,
-delete, persist, or reload peer configuration yet.
+`reload_config/0` synchronizes runtime peers with the current application
+configuration. It starts configured peers that are not running, stops running
+peers that are no longer configured, and leaves already running configured peers
+untouched:
+
+```erlang
+#{
+    started => [peer_c],
+    stopped => [peer_x],
+    unchanged => [peer_a, peer_b],
+    failed => []
+}
+```
+
+The management API can start, stop, and reload configured peers. It does not
+create, delete, persist, or hot-update peer configuration yet.
 
 ## Peer-Based Validation
 
