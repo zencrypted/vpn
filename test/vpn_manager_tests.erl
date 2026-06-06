@@ -43,12 +43,22 @@ lifecycle_test_() ->
 
 start_peer_sup() ->
     application:set_env(vpn, peers, peer_configs()),
-    {ok, SupPid} = vpn_peer_sup:start_link(),
-    SupPid.
+    case vpn_peer_sup:start_link() of
+        {ok, SupPid} ->
+            SupPid;
+        {error, {already_started, SupPid}} ->
+            SupPid
+    end.
 
 stop_peer_sup(SupPid) ->
-    unlink(SupPid),
-    exit(SupPid, shutdown),
+    case is_process_alive(SupPid) of
+        true ->
+            unlink(SupPid),
+            exit(SupPid, shutdown),
+            wait_until_stopped(SupPid, 20);
+        false ->
+            ok
+    end,
     application:unset_env(vpn, peers),
     ok.
 
@@ -89,3 +99,14 @@ peer_config(PeerId) ->
       mode => tun,
       ifname => list_to_binary(atom_to_list(PeerId)),
       ip => "10.20.20.1"}.
+
+wait_until_stopped(_SupPid, 0) ->
+    ok;
+wait_until_stopped(SupPid, Attempts) ->
+    case is_process_alive(SupPid) of
+        false ->
+            ok;
+        true ->
+            timer:sleep(10),
+            wait_until_stopped(SupPid, Attempts - 1)
+    end.
