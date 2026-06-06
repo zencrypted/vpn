@@ -9,7 +9,12 @@ vpn_peer_exports_test() ->
     ?assert(erlang:function_exported(vpn_peer, stats, 1)),
     ?assert(erlang:function_exported(vpn_peer, reset_stats, 1)),
     ?assert(erlang:function_exported(vpn_peer, identity, 1)),
+    ?assert(erlang:function_exported(vpn_peer, identity_info, 1)),
     ?assert(erlang:function_exported(vpn_peer, config, 1)).
+
+vpn_identity_exports_test() ->
+    ?assertMatch({module, vpn_identity}, code:ensure_loaded(vpn_identity)),
+    ?assert(erlang:function_exported(vpn_identity, load, 1)).
 
 vpn_peer_sup_exports_test() ->
     ?assertMatch({module, vpn_peer_sup}, code:ensure_loaded(vpn_peer_sup)),

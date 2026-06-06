@@ -5,7 +5,7 @@
 
 -behaviour(gen_server).
 
--export([start_link/1, stop/1, stats/1, reset_stats/1, identity/1, config/1]).
+-export([start_link/1, stop/1, stats/1, reset_stats/1, identity/1, identity_info/1, config/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 start_link(Config) ->
@@ -23,6 +23,9 @@ reset_stats(Pid) ->
 identity(Pid) ->
     gen_server:call(Pid, identity).
 
+identity_info(Pid) ->
+    gen_server:call(Pid, identity_info).
+
 config(Pid) ->
     gen_server:call(Pid, config).
 
@@ -30,7 +33,7 @@ init(Config) ->
     process_flag(trap_exit, true),
     case validate_config(Config) of
         ok ->
-            start_link_from_config(Config);
+            start_link_with_identity(Config);
         {error, Reason} ->
             {stop, Reason}
     end.
@@ -42,6 +45,8 @@ handle_call(reset_stats, _From, State = #{link_pid := LinkPid}) ->
     {reply, vpn_link:reset_stats(LinkPid), State};
 handle_call(identity, _From, State = #{identity := Identity}) ->
     {reply, Identity, State};
+handle_call(identity_info, _From, State = #{identity_info := IdentityInfo}) ->
+    {reply, IdentityInfo, State};
 handle_call(config, _From, State = #{config := Config}) ->
     {reply, runtime_config(Config), State};
 handle_call(_Request, _From, State) ->
@@ -59,7 +64,15 @@ terminate(_Reason, State) ->
     stop_link(maps:get(link_pid, State, undefined)),
     ok.
 
-start_link_from_config(Config) ->
+start_link_with_identity(Config) ->
+    case vpn_identity:load(Config) of
+        {ok, IdentityInfo} ->
+            start_link_from_config(Config, IdentityInfo);
+        {error, Reason} ->
+            {stop, Reason}
+    end.
+
+start_link_from_config(Config, IdentityInfo) ->
     Id = maps:get(id, Config),
     Mode = maps:get(mode, Config),
     IfName = maps:get(ifname, Config),
@@ -84,6 +97,7 @@ start_link_from_config(Config) ->
             {ok, #{id => Id,
                    config => Config,
                    identity => Identity,
+                   identity_info => IdentityInfo,
                    link_pid => LinkPid}};
         {error, Reason} ->
             {stop, Reason}
@@ -108,7 +122,9 @@ missing_key(Config) ->
                 remote_ip,
                 remote_udp_port,
                 remote_peer_id,
-                psk],
+                psk,
+                certificate_path,
+                private_key_path],
     missing_key(Config, Required).
 
 missing_key(_Config, []) ->
