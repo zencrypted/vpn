@@ -38,9 +38,11 @@ vpn_link_exports_test() ->
     ?assertMatch({module, vpn_link}, code:ensure_loaded(vpn_link)),
     ?assert(erlang:function_exported(vpn_link, start_link, 5)),
     ?assert(erlang:function_exported(vpn_link, start_link, 6)),
+    ?assert(erlang:function_exported(vpn_link, start_link, 8)),
     ?assert(erlang:function_exported(vpn_link, stop, 1)),
     ?assert(erlang:function_exported(vpn_link, stats, 1)),
-    ?assert(erlang:function_exported(vpn_link, reset_stats, 1)).
+    ?assert(erlang:function_exported(vpn_link, reset_stats, 1)),
+    ?assert(erlang:function_exported(vpn_link, validate_frame_peer_id, 2)).
 
 vpn_crypto_exports_test() ->
     ?assertMatch({module, vpn_crypto}, code:ensure_loaded(vpn_crypto)),

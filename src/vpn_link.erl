@@ -5,14 +5,39 @@
 
 -behaviour(gen_server).
 
--export([start_link/5, start_link/6, stop/1, stats/1, reset_stats/1]).
+-export([start_link/5, start_link/6, start_link/8, stop/1, stats/1, reset_stats/1]).
+-export([validate_frame_peer_id/2]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 start_link(TunName, TunIp, LocalUdpPort, RemoteIp, RemoteUdpPort) ->
     start_link(TunName, TunIp, tap, LocalUdpPort, RemoteIp, RemoteUdpPort).
 
 start_link(TunName, TunIp, Mode, LocalUdpPort, RemoteIp, RemoteUdpPort) ->
-    Args = {TunName, TunIp, Mode, LocalUdpPort, RemoteIp, RemoteUdpPort},
+    start_link(TunName,
+               TunIp,
+               Mode,
+               LocalUdpPort,
+               RemoteIp,
+               RemoteUdpPort,
+               undefined,
+               undefined).
+
+start_link(TunName,
+           TunIp,
+           Mode,
+           LocalUdpPort,
+           RemoteIp,
+           RemoteUdpPort,
+           PeerId,
+           RemotePeerId) ->
+    Args = {TunName,
+            TunIp,
+            Mode,
+            LocalUdpPort,
+            RemoteIp,
+            RemoteUdpPort,
+            PeerId,
+            RemotePeerId},
     gen_server:start_link(?MODULE, Args, []).
 
 stop(Pid) ->
@@ -24,11 +49,11 @@ stats(Pid) ->
 reset_stats(Pid) ->
     gen_server:call(Pid, reset_stats).
 
-init({TunName, TunIp, Mode, LocalUdpPort, RemoteIp, RemoteUdpPort}) ->
+init({TunName, TunIp, Mode, LocalUdpPort, RemoteIp, RemoteUdpPort, PeerId, RemotePeerId}) ->
     process_flag(trap_exit, true),
     case vpn_udp:start_link(LocalUdpPort, self()) of
         {ok, UdpPid} ->
-            init_tun(UdpPid, TunName, TunIp, Mode, RemoteIp, RemoteUdpPort);
+            init_tun(UdpPid, TunName, TunIp, Mode, RemoteIp, RemoteUdpPort, PeerId, RemotePeerId);
         {error, Reason} ->
             {stop, Reason}
     end.
@@ -77,12 +102,14 @@ terminate(_Reason, State) ->
     stop_worker(maps:get(udp_pid, State, undefined), fun vpn_udp:stop/1),
     ok.
 
-init_tun(UdpPid, TunName, TunIp, Mode, RemoteIp, RemoteUdpPort) ->
+init_tun(UdpPid, TunName, TunIp, Mode, RemoteIp, RemoteUdpPort, PeerId, RemotePeerId) ->
     case vpn_tun:start_link(TunName, TunIp, self(), Mode) of
         {ok, TunPid} ->
             {ok, maps:merge(#{udp_pid => UdpPid,
                               tun_pid => TunPid,
                               mode => Mode,
+                              peer_id => normalize_peer_id(PeerId),
+                              remote_peer_id => normalize_peer_id(RemotePeerId),
                               crypto => vpn_crypto:new(),
                               tx_seq => 0,
                               rx_seq => 0,
@@ -111,8 +138,8 @@ encode_and_send(Packet,
                 UdpPid,
                 RemoteIp,
                 RemoteUdpPort,
-                State = #{crypto := Crypto0, tx_seq := Seq}) ->
-    Frame = vpn_frame:encode(undefined, Seq, Packet),
+                State = #{crypto := Crypto0, tx_seq := Seq, peer_id := PeerId}) ->
+    Frame = vpn_frame:encode(PeerId, Seq, Packet),
     logger:debug("vpn_frame tx seq=~p", [Seq]),
     case vpn_crypto:encode(Frame, Crypto0) of
         {ok, EncodedPacket, Crypto1} ->
@@ -155,13 +182,23 @@ decode_frame_and_write(DecodedFrame, Mode, TunPid, State) ->
     case vpn_frame:decode(DecodedFrame) of
         {ok, #{seq := Seq, peer_id := PeerId, payload := DecodedPacket}} ->
             logger:debug("vpn_frame rx seq=~p peer_id=~p", [Seq, PeerId]),
-            State1 = State#{rx_seq := Seq},
-            Kind = packet_kind(DecodedPacket, Mode),
-            Size = byte_size(DecodedPacket),
-            write_decoded(DecodedPacket, Kind, Size, TunPid, State1);
+            validate_and_write(PeerId, Seq, DecodedPacket, Mode, TunPid, State);
         {error, Reason} ->
             logger:error("vpn_link failed to decode frame: ~p", [Reason]),
             {noreply, State}
+    end.
+
+validate_and_write(PeerId, Seq, DecodedPacket, Mode, TunPid, State) ->
+    case validate_frame_peer_id(PeerId, maps:get(remote_peer_id, State)) of
+        ok ->
+            State1 = incr_counter(State#{rx_seq := Seq}, frames_accepted),
+            Kind = packet_kind(DecodedPacket, Mode),
+            Size = byte_size(DecodedPacket),
+            write_decoded(DecodedPacket, Kind, Size, TunPid, State1);
+        {error, {peer_id_mismatch, Expected, Received}} ->
+            logger:warning("vpn_link rejected frame: expected ~s received ~s",
+                           [Expected, Received]),
+            {noreply, incr_counter(State, frames_rejected)}
     end.
 
 write_decoded(DecodedPacket, Kind, Size, TunPid, State) ->
@@ -197,7 +234,9 @@ counter_keys() ->
      udp_rx_packets,
      udp_rx_bytes,
      tun_tx_packets,
-     tun_tx_bytes].
+     tun_tx_bytes,
+     frames_accepted,
+     frames_rejected].
 
 reset_counter_values(State) ->
     maps:merge(State, zero_counters()).
@@ -205,6 +244,24 @@ reset_counter_values(State) ->
 incr_counters(State, PacketKey, ByteKey, Size) ->
     State#{PacketKey := maps:get(PacketKey, State) + 1,
            ByteKey := maps:get(ByteKey, State) + Size}.
+
+incr_counter(State, Key) ->
+    State#{Key := maps:get(Key, State) + 1}.
+
+validate_frame_peer_id(FramePeerId, ExpectedPeerId) ->
+    Received = normalize_peer_id(FramePeerId),
+    Expected = normalize_peer_id(ExpectedPeerId),
+    case Received =:= Expected of
+        true ->
+            ok;
+        false ->
+            {error, {peer_id_mismatch, Expected, Received}}
+    end.
+
+normalize_peer_id(PeerId) when is_binary(PeerId) ->
+    PeerId;
+normalize_peer_id(PeerId) when is_atom(PeerId) ->
+    atom_to_binary(PeerId, utf8).
 
 packet_kind(Packet, tap) ->
     ethernet_packet_kind(Packet);

@@ -67,8 +67,16 @@ start_link_from_config(Config) ->
     LocalUdpPort = maps:get(local_udp_port, Config),
     RemoteIp = maps:get(remote_ip, Config),
     RemoteUdpPort = maps:get(remote_udp_port, Config),
+    RemotePeerId = maps:get(remote_peer_id, Config),
     Identity = identity_from_config(Config),
-    case vpn_link:start_link(IfName, Ip, Mode, LocalUdpPort, RemoteIp, RemoteUdpPort) of
+    case vpn_link:start_link(IfName,
+                             Ip,
+                             Mode,
+                             LocalUdpPort,
+                             RemoteIp,
+                             RemoteUdpPort,
+                             Id,
+                             RemotePeerId) of
         {ok, LinkPid} ->
             logger:info("vpn_peer started: ~p", [Id]),
             {ok, #{id => Id,
@@ -96,7 +104,8 @@ missing_key(Config) ->
                 ip,
                 local_udp_port,
                 remote_ip,
-                remote_udp_port],
+                remote_udp_port,
+                remote_peer_id],
     missing_key(Config, Required).
 
 missing_key(_Config, []) ->
@@ -129,7 +138,8 @@ runtime_config(Config) ->
                ip,
                local_udp_port,
                remote_ip,
-               remote_udp_port],
+               remote_udp_port,
+               remote_peer_id],
               Config).
 
 stop_link(undefined) ->
