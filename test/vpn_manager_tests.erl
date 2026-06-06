@@ -57,8 +57,20 @@ certificate_inventory_test_() ->
                           ?assertEqual(ok, vpn_manager:stop_peer(peer_a)),
                           ?assertMatch(#{peer_id := peer_a,
                                          running := false,
+                                         trusted := true,
+                                         key_match := true,
+                                         subject := _Subject,
+                                         issuer := _Issuer,
+                                         serial_number := _Serial,
                                          certificate_path := "priv/certs/peer_a.crt"},
-                                       vpn_manager:certificate_info(peer_a))
+                                       vpn_manager:certificate_info(peer_a)),
+                          application:set_env(vpn, peers, [invalid_cert_peer_config(peer_bad)]),
+                          ?assertMatch(#{peer_id := peer_bad,
+                                         running := false,
+                                         error := {certificate_read_failed,
+                                                   "priv/certs/missing-peer.crt",
+                                                   enoent}},
+                                       vpn_manager:certificate_info(peer_bad))
                       end)]
      end}.
 
@@ -180,6 +192,8 @@ handle_call(identity_info, _From, State = #{id := PeerId}) ->
     {reply, #{peer_id => PeerId,
               certificate_path => "priv/certs/" ++ atom_to_list(PeerId) ++ ".crt",
               private_key_path => "priv/certs/" ++ atom_to_list(PeerId) ++ ".key",
+              trusted => true,
+              key_match => true,
               certificate => #{subject => {subject, PeerId},
                                issuer => {issuer, PeerId},
                                serial_number => serial_number(PeerId),
@@ -211,10 +225,15 @@ peer_config(PeerId) ->
       mode => tun,
       ifname => list_to_binary(atom_to_list(PeerId)),
       ip => "10.20.20.1",
-      certificate_path => "priv/certs/" ++ atom_to_list(PeerId) ++ ".crt"}.
+      certificate_path => certificate_path(PeerId),
+      private_key_path => private_key_path(PeerId),
+      ca_certificate_path => "priv/certs/ca.crt"}.
 
 failing_peer_config(PeerId) ->
     (peer_config(PeerId))#{peer_module => vpn_manager_failing_peer}.
+
+invalid_cert_peer_config(PeerId) ->
+    (peer_config(PeerId))#{certificate_path => "priv/certs/missing-peer.crt"}.
 
 serial_number(peer_a) ->
     1001;
@@ -222,6 +241,20 @@ serial_number(peer_b) ->
     1002;
 serial_number(_PeerId) ->
     9999.
+
+certificate_path(peer_a) ->
+    "priv/certs/peer_a.crt";
+certificate_path(peer_b) ->
+    "priv/certs/peer_b.crt";
+certificate_path(_PeerId) ->
+    "priv/certs/peer_a.crt".
+
+private_key_path(peer_a) ->
+    "priv/certs/peer_a.key";
+private_key_path(peer_b) ->
+    "priv/certs/peer_b.key";
+private_key_path(_PeerId) ->
+    "priv/certs/peer_a.key".
 
 wait_until_stopped(_SupPid, 0) ->
     ok;

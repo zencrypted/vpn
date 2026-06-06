@@ -106,26 +106,28 @@ running_certificate_status(PeerId) ->
     end.
 
 stopped_certificate_status(PeerId) ->
-    Base = #{peer_id => PeerId,
-             running => false},
     case find_peer_config(PeerId) of
         {ok, PeerConfig} ->
-            case maps:find(certificate_path, PeerConfig) of
-                {ok, CertificatePath} ->
-                    Base#{certificate_path => CertificatePath};
-                error ->
-                    Base
+            case vpn_identity:load(PeerConfig) of
+                {ok, Identity} ->
+                    certificate_entry(PeerId, false, vpn_identity:safe_info(Identity));
+                {error, Reason} ->
+                    #{peer_id => PeerId,
+                      running => false,
+                      error => Reason}
             end;
         {error, not_found} ->
-            Base#{error => not_found}
+            #{peer_id => PeerId,
+              running => false,
+              error => not_found}
     end.
 
 certificate_entry(PeerId, Running, Identity) ->
     Certificate = maps:get(certificate, Identity, #{}),
     #{peer_id => PeerId,
       running => Running,
-      trusted => true,
-      key_match => true,
+      trusted => maps:get(trusted, Identity, false),
+      key_match => maps:get(key_match, Identity, false),
       subject => maps:get(subject, Certificate, undefined),
       issuer => maps:get(issuer, Certificate, undefined),
       serial_number => maps:get(serial_number, Certificate, undefined),
@@ -135,8 +137,8 @@ certificate_entry(PeerId, Running, Identity) ->
 
 certificate_summary(Identity) ->
     Certificate = maps:get(certificate, Identity, #{}),
-    #{trusted => true,
-      key_match => true,
+    #{trusted => maps:get(trusted, Identity, false),
+      key_match => maps:get(key_match, Identity, false),
       subject => maps:get(subject, Certificate, undefined),
       issuer => maps:get(issuer, Certificate, undefined),
       serial_number => maps:get(serial_number, Certificate, undefined),

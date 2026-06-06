@@ -18,7 +18,13 @@ load(_Config) ->
     {error, invalid_config}.
 
 safe_info(Identity) ->
-    maps:with([peer_id, certificate_path, private_key_path, certificate], Identity).
+    maps:with([peer_id,
+               certificate_path,
+               private_key_path,
+               certificate,
+               trusted,
+               key_match],
+              Identity).
 
 load_files(Config) ->
     CertPath = maps:get(certificate_path, Config),
@@ -62,7 +68,7 @@ verify_certificate(Config,
                              CaPath,
                              CertPem,
                              Certificate,
-                             CertificateMetadata);
+                             CertificateMetadata#{trusted => true});
                 {error, Reason} ->
                     {error, {certificate_verification_failed, CertPath, Reason}}
             end;
@@ -112,7 +118,8 @@ load_private_key(Config,
                          certificate => CertificateMetadata},
             case verify_key_match(Identity) of
                 ok ->
-                    {ok, Identity};
+                    {ok, Identity#{trusted => maps:get(trusted, CertificateMetadata, false),
+                                   key_match => true}};
                 {error, Reason} ->
                     {error, Reason}
             end;
