@@ -124,7 +124,8 @@ missing_key(Config) ->
                 remote_peer_id,
                 psk,
                 certificate_path,
-                private_key_path],
+                private_key_path,
+                ca_certificate_path],
     missing_key(Config, Required).
 
 missing_key(_Config, []) ->
@@ -148,7 +149,8 @@ identity_from_config(Config) ->
     #{id => maps:get(id, Config),
       name => maps:get(name, Config, undefined),
       certificate_path => maps:get(certificate_path, Config, undefined),
-      private_key_path => maps:get(private_key_path, Config, undefined)}.
+      private_key_path => maps:get(private_key_path, Config, undefined),
+      ca_certificate_path => maps:get(ca_certificate_path, Config, undefined)}.
 
 runtime_config(Config) ->
     maps:with([id,

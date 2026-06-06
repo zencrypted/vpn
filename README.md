@@ -4,7 +4,7 @@ VPN Overlay Network for the Zencrypted ecosystem.
 
 This repository currently contains a minimal Erlang/OTP VPN dataplane prototype.
 It currently uses a temporary PSK encrypted dataplane. It intentionally does not
-implement peer/session management, CA/PKI, or key exchange yet.
+implement peer/session management, CA services, or key exchange yet.
 
 ## Architecture
 
@@ -29,6 +29,8 @@ vpn_tun
 transport component.
 
 X.509 PKI integration is expected to use `synrc/ca` in a later milestone.
+The current development trust store only verifies that configured peer
+certificates are signed by the local development CA fixture.
 
 ## Modules
 
@@ -40,6 +42,7 @@ X.509 PKI integration is expected to use `synrc/ca` in a later milestone.
 - `vpn_link` - bidirectional TUN/TAP to UDP link.
 - `vpn_udp_sink` - local UDP test sink.
 - `vpn_peer` - public runtime peer abstraction.
+- `vpn_trust_store` - development CA certificate trust store.
 
 ## Build
 
@@ -68,7 +71,10 @@ PeerB = #{
     ip => "10.20.20.2",
     local_udp_port => 5556,
     remote_ip => {127,0,0,1},
-    remote_udp_port => 5555
+    remote_udp_port => 5555,
+    certificate_path => "priv/certs/peer_b.crt",
+    private_key_path => "priv/certs/peer_b.key",
+    ca_certificate_path => "priv/certs/ca.crt"
 }.
 
 PeerA = #{
@@ -80,7 +86,10 @@ PeerA = #{
     ip => "10.20.20.1",
     local_udp_port => 5555,
     remote_ip => {127,0,0,1},
-    remote_udp_port => 5556
+    remote_udp_port => 5556,
+    certificate_path => "priv/certs/peer_a.crt",
+    private_key_path => "priv/certs/peer_a.key",
+    ca_certificate_path => "priv/certs/ca.crt"
 }.
 ```
 
@@ -133,6 +142,9 @@ ip
 local_udp_port
 remote_ip
 remote_udp_port
+certificate_path
+private_key_path
+ca_certificate_path
 ```
 
 Packet pipeline:
@@ -177,6 +189,29 @@ Expected result: ping fails and `crypto_failures` increases.
 The PSK is temporary and will later be replaced by CA/PKI-based key
 establishment.
 
+## Development Certificate Trust
+
+Development fixtures live in `priv/certs`:
+
+```text
+ca.crt
+ca.key
+peer_a.crt
+peer_a.key
+peer_b.crt
+peer_b.key
+```
+
+`peer_a.crt` and `peer_b.crt` are signed by the development CA. During peer
+startup, `vpn_identity` loads the peer certificate/key PEM files, parses safe
+certificate metadata, loads `ca_certificate_path` through `vpn_trust_store`, and
+verifies that the peer certificate issuer matches the trusted CA and its
+signature validates against that CA.
+
+This is only local trust-store verification. It does not implement CRL, OCSP,
+enrollment, certificate renewal, key exchange, or replacement of the temporary
+PSK dataplane.
+
 ## Config Driven Startup
 
 Peers can be started from application configuration. Add `peers` under the `vpn`
@@ -197,7 +232,8 @@ application environment:
             remote_ip => {127,0,0,1},
             remote_udp_port => 5556,
             certificate_path => "priv/certs/peer_a.crt",
-            private_key_path => "priv/certs/peer_a.key"
+            private_key_path => "priv/certs/peer_a.key",
+            ca_certificate_path => "priv/certs/ca.crt"
         },
         #{
             id => peer_b,
@@ -208,7 +244,10 @@ application environment:
             ip => "10.20.20.2",
             local_udp_port => 5556,
             remote_ip => {127,0,0,1},
-            remote_udp_port => 5555
+            remote_udp_port => 5555,
+            certificate_path => "priv/certs/peer_b.crt",
+            private_key_path => "priv/certs/peer_b.key",
+            ca_certificate_path => "priv/certs/ca.crt"
         }
     ]}
 ]}.
