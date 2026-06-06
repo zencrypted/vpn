@@ -11,7 +11,22 @@ valid_config_loads_identity_test() ->
                    certificate_path := "priv/certs/peer_a.crt",
                    private_key_path := "priv/certs/peer_a.key",
                    certificate_pem := <<"-----BEGIN CERTIFICATE-----", _/binary>>,
-                   private_key_pem := <<"-----BEGIN PRIVATE KEY-----", _/binary>>},
+                   private_key_pem := <<"-----BEGIN PRIVATE KEY-----", _/binary>>,
+                   certificate := #{subject := _Subject,
+                                    issuer := _Issuer,
+                                    serial_number := _SerialNumber,
+                                    not_before := _NotBefore,
+                                    not_after := _NotAfter}},
+                 Identity).
+
+valid_fixture_certificate_parses_successfully_test() ->
+    Config = #{id => peer_a,
+               certificate_path => "priv/certs/peer_a.crt",
+               private_key_path => "priv/certs/peer_a.key"},
+    {ok, Identity} = vpn_identity:load(Config),
+    ?assertMatch(#{certificate := #{subject := _Subject,
+                                    issuer := _Issuer,
+                                    serial_number := _SerialNumber}},
                  Identity).
 
 missing_certificate_path_fails_test() ->
@@ -40,12 +55,37 @@ missing_private_key_file_returns_error_test() ->
     ?assertEqual({error, {private_key_read_failed, "priv/certs/missing.key", enoent}},
                  vpn_identity:load(Config)).
 
+invalid_certificate_file_returns_error_test() ->
+    CertPath = filename:join([os:getenv("TMPDIR", "/tmp"), "vpn-invalid-cert.pem"]),
+    ok = file:write_file(CertPath, <<"not a certificate">>),
+    Config = #{id => peer_a,
+               certificate_path => CertPath,
+               private_key_path => "priv/certs/peer_a.key"},
+    ?assertMatch({error, {certificate_parse_failed, CertPath, _Reason}},
+                 vpn_identity:load(Config)),
+    ok = file:delete(CertPath).
+
+safe_info_contains_certificate_metadata_test() ->
+    Config = #{id => peer_a,
+               certificate_path => "priv/certs/peer_a.crt",
+               private_key_path => "priv/certs/peer_a.key"},
+    {ok, Identity} = vpn_identity:load(Config),
+    ?assertMatch(#{peer_id := peer_a,
+                   certificate_path := "priv/certs/peer_a.crt",
+                   private_key_path := "priv/certs/peer_a.key",
+                   certificate := #{subject := _Subject,
+                                    issuer := _Issuer,
+                                    serial_number := _SerialNumber,
+                                    not_before := _NotBefore,
+                                    not_after := _NotAfter}},
+                 vpn_identity:safe_info(Identity)).
+
 safe_info_does_not_expose_pem_binaries_test() ->
     Config = #{id => peer_a,
                certificate_path => "priv/certs/peer_a.crt",
                private_key_path => "priv/certs/peer_a.key"},
     {ok, Identity} = vpn_identity:load(Config),
-    ?assertEqual(#{peer_id => peer_a,
-                   certificate_path => "priv/certs/peer_a.crt",
-                   private_key_path => "priv/certs/peer_a.key"},
-                 vpn_identity:safe_info(Identity)).
+    SafeInfo = vpn_identity:safe_info(Identity),
+    ?assertNot(maps:is_key(certificate_pem, SafeInfo)),
+    ?assertNot(maps:is_key(private_key_pem, SafeInfo)),
+    ?assertNot(maps:is_key(private_key, SafeInfo)).
