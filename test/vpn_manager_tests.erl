@@ -160,6 +160,38 @@ reload_config_test_() ->
                       end)]
      end}.
 
+admin_facade_test_() ->
+    {setup,
+     fun start_peer_sup/0,
+     fun stop_peer_sup/1,
+     fun(_SupPid) ->
+             [?_test(begin
+                          ?assertMatch(#{status := #{configured := [peer_a, peer_b],
+                                                     running := [peer_a, peer_b]},
+                                         certificates := [_ | _]},
+                                       vpn_admin:dashboard()),
+                          ?assertEqual(#{configured_peers => 2,
+                                         running_peers => 2,
+                                         stopped_peers => 0,
+                                         certificates => 2},
+                                       vpn_admin:overview()),
+                          ?assertEqual(#{configured => 2,
+                                         running => 2,
+                                         stopped => 0},
+                                       vpn_admin:peer_counts()),
+                          ?assertEqual(ok, vpn_manager:stop_peer(peer_a)),
+                          ?assertEqual(#{configured_peers => 2,
+                                         running_peers => 1,
+                                         stopped_peers => 1,
+                                         certificates => 2},
+                                       vpn_admin:overview()),
+                          ?assertEqual(#{configured => 2,
+                                         running => 1,
+                                         stopped => 1},
+                                       vpn_admin:peer_counts())
+                      end)]
+     end}.
+
 start_peer_sup() ->
     application:set_env(vpn, peers, peer_configs()),
     case vpn_peer_sup:start_link() of

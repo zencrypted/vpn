@@ -126,6 +126,31 @@ untouched:
 The management API can start, stop, and reload configured peers. It does not
 create, delete, persist, or hot-update peer configuration yet.
 
+## Administration API
+
+`vpn_admin` is the read-only facade intended as the future backend contract for
+N2O/EXO dashboard pages:
+
+```erlang
+vpn_admin:dashboard().
+vpn_admin:overview().
+vpn_admin:peer_counts().
+```
+
+`dashboard/0` aggregates manager status and certificate inventory. `overview/0`
+returns compact dashboard counts:
+
+```erlang
+#{
+    configured_peers => 2,
+    running_peers => 2,
+    stopped_peers => 0,
+    certificates => 2
+}
+```
+
+Lifecycle operations remain in `vpn_manager`.
+
 ## Certificate Inventory
 
 `vpn_manager` exposes certificate inventory helpers for administration screens:

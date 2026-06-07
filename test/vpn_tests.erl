@@ -40,6 +40,12 @@ vpn_manager_exports_test() ->
     ?assert(erlang:function_exported(vpn_manager, peer_running, 1)),
     ?assert(erlang:function_exported(vpn_manager, find_peer, 1)).
 
+vpn_admin_exports_test() ->
+    ?assertMatch({module, vpn_admin}, code:ensure_loaded(vpn_admin)),
+    ?assert(erlang:function_exported(vpn_admin, dashboard, 0)),
+    ?assert(erlang:function_exported(vpn_admin, overview, 0)),
+    ?assert(erlang:function_exported(vpn_admin, peer_counts, 0)).
+
 vpn_peer_sup_exports_test() ->
     ?assertMatch({module, vpn_peer_sup}, code:ensure_loaded(vpn_peer_sup)),
     ?assert(erlang:function_exported(vpn_peer_sup, start_link, 0)),
