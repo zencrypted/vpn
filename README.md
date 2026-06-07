@@ -57,6 +57,159 @@ rebar3 compile
 rebar3 eunit
 ```
 
+## Demo Guide
+
+This guide shows the current end-to-end VPN milestone: encrypted TUN peers,
+X.509 identity, CA trust verification, JSON/HTML administration, and the
+interactive N2O dashboard.
+
+Architecture overview:
+
+```text
+peer_a (10.20.20.1)
+      |
+ encrypted UDP
+      |
+peer_b (10.20.20.2)
+```
+
+Packet path:
+
+```text
+TUN -> VPN -> UDP -> VPN -> TUN
+```
+
+### Start the demo
+
+Build and start the application:
+
+```sh
+rebar3 compile
+rebar3 shell
+```
+
+The configured peers are started by the OTP supervision tree from
+`config/sys.config`.
+
+### Verify the tunnel
+
+From another terminal, ping `peer_b` through the local tunnel:
+
+```sh
+ping -4 -c 5 10.20.20.2
+```
+
+Expected result:
+
+```text
+0% packet loss
+```
+
+### Verify certificate identity
+
+In the Erlang shell:
+
+```erlang
+Children = supervisor:which_children(vpn_peer_sup).
+{_, Peer, _, _} = lists:keyfind({vpn_peer, peer_a}, 1, Children).
+vpn_peer:identity_info(Peer).
+```
+
+Expected certificate metadata includes:
+
+```text
+issuer  = Zencrypted Dev CA
+subject = peer_a
+```
+
+### Verify management APIs
+
+```erlang
+vpn_manager:running_peers().
+vpn_manager:status().
+vpn_manager:certificates().
+```
+
+### Verify JSON API
+
+```sh
+curl http://localhost:8080/api/admin/summary | jq .
+```
+
+Expected JSON includes:
+
+```text
+counts
+peers
+certificate information
+```
+
+### Verify Cowboy dashboard
+
+Open:
+
+```text
+http://localhost:8080/admin
+```
+
+Expected:
+
+```text
+peer table visible
+counts visible
+```
+
+### Verify N2O dashboard
+
+Open:
+
+```text
+http://localhost:8080/admin/n2o
+```
+
+Expected:
+
+```text
+Reload Config button
+peer table
+Start / Stop actions
+```
+
+### Interactive demo
+
+Stop `peer_a` from the N2O dashboard. Expected result:
+
+```text
+Running Peers: 1
+Stopped Peers: 1
+```
+
+Start `peer_a` again. Expected result:
+
+```text
+Running Peers: 2
+Stopped Peers: 0
+```
+
+Click `Reload Config`. Expected result:
+
+```text
+Configuration reloaded
+```
+
+### Current Milestone
+
+```text
+VPN dataplane operational
+PKI identity operational
+CA trust validation operational
+Certificate/key ownership verification operational
+JSON API operational
+Cowboy dashboard operational
+N2O dashboard operational
+Interactive peer management operational
+```
+
 ## VPN Management API
 
 `vpn_manager` is the initial management layer for supervised peers. It is
