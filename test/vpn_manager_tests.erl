@@ -179,6 +179,33 @@ admin_facade_test_() ->
                                          running => 2,
                                          stopped => 0},
                                        vpn_admin:peer_counts()),
+                          Summary1 = vpn_admin:summary(),
+                          ?assertMatch(#{counts := #{configured := 2,
+                                                     running := 2,
+                                                     stopped := 0,
+                                                     certificates := 2},
+                                         peers := [_ | _]},
+                                       Summary1),
+                          SummaryPeers1 = maps:get(peers, Summary1),
+                          ?assertEqual([peer_a, peer_b],
+                                       lists:sort([maps:get(id, Peer)
+                                                   || Peer <- SummaryPeers1])),
+                          PeerA1 = summary_peer(peer_a, SummaryPeers1),
+                          ?assertMatch(#{id := peer_a,
+                                         running := true,
+                                         mode := tun,
+                                         ip := "10.20.20.1",
+                                         remote_peer_id := peer_b,
+                                         crypto_failures := 0,
+                                         frames_rejected := 0,
+                                         certificate := #{subject := {subject, peer_a},
+                                                          issuer := {issuer, peer_a},
+                                                          trusted := true,
+                                                          key_match := true,
+                                                          not_after := {utcTime, "270606000000Z"}}},
+                                       PeerA1),
+                          ?assertNot(summary_contains_key(private_key_path, PeerA1)),
+                          ?assertNot(summary_contains_key(psk, PeerA1)),
                           ?assertEqual(ok, vpn_manager:stop_peer(peer_a)),
                           ?assertEqual(#{configured_peers => 2,
                                          running_peers => 1,
@@ -188,7 +215,9 @@ admin_facade_test_() ->
                           ?assertEqual(#{configured => 2,
                                          running => 1,
                                          stopped => 1},
-                                       vpn_admin:peer_counts())
+                                       vpn_admin:peer_counts()),
+                          PeerA2 = summary_peer(peer_a, maps:get(peers, vpn_admin:summary())),
+                          ?assertEqual(false, maps:get(running, PeerA2))
                       end)]
      end}.
 
@@ -233,11 +262,13 @@ handle_call(identity_info, _From, State = #{id := PeerId}) ->
                                not_after => {utcTime, "270606000000Z"}}},
      State};
 handle_call(config, _From, State = #{id := PeerId, config := Config}) ->
-    {reply, maps:with([id, mode, ifname, ip], Config#{id => PeerId}), State};
+    {reply, maps:with([id, mode, ifname, ip, remote_peer_id], Config#{id => PeerId}), State};
 handle_call(stats, _From, State = #{id := PeerId}) ->
     {reply, #{id => PeerId,
               link => #{tun_rx_packets => 0,
-                        udp_tx_packets => 0}},
+                        udp_tx_packets => 0},
+              crypto_failures => 0,
+              frames_rejected => 0},
      State};
 handle_call(_Request, _From, State) ->
     {reply, {error, not_implemented}, State}.
@@ -257,6 +288,8 @@ peer_config(PeerId) ->
       mode => tun,
       ifname => list_to_binary(atom_to_list(PeerId)),
       ip => "10.20.20.1",
+      remote_peer_id => remote_peer_id(PeerId),
+      psk => <<"test-psk-should-not-leak">>,
       certificate_path => certificate_path(PeerId),
       private_key_path => private_key_path(PeerId),
       ca_certificate_path => "priv/certs/ca.crt"}.
@@ -287,6 +320,24 @@ private_key_path(peer_b) ->
     "priv/certs/peer_b.key";
 private_key_path(_PeerId) ->
     "priv/certs/peer_a.key".
+
+remote_peer_id(peer_a) ->
+    peer_b;
+remote_peer_id(peer_b) ->
+    peer_a;
+remote_peer_id(_PeerId) ->
+    undefined.
+
+summary_peer(PeerId, Peers) ->
+    hd([Peer || #{id := Id} = Peer <- Peers, Id =:= PeerId]).
+
+summary_contains_key(Key, Map) when is_map(Map) ->
+    maps:is_key(Key, Map) orelse lists:any(fun(Value) -> summary_contains_key(Key, Value) end,
+                                           maps:values(Map));
+summary_contains_key(Key, Values) when is_list(Values) ->
+    lists:any(fun(Value) -> summary_contains_key(Key, Value) end, Values);
+summary_contains_key(_Key, _Value) ->
+    false.
 
 wait_until_stopped(_SupPid, 0) ->
     ok;

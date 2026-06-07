@@ -133,12 +133,33 @@ N2O/EXO dashboard pages:
 
 ```erlang
 vpn_admin:dashboard().
+vpn_admin:summary().
 vpn_admin:overview().
 vpn_admin:peer_counts().
 ```
 
-`dashboard/0` aggregates manager status and certificate inventory. `overview/0`
-returns compact dashboard counts:
+`dashboard/0` aggregates raw manager status and certificate inventory.
+`summary/0` returns a compact first-screen view:
+
+```erlang
+#{
+    counts => #{configured => 2, running => 2, stopped => 0, certificates => 2},
+    peers => [
+        #{
+            id => peer_a,
+            running => true,
+            mode => tun,
+            ip => "10.20.20.1",
+            remote_peer_id => peer_b,
+            crypto_failures => 0,
+            frames_rejected => 0,
+            certificate => #{trusted => true, key_match => true}
+        }
+    ]
+}
+```
+
+`overview/0` returns compact dashboard counts:
 
 ```erlang
 #{
