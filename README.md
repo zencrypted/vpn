@@ -209,6 +209,28 @@ Example shape:
 
 Lifecycle operations remain in `vpn_manager`.
 
+## Administration JSON Export
+
+`summary_json/0` encodes the JSON-safe administration summary for future
+Cowboy/N2O handlers. `summary_json_pretty/0` currently returns the same binary
+and is reserved as a formatting extension point.
+
+```erlang
+vpn_admin:summary_json().
+vpn_admin:summary_json_pretty().
+```
+
+Shell validation:
+
+```erlang
+Json = vpn_admin:summary_json().
+is_binary(Json).
+
+Decoded = jiffy:decode(Json, [return_maps]).
+maps:get(<<"counts">>, Decoded).
+maps:get(<<"peers">>, Decoded).
+```
+
 ## Certificate Inventory
 
 `vpn_manager` exposes certificate inventory helpers for administration screens:

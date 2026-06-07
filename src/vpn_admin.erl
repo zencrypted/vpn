@@ -6,6 +6,8 @@
 -export([dashboard/0,
          summary/0,
          summary_view/0,
+         summary_json/0,
+         summary_json_pretty/0,
          certificate_view/1,
          extract_cn/1,
          overview/0,
@@ -27,6 +29,18 @@ summary_view() ->
     Summary = summary(),
     #{counts => maps:get(counts, Summary, #{}),
       peers => [peer_view(Peer) || Peer <- maps:get(peers, Summary, [])]}.
+
+summary_json() ->
+    try
+        jiffy:encode(summary_view())
+    catch
+        _:Reason ->
+            jiffy:encode(#{error => <<"summary_generation_failed">>,
+                           reason => iolist_to_binary(io_lib:format("~p", [Reason]))})
+    end.
+
+summary_json_pretty() ->
+    summary_json().
 
 overview() ->
     Counts = peer_counts(),
