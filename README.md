@@ -349,6 +349,20 @@ HTTP/1.1 200 OK
 content-type: text/html
 ```
 
+## Interactive N2O Dashboard
+
+The N2O dashboard includes interactive controls that update the counts and peer
+table without a browser page reload:
+
+```text
+Start peer
+Stop peer
+Reload config
+```
+
+The controls use N2O events and Nitro DOM updates. Displayed state still comes
+from `vpn_admin:summary_view/0`.
+
 ## Certificate Inventory
 
 `vpn_manager` exposes certificate inventory helpers for administration screens:
