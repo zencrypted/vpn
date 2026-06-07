@@ -90,7 +90,7 @@ render_peer_table(Peers) ->
     Rows = [render_peer_row(Peer) || Peer <- Peers],
     #table{
         header = HeaderRow,
-        body = Rows
+        body = #tbody{body = Rows}
     }.
 
 table_headers() ->
