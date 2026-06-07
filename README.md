@@ -772,12 +772,33 @@ supervisor:which_children(vpn_peer_sup).
 
 ## Local Tunnel Validation
 
-The Erlang VM must have permission to create and configure TAP interfaces. Give
-the active `beam.smp` binary `cap_net_admin` before starting the shell:
+The Erlang VM must have permission to create and configure TAP/TUN interfaces.
+
+### Linux Setup
+
+On Linux, give the active `beam.smp` binary `cap_net_admin` before starting the shell:
 
 ```sh
 sudo setcap cap_net_admin=ep <beam.smp>
 ```
+
+### macOS Setup
+
+On macOS, setuid permissions must be configured for the `procket` helper binary.
+
+1. Build the project first to compile `procket`:
+   ```sh
+   rebar3 compile
+   ```
+
+2. Copy the compiled helper binary to a system directory (like `/usr/local/bin`) and make it owned by root with setuid permissions enabled:
+   ```sh
+   sudo cp _build/default/lib/procket/priv/procket /usr/local/bin/procket
+   sudo chown root /usr/local/bin/procket
+   sudo chmod 4750 /usr/local/bin/procket
+   ```
+
+   *Note: In `config/sys.config`, the `procket` app is configured to use `/usr/local/bin/procket` for the helper executable via `{port_executable, "/usr/local/bin/procket"}`.*
 
 Start the project shell:
 
