@@ -25,6 +25,12 @@ init([]) ->
           restart => permanent,
           shutdown => infinity,
           type => supervisor,
-          modules => [vpn_peer_sup]}
+          modules => [vpn_peer_sup]},
+        #{id => vpn_http,
+          start => {vpn_http, start_link, []},
+          restart => permanent,
+          shutdown => 5000,
+          type => worker,
+          modules => [vpn_http]}
     ],
     {ok, {SupFlags, ChildSpecs}}.

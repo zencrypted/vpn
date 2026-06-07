@@ -231,6 +231,29 @@ maps:get(<<"counts">>, Decoded).
 maps:get(<<"peers">>, Decoded).
 ```
 
+## HTTP Admin Endpoint
+
+The application starts a local read-only Cowboy endpoint for the admin summary.
+The port is configured with `{http_port, 8080}` under the `vpn` application
+environment.
+
+```bash
+curl http://localhost:8080/api/admin/summary
+```
+
+Expected response:
+
+```json
+{
+  "counts": {},
+  "peers": []
+}
+```
+
+The endpoint only supports `GET /api/admin/summary`. Peer lifecycle actions,
+configuration writes, certificate issuance, TLS, authentication, and UI routes
+are intentionally not exposed here.
+
 ## Certificate Inventory
 
 `vpn_manager` exposes certificate inventory helpers for administration screens:
