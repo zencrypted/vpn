@@ -66,7 +66,14 @@ certificate_for_peer(PeerId, Certificates) ->
     end.
 
 compact_certificate(Certificate) ->
-    maps:with([subject, issuer, trusted, key_match, not_after], Certificate).
+    maps:with(
+        [subject,
+            issuer,
+            trusted,
+            key_match,
+            not_before,
+            not_after],
+        Certificate).
 
 peer_view(Peer) ->
     #{id => json_value(maps:get(id, Peer, undefined)),
