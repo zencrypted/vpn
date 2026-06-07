@@ -303,6 +303,32 @@ Each action redirects back to `/admin` with `HTTP 303 See Other`. The controls
 delegate to the existing `vpn_manager` functions and do not add JavaScript,
 N2O, WebSockets, authentication, authorization, or certificate management.
 
+## N2O Dashboard Skeleton
+
+A minimal read-only N2O/Nitro skeleton page is available separately from the
+plain Cowboy dashboard:
+
+```text
+http://localhost:8080/admin/n2o
+```
+
+It renders `VPN Dashboard (N2O)` and peer counts from
+`vpn_admin:summary_view/0`. It does not include start/stop/reload actions,
+live updates, WebSockets, authentication, authorization, or certificate actions.
+
+Runtime validation:
+
+```bash
+curl -i http://localhost:8080/admin/n2o
+```
+
+Expected:
+
+```text
+HTTP/1.1 200 OK
+content-type: text/html
+```
+
 ## Certificate Inventory
 
 `vpn_manager` exposes certificate inventory helpers for administration screens:

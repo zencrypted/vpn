@@ -15,6 +15,7 @@ start_link() ->
         {'_', [
             {"/", vpn_dashboard_http, []},
             {"/admin", vpn_dashboard_http, []},
+            {"/admin/n2o", vpn_n2o_admin, []},
             {"/admin/peer/:id/start", vpn_peer_action_http, #{action => start}},
             {"/admin/peer/:id/stop", vpn_peer_action_http, #{action => stop}},
             {"/admin/reload", vpn_reload_http, []},

@@ -60,6 +60,8 @@ vpn_http_exports_test() ->
     ?assert(erlang:function_exported(vpn_admin_http, init, 2)),
     ?assertMatch({module, vpn_dashboard_http}, code:ensure_loaded(vpn_dashboard_http)),
     ?assert(erlang:function_exported(vpn_dashboard_http, init, 2)),
+    ?assertMatch({module, vpn_n2o_admin}, code:ensure_loaded(vpn_n2o_admin)),
+    ?assert(erlang:function_exported(vpn_n2o_admin, init, 2)),
     ?assertMatch({module, vpn_peer_action_http}, code:ensure_loaded(vpn_peer_action_http)),
     ?assert(erlang:function_exported(vpn_peer_action_http, init, 2)),
     ?assertMatch({module, vpn_reload_http}, code:ensure_loaded(vpn_reload_http)),
