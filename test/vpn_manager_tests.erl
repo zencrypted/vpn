@@ -196,8 +196,8 @@ admin_facade_test_() ->
                                          mode := tun,
                                          ip := "10.20.20.1",
                                          remote_peer_id := peer_b,
-                                         crypto_failures := 0,
-                                         frames_rejected := 0,
+                                         crypto_failures := 7,
+                                         frames_rejected := 3,
                                          certificate := #{subject := {subject, peer_a},
                                                           issuer := {issuer, peer_a},
                                                           trusted := true,
@@ -266,9 +266,9 @@ handle_call(config, _From, State = #{id := PeerId, config := Config}) ->
 handle_call(stats, _From, State = #{id := PeerId}) ->
     {reply, #{id => PeerId,
               link => #{tun_rx_packets => 0,
-                        udp_tx_packets => 0},
-              crypto_failures => 0,
-              frames_rejected => 0},
+                        udp_tx_packets => 0,
+                        crypto_failures => crypto_failures(PeerId),
+                        frames_rejected => frames_rejected(PeerId)}},
      State};
 handle_call(_Request, _From, State) ->
     {reply, {error, not_implemented}, State}.
@@ -327,6 +327,16 @@ remote_peer_id(peer_b) ->
     peer_a;
 remote_peer_id(_PeerId) ->
     undefined.
+
+crypto_failures(peer_a) ->
+    7;
+crypto_failures(_PeerId) ->
+    0.
+
+frames_rejected(peer_a) ->
+    3;
+frames_rejected(_PeerId) ->
+    0.
 
 summary_peer(PeerId, Peers) ->
     hd([Peer || #{id := Id} = Peer <- Peers, Id =:= PeerId]).

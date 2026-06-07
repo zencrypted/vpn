@@ -34,14 +34,15 @@ peer_counts() ->
 summary_peer(PeerId, PeerStatus, Certificates) ->
     Config = maps:get(config, PeerStatus, #{}),
     Stats = maps:get(stats, PeerStatus, #{}),
+    LinkStats = maps:get(link, Stats, #{}),
     Certificate = certificate_for_peer(PeerId, Certificates),
     #{id => PeerId,
       running => maps:get(running, PeerStatus, false),
       mode => maps:get(mode, Config, undefined),
       ip => maps:get(ip, Config, undefined),
       remote_peer_id => maps:get(remote_peer_id, Config, undefined),
-      crypto_failures => maps:get(crypto_failures, Stats, 0),
-      frames_rejected => maps:get(frames_rejected, Stats, 0),
+      crypto_failures => maps:get(crypto_failures, LinkStats, 0),
+      frames_rejected => maps:get(frames_rejected, LinkStats, 0),
       certificate => compact_certificate(Certificate)}.
 
 certificate_for_peer(PeerId, Certificates) ->
