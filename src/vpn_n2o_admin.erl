@@ -41,19 +41,13 @@ reply_page(Req0, State) ->
 
 render(Summary) ->
     Counts = maps:get(counts, Summary, #{}),
+    Peers = maps:get(peers, Summary, []),
     Body = nitro:render([
         #main{
             body = [
                 #h1{body = <<"VPN Dashboard (N2O)">>},
-                #section{
-                    class = <<"counts">>,
-                    body = [
-                        count_card(<<"Configured Peers">>, maps:get(configured, Counts, 0)),
-                        count_card(<<"Running Peers">>, maps:get(running, Counts, 0)),
-                        count_card(<<"Stopped Peers">>, maps:get(stopped, Counts, 0)),
-                        count_card(<<"Certificates">>, maps:get(certificates, Counts, 0))
-                    ]
-                },
+                render_counts(Counts),
+                render_peer_table(Peers),
                 #p{class = <<"runtime">>,
                    body = [<<"N2O ">>, n2o_version(), <<" / Nitro rendered">>]}
             ]
@@ -69,6 +63,17 @@ render(Summary) ->
         <<"</body></html>">>
     ]).
 
+render_counts(Counts) ->
+    #section{
+        class = <<"counts">>,
+        body = [
+            count_card(<<"Configured Peers">>, maps:get(configured, Counts, 0)),
+            count_card(<<"Running Peers">>, maps:get(running, Counts, 0)),
+            count_card(<<"Stopped Peers">>, maps:get(stopped, Counts, 0)),
+            count_card(<<"Certificates">>, maps:get(certificates, Counts, 0))
+        ]
+    }.
+
 count_card(Label, Value) ->
     #panel{
         class = <<"count">>,
@@ -78,16 +83,93 @@ count_card(Label, Value) ->
         ]
     }.
 
+render_peer_table(Peers) ->
+    #table{
+        header = [
+            #tr{cells = [header_cell(Label) || Label <- table_headers()]}
+        ],
+        body = [render_peer_row(Peer) || Peer <- Peers]
+    }.
+
+table_headers() ->
+    [
+        <<"Peer">>,
+        <<"Running">>,
+        <<"Mode">>,
+        <<"IP">>,
+        <<"Remote Peer">>,
+        <<"Trusted">>,
+        <<"Key Match">>,
+        <<"Expires">>,
+        <<"Crypto Failures">>,
+        <<"Frames Rejected">>
+    ].
+
+header_cell(Label) ->
+    #th{body = Label}.
+
+render_peer_row(Peer) ->
+    Certificate = maps:get(certificate, Peer, #{}),
+    #tr{
+        cells = [
+            cell(maps:get(id, Peer, null)),
+            cell(yes_no(maps:get(running, Peer, false))),
+            cell(maps:get(mode, Peer, null)),
+            cell(maps:get(ip, Peer, null)),
+            cell(maps:get(remote_peer_id, Peer, null)),
+            cell(yes_no(maps:get(trusted, Certificate, false))),
+            cell(yes_no(maps:get(key_match, Certificate, false))),
+            cell(maps:get(not_after, Certificate, null)),
+            cell(maps:get(crypto_failures, Peer, 0)),
+            cell(maps:get(frames_rejected, Peer, 0))
+        ]
+    }.
+
+cell(Value) ->
+    #td{body = value(Value)}.
+
+yes_no(true) ->
+    <<"yes">>;
+yes_no(false) ->
+    <<"no">>;
+yes_no(_Value) ->
+    <<"no">>.
+
+value(null) ->
+    <<>>;
+value(undefined) ->
+    <<>>;
+value(Value) when is_binary(Value) ->
+    Value;
+value(Value) when is_integer(Value) ->
+    integer_to_binary(Value);
+value(Value) when is_float(Value) ->
+    float_to_binary(Value, [{decimals, 6}, compact]);
+value(true) ->
+    <<"true">>;
+value(false) ->
+    <<"false">>;
+value(Value) when is_atom(Value) ->
+    atom_to_binary(Value, utf8);
+value(Value) when is_list(Value) ->
+    unicode:characters_to_binary(Value);
+value(_Value) ->
+    <<>>.
+
 style() ->
     <<"<style>"
       "body{font-family:system-ui,-apple-system,BlinkMacSystemFont,\"Segoe UI\",sans-serif;"
       "margin:0;background:#f6f7f9;color:#17202a;}"
-      "main{max-width:960px;margin:0 auto;padding:32px 20px;}"
+      "main{max-width:1180px;margin:0 auto;padding:32px 20px;}"
       "h1{font-size:28px;margin:0 0 24px;}"
       ".counts{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:24px;}"
       ".count{background:#fff;border:1px solid #d8dee4;border-radius:6px;padding:14px;}"
       ".count span{display:block;color:#57606a;font-size:13px;margin-bottom:8px;}"
       ".count .value{font-size:24px;color:#17202a;}"
+      "table{width:100%;border-collapse:collapse;background:#fff;border:1px solid #d8dee4;border-radius:6px;overflow:hidden;}"
+      "th,td{text-align:left;border-bottom:1px solid #d8dee4;padding:10px 12px;font-size:14px;}"
+      "th{background:#eef1f4;color:#24292f;font-weight:600;}"
+      "tr:last-child td{border-bottom:0;}"
       ".runtime{color:#57606a;font-size:13px;}"
       "</style>">>.
 
