@@ -29,7 +29,9 @@ reply_page(Req0, State) ->
                 Req0),
             {ok, Req, State}
     catch
-        _:_ ->
+        Class:Reason:Stack ->
+            logger:error("N2O dashboard render failed: ~p:~p~n~p",
+                         [Class, Reason, Stack]),
             Req = cowboy_req:reply(
                 500,
                 #{<<"content-type">> => <<"text/html; charset=utf-8">>},
@@ -84,11 +86,11 @@ count_card(Label, Value) ->
     }.
 
 render_peer_table(Peers) ->
+    HeaderRow = #tr{cells = [header_cell(Label) || Label <- table_headers()]},
+    Rows = [render_peer_row(Peer) || Peer <- Peers],
     #table{
-        header = [
-            #tr{cells = [header_cell(Label) || Label <- table_headers()]}
-        ],
-        body = [render_peer_row(Peer) || Peer <- Peers]
+        header = HeaderRow,
+        body = Rows
     }.
 
 table_headers() ->
