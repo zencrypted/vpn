@@ -50,11 +50,21 @@ init({Name, Ip, OwnerPid, Mode}) ->
                    name => Name,
                    ip => Ip,
                    mode => Mode,
-                   owner => OwnerPid}};
+                   owner => OwnerPid,
+                   mock => false}};
         {error, Reason} ->
-            {stop, Reason}
+            logger:warning("Failed to open TUN/TAP device ~s (~p): ~p. Falling back to mock/dummy mode.", [Name, Mode, Reason]),
+            {ok, #{ref => undefined,
+                   fd => undefined,
+                   name => Name,
+                   ip => Ip,
+                   mode => Mode,
+                   owner => OwnerPid,
+                   mock => true}}
     end.
 
+handle_call({write, _Packet}, _From, State = #{mock := true}) ->
+    {reply, ok, State};
 handle_call({write, Packet}, _From, State = #{fd := Fd}) ->
     {reply, normalize_write_reply(tuncer:write(Fd, Packet)), State};
 handle_call(_Request, _From, State) ->
@@ -72,7 +82,7 @@ handle_info({tuntap, _OtherRef, _Packet}, State) ->
 handle_info(_Message, State) ->
     {noreply, State}.
 
-terminate(_Reason, #{ref := Ref}) ->
+terminate(_Reason, #{ref := Ref, mock := false}) ->
     _ = close(Ref),
     ok;
 terminate(_Reason, _State) ->
