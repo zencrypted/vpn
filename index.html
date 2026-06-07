@@ -105,11 +105,6 @@
 
 <p>The virtual interface intercepts IPv4/IPv6 packets, which are encapsulated into VPN frames, encrypted with the peer's pre-shared key (PSK) using ChaCha20-Poly1305, and transmitted over UDP to the remote peer. The remote peer decrypts the frame, validates it, and writes the raw packet to its local TUN/TAP interface.</p>
 
-<pre>
-TUN -> vpn_frame -> vpn_crypto -> UDP
-UDP -> vpn_crypto -> vpn_frame -> peer validation -> TUN
-</pre>
-
 <h4>SECURITY & IDENTITY</h4>
 
 <p>While the dataplane is encrypted using a temporary symmetric PSK, peers prove their identity during startup using X.509 certificates. The <code>vpn_identity</code> module validates that the peer's certificate is signed by the configured CA, verifies that it hasn't expired, and proves local ownership of the private key by comparing its public component with the public key inside the certificate. This trust-store foundation ensures that only authenticated peers can boot and initialize the dataplane link.</p>
