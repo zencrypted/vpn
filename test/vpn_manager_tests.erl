@@ -206,6 +206,41 @@ admin_facade_test_() ->
                                        PeerA1),
                           ?assertNot(summary_contains_key(private_key_path, PeerA1)),
                           ?assertNot(summary_contains_key(psk, PeerA1)),
+                          View1 = vpn_admin:summary_view(),
+                          ?assertMatch(#{counts := #{configured := 2,
+                                                     running := 2,
+                                                     stopped := 0,
+                                                     certificates := 2},
+                                         peers := [_ | _]},
+                                       View1),
+                          ViewPeerA1 = summary_peer(<<"peer_a">>, maps:get(peers, View1)),
+                          ?assertMatch(#{id := <<"peer_a">>,
+                                         running := true,
+                                         mode := <<"tun">>,
+                                         ip := <<"10.20.20.1">>,
+                                         remote_peer_id := <<"peer_b">>,
+                                         crypto_failures := 7,
+                                         frames_rejected := 3,
+                                         certificate := #{subject_cn := <<"peer_a">>,
+                                                          issuer_cn := <<"peer_a">>,
+                                                          trusted := true,
+                                                          key_match := true,
+                                                          not_after := <<"270606000000Z">>}},
+                                       ViewPeerA1),
+                          ?assert(json_safe(View1)),
+                          ?assertNot(summary_contains_key(private_key_path, ViewPeerA1)),
+                          ?assertNot(summary_contains_key(certificate_path, ViewPeerA1)),
+                          ?assertNot(summary_contains_key(psk, ViewPeerA1)),
+                          ?assertEqual(<<"peer_a">>, vpn_admin:extract_cn({subject, peer_a})),
+                          ?assertEqual(<<"Zencrypted Dev CA">>,
+                                       vpn_admin:extract_cn({rdnSequence,
+                                                            [[{'AttributeTypeAndValue',
+                                                               {2,5,4,3},
+                                                               {utf8String, <<"Zencrypted Dev CA">>}}]]})),
+                          ?assertMatch(#{not_before := <<"260606000000Z">>,
+                                         not_after := <<"270606000000Z">>},
+                                       vpn_admin:certificate_view(#{not_before => {utcTime, "260606000000Z"},
+                                                                    not_after => {utcTime, "270606000000Z"}})),
                           ?assertEqual(ok, vpn_manager:stop_peer(peer_a)),
                           ?assertEqual(#{configured_peers => 2,
                                          running_peers => 1,
@@ -347,6 +382,17 @@ summary_contains_key(Key, Map) when is_map(Map) ->
 summary_contains_key(Key, Values) when is_list(Values) ->
     lists:any(fun(Value) -> summary_contains_key(Key, Value) end, Values);
 summary_contains_key(_Key, _Value) ->
+    false.
+
+json_safe(Value) when is_integer(Value); is_float(Value); is_boolean(Value); is_binary(Value) ->
+    true;
+json_safe(null) ->
+    true;
+json_safe(Values) when is_list(Values) ->
+    lists:all(fun json_safe/1, Values);
+json_safe(Value) when is_map(Value) ->
+    lists:all(fun json_safe/1, maps:values(Value));
+json_safe(_Value) ->
     false.
 
 wait_until_stopped(_SupPid, 0) ->

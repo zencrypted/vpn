@@ -134,6 +134,7 @@ N2O/EXO dashboard pages:
 ```erlang
 vpn_admin:dashboard().
 vpn_admin:summary().
+vpn_admin:summary_view().
 vpn_admin:overview().
 vpn_admin:peer_counts().
 ```
@@ -154,6 +155,42 @@ vpn_admin:peer_counts().
             crypto_failures => 0,
             frames_rejected => 0,
             certificate => #{trusted => true, key_match => true}
+        }
+    ]
+}
+```
+
+## Admin View Model
+
+`summary_view/0` converts the compact summary into JSON-safe values for future
+N2O/Cowboy/REST/UI layers. It does not encode JSON and does not add a JSON
+library dependency.
+
+```erlang
+vpn_admin:summary_view().
+```
+
+Example shape:
+
+```erlang
+#{
+    counts => #{configured => 2, running => 2, stopped => 0, certificates => 2},
+    peers => [
+        #{
+            id => <<"peer_a">>,
+            running => true,
+            mode => <<"tun">>,
+            ip => <<"10.20.20.1">>,
+            remote_peer_id => <<"peer_b">>,
+            crypto_failures => 0,
+            frames_rejected => 0,
+            certificate => #{
+                subject_cn => <<"peer_a">>,
+                issuer_cn => <<"Zencrypted Dev CA">>,
+                trusted => true,
+                key_match => true,
+                not_after => <<"270606195431Z">>
+            }
         }
     ]
 }

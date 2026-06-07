@@ -44,6 +44,9 @@ vpn_admin_exports_test() ->
     ?assertMatch({module, vpn_admin}, code:ensure_loaded(vpn_admin)),
     ?assert(erlang:function_exported(vpn_admin, dashboard, 0)),
     ?assert(erlang:function_exported(vpn_admin, summary, 0)),
+    ?assert(erlang:function_exported(vpn_admin, summary_view, 0)),
+    ?assert(erlang:function_exported(vpn_admin, certificate_view, 1)),
+    ?assert(erlang:function_exported(vpn_admin, extract_cn, 1)),
     ?assert(erlang:function_exported(vpn_admin, overview, 0)),
     ?assert(erlang:function_exported(vpn_admin, peer_counts, 0)).
 
