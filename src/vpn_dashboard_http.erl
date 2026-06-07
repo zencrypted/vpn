@@ -47,6 +47,7 @@ render(Summary) ->
         style(),
         <<"</head><body><main>">>,
         <<"<h1>VPN Dashboard</h1>">>,
+        actions(),
         counts(Counts),
         peers_table(Peers),
         <<"</main></body></html>">>
@@ -58,6 +59,7 @@ style() ->
       "margin:0;background:#f6f7f9;color:#17202a;}"
       "main{max-width:1180px;margin:0 auto;padding:32px 20px;}"
       "h1{font-size:28px;margin:0 0 24px;}"
+      ".actions{margin:0 0 18px;}"
       ".counts{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:24px;}"
       ".count{background:#fff;border:1px solid #d8dee4;border-radius:6px;padding:14px;}"
       ".count span{display:block;color:#57606a;font-size:13px;margin-bottom:8px;}"
@@ -66,7 +68,16 @@ style() ->
       "th,td{text-align:left;border-bottom:1px solid #d8dee4;padding:10px 12px;font-size:14px;}"
       "th{background:#eef1f4;color:#24292f;font-weight:600;}"
       "tr:last-child td{border-bottom:0;}"
+      "form{margin:0;}"
+      "button{appearance:none;border:1px solid #57606a;background:#fff;border-radius:6px;"
+      "padding:7px 12px;font:inherit;cursor:pointer;}"
+      "button:hover{background:#eef1f4;}"
       "</style>">>.
+
+actions() ->
+    <<"<section class=\"actions\"><form method=\"post\" action=\"/admin/reload\">"
+      "<button type=\"submit\">Reload Config</button>"
+      "</form></section>">>.
 
 counts(Counts) ->
     [
@@ -95,6 +106,7 @@ peers_table(Peers) ->
         table_header(<<"Expires">>),
         table_header(<<"Crypto Failures">>),
         table_header(<<"Frames Rejected">>),
+        table_header(<<"Actions">>),
         <<"</tr></thead><tbody>">>,
         [peer_row(Peer) || Peer <- Peers],
         <<"</tbody></table>">>
@@ -117,11 +129,33 @@ peer_row(Peer) ->
         table_cell(maps:get(not_after, Certificate, null)),
         table_cell(maps:get(crypto_failures, Peer, 0)),
         table_cell(maps:get(frames_rejected, Peer, 0)),
+        table_cell_raw(peer_action(Peer)),
         <<"</tr>">>
     ].
 
 table_cell(Value) ->
     [<<"<td>">>, html_escape(Value), <<"</td>">>].
+
+table_cell_raw(Html) ->
+    [<<"<td>">>, Html, <<"</td>">>].
+
+peer_action(Peer) ->
+    PeerId = maps:get(id, Peer, null),
+    Running = maps:get(running, Peer, false),
+    {Action, Label} =
+        case Running of
+            true ->
+                {<<"stop">>, <<"Stop">>};
+            false ->
+                {<<"start">>, <<"Start">>}
+        end,
+    [<<"<form method=\"post\" action=\"/admin/peer/">>,
+     html_escape(PeerId),
+     <<"/">>,
+     Action,
+     <<"\"><button type=\"submit\">">>,
+     Label,
+     <<"</button></form>">>].
 
 yes_no(true) ->
     <<"yes">>;

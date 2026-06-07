@@ -281,6 +281,28 @@ HTTP/1.1 200 OK
 content-type: text/html
 ```
 
+## Dashboard Actions
+
+The dashboard includes simple HTML forms for local peer control:
+
+```text
+Start peer
+Stop peer
+Reload config
+```
+
+Routes:
+
+```text
+POST /admin/peer/peer_a/start
+POST /admin/peer/peer_a/stop
+POST /admin/reload
+```
+
+Each action redirects back to `/admin` with `HTTP 303 See Other`. The controls
+delegate to the existing `vpn_manager` functions and do not add JavaScript,
+N2O, WebSockets, authentication, authorization, or certificate management.
+
 ## Certificate Inventory
 
 `vpn_manager` exposes certificate inventory helpers for administration screens:
