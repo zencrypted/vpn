@@ -13,6 +13,8 @@ start_link() ->
     Port = application:get_env(vpn, http_port, ?DEFAULT_PORT),
     Dispatch = cowboy_router:compile([
         {'_', [
+            {"/", vpn_dashboard_http, []},
+            {"/admin", vpn_dashboard_http, []},
             {"/api/admin/summary", vpn_admin_http, []}
         ]}
     ]),

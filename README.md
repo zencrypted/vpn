@@ -254,6 +254,33 @@ The endpoint only supports `GET /api/admin/summary`. Peer lifecycle actions,
 configuration writes, certificate issuance, TLS, authentication, and UI routes
 are intentionally not exposed here.
 
+## HTML Dashboard
+
+The same Cowboy listener also serves a minimal read-only HTML dashboard:
+
+```text
+http://localhost:8080/
+http://localhost:8080/admin
+```
+
+The page renders counts and a peer table from `vpn_admin:summary_view/0`.
+It does not use JavaScript, templates, N2O, Nitro, WebSockets, or management
+actions.
+
+Runtime validation:
+
+```bash
+curl -i http://localhost:8080/
+curl -i http://localhost:8080/admin
+```
+
+Expected:
+
+```text
+HTTP/1.1 200 OK
+content-type: text/html
+```
+
 ## Certificate Inventory
 
 `vpn_manager` exposes certificate inventory helpers for administration screens:
