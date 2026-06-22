@@ -97,3 +97,7 @@ configured peer-id agreement. Control frames are not authenticated and the
 PSK dataplane remains active after establishment. Replace this skeleton with
 certificate exchange, transcript signatures, ephemeral ECDH/HKDF session keys,
 replay-safe session identifiers, rekeying and production authorization binding.
+
+## Certificate handshake follow-up
+
+The control plane now proves mutual possession of configured certificate private keys and validates each remote certificate against an explicit trust anchor. The dataplane still uses the temporary PSK after authentication. Ephemeral ECDH, HKDF-derived directional keys, replay windows, rekeying, certificate revocation, and removal of the PSK remain follow-up work.

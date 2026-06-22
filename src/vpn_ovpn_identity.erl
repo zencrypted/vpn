@@ -124,6 +124,8 @@ verify_key_match(OvpnPath, PrivateKeyPath, Config, CertPem, CaDer, CertDer, Cert
             {ok, #{config => Config,
                    ovpn_path => OvpnPath,
                    private_key_path => PrivateKeyPath,
+                   certificate_pem => CertPem,
+                   ca_certificate_pem => maps:get(ca_pem, Config),
                    certificate_fingerprint => fingerprint(CertDer),
                    ca_fingerprint => fingerprint(CaDer),
                    certificate => Certificate,

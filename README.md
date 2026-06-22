@@ -1195,3 +1195,14 @@ vpn_manager:peer_stats(peer_b).
 
 The nested link stats contain `handshake.status`, control-frame counters and
 blocked-packet/failure counters.
+
+### Mutual certificate proof in debug mode
+
+The debug profile uses `handshake_mode => certificate_control` for both peers. Each side trusts an explicitly configured remote CA, exchanges its certificate, and signs the session IDs and nonces before TUN traffic is enabled. Inspect the result with:
+
+```erlang
+vpn_manager:peer_stats(client_a).
+vpn_manager:peer_stats(peer_b).
+```
+
+The handshake map should report `status => established`, `remote_authenticated => true`, and a `remote_certificate_fingerprint`. The PSK remains transitional dataplane keying and is removed in the next ECDH/HKDF stage.

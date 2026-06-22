@@ -322,3 +322,7 @@ A complete bundle is reused, an incomplete bundle fails closed, and `--force`
 performs an explicit Device identity rotation without rotating the development
 CA. `tools/run-debug.sh` prepares this envelope before launching the debug
 Rebar3 profile.
+
+## Certificate-authenticated control plane
+
+An OVPN-backed peer can run with `handshake_mode => certificate_control`. Its inline client certificate and Device-local private key are used to sign a handshake transcript. The remote peer validates that certificate against `handshake_remote_ca_certificate_path`, checks that the certificate common name equals the configured remote peer ID, and verifies the signature before the dataplane is enabled. The private key is never transmitted. The current dataplane encryption still uses the transitional PSK until ephemeral session-key derivation is implemented.

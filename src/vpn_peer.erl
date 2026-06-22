@@ -104,9 +104,7 @@ start_link_from_config(Config, IdentityInfo) ->
     RemoteUdpPort = maps:get(remote_udp_port, Config),
     RemotePeerId = maps:get(remote_peer_id, Config),
     Psk = maps:get(psk, Config),
-    HandshakeOptions = #{mode => maps:get(handshake_mode, Config, disabled),
-                         retry_interval => maps:get(handshake_retry_interval, Config, 1000),
-                         max_retries => maps:get(handshake_max_retries, Config, 5)},
+    HandshakeOptions = handshake_options(Config, IdentityInfo),
     Identity = identity_from_config(Config),
     case vpn_link:start_link(IfName,
                              Ip,
@@ -129,10 +127,28 @@ start_link_from_config(Config, IdentityInfo) ->
             {stop, Reason}
     end.
 
+
+handshake_options(Config, IdentityInfo) ->
+    Base = #{mode => maps:get(handshake_mode, Config, disabled),
+             retry_interval => maps:get(handshake_retry_interval, Config, 1000),
+             max_retries => maps:get(handshake_max_retries, Config, 5)},
+    case maps:get(handshake_mode, Config, disabled) of
+        certificate_control ->
+            Base#{local_certificate_pem => maps:get(certificate_pem, IdentityInfo),
+                  local_private_key_path => maps:get(private_key_path, IdentityInfo),
+                  remote_ca_certificate_path => maps:get(handshake_remote_ca_certificate_path,
+                                                         Config)};
+        _ ->
+            Base
+    end.
+
 validate_config(Config) when is_map(Config) ->
     case missing_key(Config) of
         none ->
-            validate_mode(maps:get(mode, Config));
+            case validate_mode(maps:get(mode, Config)) of
+                ok -> validate_handshake_config(Config);
+                {error, _} = Error -> Error
+            end;
         {missing, Key} ->
             {error, {missing_config_key, Key}}
     end;
@@ -174,6 +190,13 @@ missing_key(Config, [Key | Rest]) ->
             {missing, Key}
     end.
 
+validate_handshake_config(#{handshake_mode := certificate_control} = Config) ->
+    case maps:get(handshake_remote_ca_certificate_path, Config, undefined) of
+        Path when is_list(Path); is_binary(Path) -> ok;
+        _ -> {error, {missing_config_key, handshake_remote_ca_certificate_path}}
+    end;
+validate_handshake_config(_Config) -> ok.
+
 validate_mode(tap) ->
     ok;
 validate_mode(tun) ->
@@ -204,7 +227,8 @@ runtime_config(Config) ->
                authorization_reason,
                handshake_mode,
                handshake_retry_interval,
-               handshake_max_retries],
+               handshake_max_retries,
+               handshake_remote_ca_certificate_path],
               Config).
 
 safe_identity_info(#{identity_ready := _} = IdentityInfo) ->
