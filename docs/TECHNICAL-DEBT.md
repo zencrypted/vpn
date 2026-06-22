@@ -22,6 +22,13 @@ runtime-only settings, and `vpn_peer_sup` starts those sessions from the
 validated before the existing dataplane starts and is exposed only through safe
 identity summaries.
 
+## Completed — Standalone local OVPN provisioning
+
+Development helpers now create an isolated EC P-384 local CA and generate a
+Device-local key, CSR, CA-signed client certificate, and canonical OVPN envelope
+without IAS. Generated material remains beneath the Git-ignored `local/` tree.
+This flow is explicitly test-only and carries no IAS authorization semantics.
+
 ## TD-003 — Certificate-authenticated session
 
 The current dataplane uses a static PSK. Replace or encapsulate it with a

@@ -225,6 +225,21 @@ It contains only ordinary OVPN directives, embeds the repository development CA
 and `peer_a` public certificate, and references the private key by the safe
 relative path `keys/peer_a.key`.
 
+## Local development producer
+
+The repository also provides a standalone development producer for local
+testing without IAS:
+
+```sh
+./tools/init-local-ca.sh
+./tools/generate-local-ovpn.sh --name client_a --remote 127.0.0.1 --port 5556
+```
+
+It emits the same strict ordinary-syntax `ovpn/v1` envelope and keeps the
+private key outside the file. Its local CA and issued identities are test-only.
+It does not provide Device binding, authorization, 2FA, audit lineage,
+revocation synchronization, or any other IAS policy semantics.
+
 ## Producer responsibilities
 
 IAS, as producer, MUST:

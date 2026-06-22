@@ -136,6 +136,48 @@ Run the helper smoke tests with:
 ./tools/test-generate-device-csr.sh
 ```
 
+## Generate a standalone local OVPN bundle
+
+Local development does not require IAS. Initialize a development-only CA once:
+
+```sh
+./tools/init-local-ca.sh
+```
+
+Then generate a Device-local EC P-384 key, CSR, CA-signed client certificate,
+and canonical OVPN envelope:
+
+```sh
+./tools/generate-local-ovpn.sh \
+  --name client_a \
+  --remote 127.0.0.1 \
+  --port 5556
+```
+
+The generated material is written beneath the Git-ignored `local/` directory:
+
+```text
+local/
+├── ca/
+│   ├── ca.key
+│   └── ca.crt
+├── keys/
+├── csr/
+├── certs/
+└── client_a-<timestamp>.ovpn
+```
+
+The OVPN file contains only public CA/client certificates and a relative
+`key keys/...` reference. The private key remains local with mode `600`. This
+flow is intentionally development-only and does not reproduce IAS Device
+binding, authorization, 2FA, audit, or revocation state.
+
+Run the local provisioning smoke tests with:
+
+```sh
+./tools/test-local-ovpn.sh
+```
+
 ## Demo Guide
 
 This guide shows the current end-to-end VPN milestone: encrypted TUN peers,
