@@ -105,6 +105,37 @@ A successful result contains `trusted => true`, `key_match => true`, and
 identity state; it excludes the embedded public PEM material and never exposes
 the private-key body.
 
+## Generate a Device key and CSR
+
+The shared helper supports both an ad-hoc timestamped mode and exact filenames
+selected by an IAS provisioning plan.
+
+Ad-hoc mode:
+
+```sh
+./tools/generate-device-csr.sh laptop
+```
+
+IAS-planned mode:
+
+```sh
+./tools/generate-device-csr.sh \
+  --common-name laptop-20260622-164258-106 \
+  --key-file local/keys/laptop-20260622-164258-106.key \
+  --csr-file local/csr/laptop-20260622-164258-106.csr
+```
+
+The planned mode creates the exact private-key reference that IAS will later
+place in the `.ovpn` envelope. Paths must be safe and relative; existing files
+are never overwritten. The private key is written with mode `600`, while the
+public CSR is written with mode `644`.
+
+Run the helper smoke tests with:
+
+```sh
+./tools/test-generate-device-csr.sh
+```
+
 ## Demo Guide
 
 This guide shows the current end-to-end VPN milestone: encrypted TUN peers,
