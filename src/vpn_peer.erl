@@ -46,7 +46,7 @@ handle_call(reset_stats, _From, State = #{link_pid := LinkPid}) ->
 handle_call(identity, _From, State = #{identity := Identity}) ->
     {reply, Identity, State};
 handle_call(identity_info, _From, State = #{identity_info := IdentityInfo}) ->
-    {reply, vpn_identity:safe_info(IdentityInfo), State};
+    {reply, safe_identity_info(IdentityInfo), State};
 handle_call(config, _From, State = #{config := Config}) ->
     {reply, runtime_config(Config), State};
 handle_call(_Request, _From, State) ->
@@ -64,12 +64,20 @@ terminate(_Reason, State) ->
     stop_link(maps:get(link_pid, State, undefined)),
     ok.
 
-start_link_with_identity(Config) ->
-    case vpn_identity:load(Config) of
-        {ok, IdentityInfo} ->
-            start_link_from_config(Config, IdentityInfo);
-        {error, Reason} ->
-            {stop, Reason}
+start_link_with_identity(Config0) ->
+    case maps:take(ovpn_identity, Config0) of
+        {IdentityInfo, Config} ->
+            case maps:get(identity_ready, IdentityInfo, false) of
+                true -> start_link_from_config(Config, IdentityInfo);
+                false -> {stop, ovpn_identity_not_ready}
+            end;
+        error ->
+            case vpn_identity:load(Config0) of
+                {ok, IdentityInfo} ->
+                    start_link_from_config(Config0, IdentityInfo);
+                {error, Reason} ->
+                    {stop, Reason}
+            end
     end.
 
 start_link_from_config(Config, IdentityInfo) ->
@@ -114,19 +122,29 @@ validate_config(_Config) ->
     {error, invalid_config}.
 
 missing_key(Config) ->
-    Required = [id,
-                mode,
-                ifname,
-                ip,
-                local_udp_port,
-                remote_ip,
-                remote_udp_port,
-                remote_peer_id,
-                psk,
-                certificate_path,
-                private_key_path,
-                ca_certificate_path],
-    missing_key(Config, Required).
+    Common = [id,
+              mode,
+              ifname,
+              ip,
+              local_udp_port,
+              remote_ip,
+              remote_udp_port,
+              remote_peer_id,
+              psk],
+    case missing_key(Config, Common) of
+        none -> missing_identity_key(Config);
+        Missing -> Missing
+    end.
+
+missing_identity_key(Config) ->
+    case maps:is_key(ovpn_identity, Config) of
+        true -> none;
+        false ->
+            missing_key(Config,
+                        [certificate_path,
+                         private_key_path,
+                         ca_certificate_path])
+    end.
 
 missing_key(_Config, []) ->
     none;
@@ -150,7 +168,8 @@ identity_from_config(Config) ->
       name => maps:get(name, Config, undefined),
       certificate_path => maps:get(certificate_path, Config, undefined),
       private_key_path => maps:get(private_key_path, Config, undefined),
-      ca_certificate_path => maps:get(ca_certificate_path, Config, undefined)}.
+      ca_certificate_path => maps:get(ca_certificate_path, Config, undefined),
+      ovpn_path => maps:get(ovpn_path, Config, undefined)}.
 
 runtime_config(Config) ->
     maps:with([id,
@@ -160,8 +179,14 @@ runtime_config(Config) ->
                local_udp_port,
                remote_ip,
                remote_udp_port,
-               remote_peer_id],
+               remote_peer_id,
+               ovpn_path],
               Config).
+
+safe_identity_info(#{identity_ready := _} = IdentityInfo) ->
+    vpn_ovpn_identity:safe_info(IdentityInfo);
+safe_identity_info(IdentityInfo) ->
+    vpn_identity:safe_info(IdentityInfo).
 
 stop_link(undefined) ->
     ok;

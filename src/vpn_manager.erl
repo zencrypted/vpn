@@ -108,9 +108,9 @@ running_certificate_status(PeerId) ->
 stopped_certificate_status(PeerId) ->
     case find_peer_config(PeerId) of
         {ok, PeerConfig} ->
-            case vpn_identity:load(PeerConfig) of
+            case configured_identity(PeerConfig) of
                 {ok, Identity} ->
-                    certificate_entry(PeerId, false, vpn_identity:safe_info(Identity));
+                    certificate_entry(PeerId, false, Identity);
                 {error, Reason} ->
                     #{peer_id => PeerId,
                       running => false,
@@ -120,6 +120,15 @@ stopped_certificate_status(PeerId) ->
             #{peer_id => PeerId,
               running => false,
               error => not_found}
+    end.
+
+
+configured_identity(#{ovpn_identity := Identity}) ->
+    {ok, vpn_ovpn_identity:safe_info(Identity)};
+configured_identity(PeerConfig) ->
+    case vpn_identity:load(PeerConfig) of
+        {ok, Identity} -> {ok, vpn_identity:safe_info(Identity)};
+        {error, _} = Error -> Error
     end.
 
 certificate_entry(PeerId, Running, Identity) ->
@@ -249,7 +258,10 @@ running_peer_ids() ->
                           is_pid(Pid)]).
 
 configured_peers() ->
-    application:get_env(vpn, peers, []).
+    case vpn_session_config:configured_peers() of
+        {ok, Peers} -> Peers;
+        {error, Reason} -> erlang:error(Reason)
+    end.
 
 peer_children() ->
     try supervisor:which_children(vpn_peer_sup) of

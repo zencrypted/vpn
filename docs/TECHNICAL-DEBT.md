@@ -14,6 +14,14 @@ certificate/key ownership without exposing private-key material. The legacy
 file-config path in `vpn_identity` still uses its existing RSA record comparison;
 new OVPN imports use the algorithm-neutral OpenSSL ownership check.
 
+## Completed — OVPN-backed validated session startup
+
+`vpn_session_config` now combines a validated OVPN identity with trusted
+runtime-only settings, and `vpn_peer_sup` starts those sessions from the
+`ovpn_sessions` application environment. OVPN-derived certificate material is
+validated before the existing dataplane starts and is exposed only through safe
+identity summaries.
+
 ## TD-003 — Certificate-authenticated session
 
 The current dataplane uses a static PSK. Replace or encapsulate it with a

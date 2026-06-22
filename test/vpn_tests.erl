@@ -129,3 +129,10 @@ vpn_udp_sink_exports_test() ->
     ?assertMatch({module, vpn_udp_sink}, code:ensure_loaded(vpn_udp_sink)),
     ?assert(erlang:function_exported(vpn_udp_sink, start_link, 1)),
     ?assert(erlang:function_exported(vpn_udp_sink, stop, 1)).
+
+vpn_session_config_exports_test() ->
+    ?assertMatch({module, vpn_session_config}, code:ensure_loaded(vpn_session_config)),
+    ?assert(erlang:function_exported(vpn_session_config, load, 2)),
+    ?assert(erlang:function_exported(vpn_session_config, from_spec, 1)),
+    ?assert(erlang:function_exported(vpn_session_config, configured_peers, 0)),
+    ?assert(erlang:function_exported(vpn_session_config, safe_info, 1)).

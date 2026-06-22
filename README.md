@@ -1048,3 +1048,51 @@ Diagnostics are intended for tunnel validation and troubleshooting.
 - No umbrella project.
 - No external framework dependencies.
 - No CA/PKI logic or key exchange yet.
+
+## OVPN-backed Session Startup
+
+A validated IAS-generated OVPN envelope can now supply the certificate identity,
+remote endpoint, transport, and tunnel mode for a runtime peer. Runtime-only
+values remain in trusted application configuration.
+
+Configure `ovpn_sessions` under the `vpn` application environment:
+
+```erlang
+{ovpn_sessions, [
+    #{
+        id => client_a,
+        name => <<"Client A">>,
+        ovpn_path => "local/client_a.ovpn",
+        ifname => <<"tun0">>,
+        ip => "10.20.20.1",
+        local_udp_port => 5555,
+        remote_peer_id => gateway,
+        psk => <<"temporary-development-psk-32bytes">>
+    }
+]}
+```
+
+At startup, `vpn_session_config` validates the OVPN identity before any peer is
+started. It then maps the OVPN endpoint and `dev tun` settings into the existing
+runtime peer configuration. An invalid certificate, mismatched private key,
+unsafe key permissions, missing key, or malformed OVPN envelope fails the
+session startup.
+
+The static `psk` remains a temporary dataplane requirement. This stage wires the
+validated certificate identity into startup but does not yet implement a
+certificate-authenticated handshake or derive traffic keys from certificates.
+
+For a direct inspection without starting the tunnel:
+
+```erlang
+Runtime = #{
+    id => client_a,
+    ifname => <<"tun0">>,
+    ip => "10.20.20.1",
+    local_udp_port => 5555,
+    remote_peer_id => gateway,
+    psk => <<"temporary-development-psk-32bytes">>
+},
+{ok, Session} = vpn_session_config:load("local/client_a.ovpn", Runtime),
+vpn_session_config:safe_info(Session).
+```

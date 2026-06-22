@@ -26,7 +26,7 @@ stop_peer(PeerId) ->
     end.
 
 init([]) ->
-    Peers = application:get_env(vpn, peers, []),
+    Peers = configured_peers(),
     SupFlags = #{
         strategy => one_for_one,
         intensity => 5,
@@ -44,3 +44,12 @@ peer_child_spec(PeerConfig) ->
       shutdown => 5000,
       type => worker,
       modules => [PeerModule]}.
+
+
+configured_peers() ->
+    case vpn_session_config:configured_peers() of
+        {ok, Peers} ->
+            Peers;
+        {error, Reason} ->
+            erlang:error(Reason)
+    end.
