@@ -34,6 +34,20 @@ mutual_certificate_proof_establishes_both_sides_test() ->
     ?assertEqual(true, maps:get(remote_authenticated, vpn_handshake:info(A4))),
     ?assertEqual(true, maps:get(remote_authenticated, vpn_handshake:info(B4))).
 
+certificate_ack_before_proof_is_deferred_test() ->
+    A0 = vpn_handshake:new(peer_a, peer_b, certificate_options("peer_a")),
+    B0 = vpn_handshake:new(peer_b, peer_a, certificate_options("peer_b")),
+    {send, HelloA, A1} = vpn_handshake:begin_handshake(A0),
+    {send, HelloB, B1} = vpn_handshake:begin_handshake(B0),
+    {send, ProofB, B2} = vpn_handshake:handle_frame(HelloA, B1),
+    {send, ProofA, A2} = vpn_handshake:handle_frame(HelloB, A1),
+    {send, AckToB, A3} = vpn_handshake:handle_frame(ProofB, A2),
+    {defer, B3} = vpn_handshake:handle_frame(AckToB, B2),
+    ?assertEqual(false, vpn_handshake:established(B3)),
+    {send_established, _AckToA, B4} = vpn_handshake:handle_frame(ProofA, B3),
+    ?assert(vpn_handshake:established(B4)),
+    ?assertEqual(true, maps:get(remote_authenticated, vpn_handshake:info(B4))).
+
 unexpected_peer_is_rejected_test() ->
     A0 = vpn_handshake:new(peer_a, peer_b, #{mode => development_control}),
     X0 = vpn_handshake:new(peer_x, peer_a, #{mode => development_control}),

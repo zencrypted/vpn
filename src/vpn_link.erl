@@ -196,6 +196,11 @@ handle_handshake_packet(Packet, State = #{handshake := Handshake}) ->
     case vpn_handshake:handle_frame(Packet, Handshake) of
         {send, Reply, Handshake1} ->
             send_handshake(Reply, State1#{handshake := Handshake1});
+        {send_established, Reply, Handshake1} ->
+            send_established_handshake(Reply, State1#{handshake := Handshake1});
+        {defer, Handshake1} ->
+            logger:debug("vpn_link deferred handshake frame until certificate authentication completes", []),
+            {noreply, State1#{handshake := Handshake1}};
         {established, Handshake1} ->
             cancel_handshake_timer(State1),
             logger:info("vpn_link handshake established with ~s",
@@ -204,6 +209,21 @@ handle_handshake_packet(Packet, State = #{handshake := Handshake}) ->
         {reject, Reason, Handshake1} ->
             logger:warning("vpn_link rejected handshake frame: ~p", [Reason]),
             {noreply, incr_counter(State1#{handshake := Handshake1}, handshake_failures)}
+    end.
+
+
+send_established_handshake(Packet, State = #{udp_pid := UdpPid,
+                                               remote_ip := RemoteIp,
+                                               remote_udp_port := RemoteUdpPort,
+                                               remote_peer_id := RemotePeerId}) ->
+    case vpn_udp:send(UdpPid, RemoteIp, RemoteUdpPort, Packet) of
+        ok ->
+            cancel_handshake_timer(State),
+            logger:info("vpn_link handshake established with ~s", [RemotePeerId]),
+            {noreply, incr_counter(State#{handshake_timer := undefined}, handshake_control_tx)};
+        {error, Reason} ->
+            logger:error("vpn_link failed to send final handshake frame: ~p", [Reason]),
+            {noreply, incr_counter(State, handshake_failures)}
     end.
 
 send_handshake(Packet, State = #{udp_pid := UdpPid,
@@ -221,7 +241,9 @@ send_handshake(Packet, State = #{udp_pid := UdpPid,
 
 schedule_handshake_retry(State, Handshake) ->
     case vpn_handshake:established(Handshake) of
-        true -> State;
+        true ->
+            cancel_handshake_timer(State),
+            State#{handshake_timer := undefined};
         false ->
             cancel_handshake_timer(State),
             Ref = erlang:send_after(maps:get(retry_interval, Handshake), self(), handshake_retry),

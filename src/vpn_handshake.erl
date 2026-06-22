@@ -25,6 +25,7 @@ new(LocalPeerId, RemotePeerId, Options) when is_map(Options) ->
              remote_nonce => undefined,
              remote_authenticated => false,
              remote_certificate_fingerprint => undefined,
+             pending_ack => undefined,
              retries => 0,
              max_retries => maps:get(max_retries, Options, 5),
              retry_interval => maps:get(retry_interval, Options, 1000)},
@@ -96,8 +97,7 @@ handle_proof(#{peer_id := PeerId,
                 {ok, Fingerprint} ->
                     Authenticated = State1#{remote_authenticated := true,
                                             remote_certificate_fingerprint := Fingerprint},
-                    {send, ack(Authenticated),
-                     Authenticated#{status := preserve_established(State1, waiting_ack)}};
+                    complete_proof(Authenticated);
                 {error, Reason} ->
                     {reject, {error, Reason}, State1#{status := failed}}
             end;
@@ -115,8 +115,21 @@ handle_ack(#{peer_id := PeerId, ack_for := AckFor, session_id := RemoteSession},
                                  remote_session_id := RemoteSession}};
         {{error, _} = Error, _, _} -> {reject, Error, State};
         {ok, false, _} -> {reject, {error, handshake_session_mismatch}, State};
-        {ok, true, false} -> {reject, {error, certificate_authentication_incomplete}, State}
+        {ok, true, false} ->
+            {defer, State#{pending_ack := #{peer_id => PeerId,
+                                           ack_for => AckFor,
+                                           session_id => RemoteSession}}}
     end.
+
+complete_proof(State = #{pending_ack := Pending}) when is_map(Pending) ->
+    RemoteSession = maps:get(session_id, Pending),
+    Established = State#{status := established,
+                         remote_session_id := RemoteSession,
+                         pending_ack := undefined},
+    {send_established, ack(Established), Established};
+complete_proof(State) ->
+    {send, ack(State),
+     State#{status := preserve_established(State, waiting_ack)}}.
 
 proof(State) ->
     CertificateDer = maps:get(local_certificate_der, State),
