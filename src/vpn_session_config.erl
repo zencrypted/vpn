@@ -44,7 +44,7 @@ configured_peers() ->
 
 -spec safe_info(map()) -> map().
 safe_info(Session) ->
-    maps:with([peer_id, ovpn_path, endpoint, tunnel, identity], Session).
+    maps:with([peer_id, ovpn_path, endpoint, tunnel, identity, authorization], Session).
 
 load_identity(OvpnPath, Runtime) ->
     case vpn_ovpn_identity:load(OvpnPath) of
@@ -55,7 +55,11 @@ load_identity(OvpnPath, Runtime) ->
             {error, {ovpn_identity_failed, Reason}}
     end.
 
-build_session(Runtime, Identity, OvpnConfig) ->
+build_session(Runtime0, Identity, OvpnConfig) ->
+    Authorization = authorization(Runtime0),
+    Runtime = Runtime0#{authorization_mode => maps:get(mode, Authorization),
+                        authorized => maps:get(authorized, Authorization),
+                        authorization_reason => maps:get(reason, Authorization)},
     PeerId = maps:get(id, Runtime),
     RemoteHost = maps:get(remote_host, OvpnConfig),
     RemotePort = maps:get(remote_port, OvpnConfig),
@@ -77,18 +81,22 @@ build_session(Runtime, Identity, OvpnConfig) ->
                        ifname => maps:get(ifname, Runtime),
                        ip => maps:get(ip, Runtime)},
            identity => SafeIdentity,
+           authorization => Authorization,
            peer_config => PeerConfig}}.
 
 validate_runtime(Runtime) ->
     Required = [id, ifname, ip, local_udp_port, remote_peer_id, psk],
     case missing_key(Runtime, Required) of
         none ->
-            validate_runtime_values(Runtime);
+            case validate_runtime_values(Runtime) of
+                ok -> validate_authorization(Runtime);
+                {error, _} = Error -> Error
+            end;
         {missing, Key} ->
             {error, {missing_runtime_key, Key}}
     end.
 
-validate_runtime_values(#{id := Id,
+validate_runtime_values(Runtime = #{id := Id,
                           ifname := IfName,
                           ip := Ip,
                           local_udp_port := Port,
@@ -100,9 +108,33 @@ validate_runtime_values(#{id := Id,
        is_integer(Port), Port > 0, Port =< 65535,
        (is_atom(RemotePeerId) orelse is_binary(RemotePeerId)),
        is_binary(Psk), byte_size(Psk) >= 16 ->
-    ok;
+    case maps:get(authorization_mode, Runtime, policy) of
+        development_bypass -> ok;
+        policy -> ok;
+        _ -> {error, invalid_authorization_mode}
+    end;
 validate_runtime_values(_Runtime) ->
     {error, invalid_runtime_values}.
+
+validate_authorization(Runtime) ->
+    case authorization(Runtime) of
+        #{authorized := true} ->
+            ok;
+        #{mode := policy, reason := Reason} ->
+            {error, {authorization_denied, Reason}}
+    end.
+
+authorization(Runtime) ->
+    case maps:get(authorization_mode, Runtime, policy) of
+        development_bypass ->
+            #{mode => development_bypass,
+              authorized => true,
+              reason => development_bypass};
+        policy ->
+            #{mode => policy,
+              authorized => maps:get(authorized, Runtime, false),
+              reason => maps:get(authorization_reason, Runtime, policy_authorization_required)}
+    end.
 
 missing_key(_Map, []) ->
     none;

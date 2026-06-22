@@ -29,6 +29,14 @@ Device-local key, CSR, CA-signed client certificate, and canonical OVPN envelope
 without IAS. Generated material remains beneath the Git-ignored `local/` tree.
 This flow is explicitly test-only and carries no IAS authorization semantics.
 
+## Completed — Explicit development authorization bypass
+
+OVPN sessions now fail closed unless trusted runtime state explicitly authorizes
+them. The debug profile opts into `development_bypass`, which is surfaced in
+runtime summaries together with its reason. OVPN certificate validity metadata,
+including expiration, is also exposed through safe management status. This bypass
+remains debug-only and is never read from the OVPN envelope.
+
 ## TD-003 — Certificate-authenticated session
 
 The current dataplane uses a static PSK. Replace or encapsulate it with a

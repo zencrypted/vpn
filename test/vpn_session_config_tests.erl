@@ -17,12 +17,33 @@ validated_ovpn_is_mapped_to_runtime_peer_config_test() ->
           ?assertEqual(true,
                        maps:get(identity_ready,
                                 maps:get(ovpn_identity, PeerConfig))),
+          ?assertEqual(development_bypass, maps:get(authorization_mode, PeerConfig)),
+          ?assertEqual(true, maps:get(authorized, PeerConfig)),
+          ?assertEqual(development_bypass, maps:get(authorization_reason, PeerConfig)),
           ?assertEqual(#{host => <<"127.0.0.1">>, port => 5556, transport => udp},
                        maps:get(endpoint, Session)),
           Safe = vpn_session_config:safe_info(Session),
           ?assertNot(maps:is_key(peer_config, Safe)),
           ?assertNot(contains_key(ca_pem, Safe)),
           ?assertNot(contains_key(certificate_pem, Safe))
+      end).
+
+policy_mode_fails_closed_without_authorization_test() ->
+    ?assertEqual({error, {authorization_denied, policy_authorization_required}},
+                 vpn_session_config:load("missing.ovpn",
+                                         maps:remove(authorization_mode, runtime_config()))).
+
+explicit_policy_authorization_is_accepted_test() ->
+    with_session_fixture(
+      fun(OvpnPath, _Root) ->
+          Runtime = (maps:remove(authorization_mode, runtime_config()))#{
+                      authorized => true,
+                      authorization_reason => profile_allows_vpn},
+          {ok, Session} = vpn_session_config:load(OvpnPath, Runtime),
+          ?assertEqual(#{mode => policy,
+                         authorized => true,
+                         reason => profile_allows_vpn},
+                       maps:get(authorization, Session))
       end).
 
 missing_runtime_value_is_rejected_before_identity_loading_test() ->
@@ -83,6 +104,7 @@ runtime_config() ->
       ip => "10.20.20.1",
       local_udp_port => 5555,
       remote_peer_id => peer_b,
+      authorization_mode => development_bypass,
       psk => <<"0123456789abcdef0123456789abcdef">>}.
 
 envelope() ->

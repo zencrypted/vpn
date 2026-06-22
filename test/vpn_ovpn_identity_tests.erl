@@ -12,6 +12,9 @@ real_ec_p384_identity_is_loaded_test() ->
           ?assertEqual(true, maps:get(identity_ready, Identity)),
           ?assertEqual(64, byte_size(maps:get(certificate_fingerprint, Identity))),
           ?assertEqual(64, byte_size(maps:get(ca_fingerprint, Identity))),
+          Certificate = maps:get(certificate, Identity),
+          ?assertMatch(#{subject := _, issuer := _, serial_number := _,
+                         not_before := _, not_after := _}, Certificate),
           ?assertEqual(filename:join(filename:dirname(OvpnPath), "keys/client.key"),
                        maps:get(private_key_path, Identity))
       end).
@@ -25,7 +28,8 @@ safe_info_does_not_expose_public_pem_or_private_key_test() ->
           ?assertNot(maps:is_key(config, Safe)),
           ?assertNot(maps:is_key(ca_pem, Safe)),
           ?assertNot(maps:is_key(certificate_pem, Safe)),
-          ?assertNot(maps:is_key(private_key_pem, Safe))
+          ?assertNot(maps:is_key(private_key_pem, Safe)),
+          ?assertMatch(#{not_after := _}, maps:get(certificate, Safe))
       end).
 
 mismatched_ec_private_key_is_rejected_test() ->

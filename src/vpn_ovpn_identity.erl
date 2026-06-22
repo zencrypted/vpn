@@ -27,6 +27,7 @@ safe_info(Identity) ->
                private_key_path,
                certificate_fingerprint,
                ca_fingerprint,
+               certificate,
                trusted,
                key_match,
                identity_ready],
@@ -90,16 +91,22 @@ validate_client_certificate(OvpnPath,
                             CertPem) ->
     case decode_certificate(CertPem) of
         {ok, Cert, CertDer} ->
-            case verify_certificate(CaPem, Cert) of
+            case certificate_metadata(Cert) of
+                {ok, Certificate} ->
+                    case verify_certificate(CaPem, Cert) of
                 ok ->
-                    verify_key_match(OvpnPath,
-                                     PrivateKeyPath,
-                                     Config,
-                                     CertPem,
-                                     CaDer,
-                                     CertDer);
+                        verify_key_match(OvpnPath,
+                                         PrivateKeyPath,
+                                         Config,
+                                         CertPem,
+                                         CaDer,
+                                         CertDer,
+                                         Certificate);
+                    {error, Reason} ->
+                        {error, {certificate_verification_failed, Reason}}
+                    end;
                 {error, Reason} ->
-                    {error, {certificate_verification_failed, Reason}}
+                    {error, {certificate_metadata_failed, Reason}}
             end;
         {error, Reason} ->
             {error, {certificate_parse_failed, Reason}}
@@ -111,7 +118,7 @@ verify_certificate(CaPem, Cert) ->
         {error, Reason} -> {error, Reason}
     end.
 
-verify_key_match(OvpnPath, PrivateKeyPath, Config, CertPem, CaDer, CertDer) ->
+verify_key_match(OvpnPath, PrivateKeyPath, Config, CertPem, CaDer, CertDer, Certificate) ->
     case vpn_identity:verify_pem_key_match(CertPem, PrivateKeyPath) of
         ok ->
             {ok, #{config => Config,
@@ -119,6 +126,7 @@ verify_key_match(OvpnPath, PrivateKeyPath, Config, CertPem, CaDer, CertDer) ->
                    private_key_path => PrivateKeyPath,
                    certificate_fingerprint => fingerprint(CertDer),
                    ca_fingerprint => fingerprint(CaDer),
+                   certificate => Certificate,
                    trusted => true,
                    key_match => true,
                    identity_ready => true}};
@@ -141,6 +149,20 @@ decode_certificate(Pem) ->
     catch
         Class:Reason -> {error, {Class, Reason}}
     end.
+
+certificate_metadata(#'OTPCertificate'{tbsCertificate = Tbs}) ->
+    #'OTPTBSCertificate'{issuer = Issuer,
+                         serialNumber = SerialNumber,
+                         subject = Subject,
+                         validity = #'Validity'{notBefore = NotBefore,
+                                                notAfter = NotAfter}} = Tbs,
+    {ok, #{subject => Subject,
+           issuer => Issuer,
+           serial_number => SerialNumber,
+           not_before => NotBefore,
+           not_after => NotAfter}};
+certificate_metadata(_Certificate) ->
+    {error, invalid_certificate}.
 
 fingerprint(Der) ->
     hex(crypto:hash(sha256, Der)).

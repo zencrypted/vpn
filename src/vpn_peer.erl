@@ -68,7 +68,11 @@ start_link_with_identity(Config0) ->
     case maps:take(ovpn_identity, Config0) of
         {IdentityInfo, Config} ->
             case maps:get(identity_ready, IdentityInfo, false) of
-                true -> start_link_from_config(Config, IdentityInfo);
+                true ->
+                    case validate_ovpn_authorization(Config) of
+                        ok -> start_link_from_config(Config, IdentityInfo);
+                        {error, Reason} -> {stop, Reason}
+                    end;
                 false -> {stop, ovpn_identity_not_ready}
             end;
         error ->
@@ -79,6 +83,16 @@ start_link_with_identity(Config0) ->
                     {stop, Reason}
             end
     end.
+
+validate_ovpn_authorization(#{authorization_mode := development_bypass,
+                              authorized := true}) ->
+    ok;
+validate_ovpn_authorization(#{authorization_mode := policy,
+                              authorized := true}) ->
+    ok;
+validate_ovpn_authorization(Config) ->
+    {error, {authorization_denied,
+             maps:get(authorization_reason, Config, policy_authorization_required)}}.
 
 start_link_from_config(Config, IdentityInfo) ->
     Id = maps:get(id, Config),
@@ -180,7 +194,10 @@ runtime_config(Config) ->
                remote_ip,
                remote_udp_port,
                remote_peer_id,
-               ovpn_path],
+               ovpn_path,
+               authorization_mode,
+               authorized,
+               authorization_reason],
               Config).
 
 safe_identity_info(#{identity_ready := _} = IdentityInfo) ->

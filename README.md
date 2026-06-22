@@ -1170,3 +1170,7 @@ Runtime = #{
 {ok, Session} = vpn_session_config:load("local/client_a.ovpn", Runtime),
 vpn_session_config:safe_info(Session).
 ```
+
+### Debug authorization
+
+The debug profile explicitly sets `authorization_mode => development_bypass`. Ordinary OVPN sessions fail closed unless trusted runtime configuration supplies `authorized => true`; this state is never accepted from OVPN input.

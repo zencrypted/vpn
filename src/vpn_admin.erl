@@ -66,6 +66,9 @@ summary_peer(PeerId, PeerStatus, Certificates) ->
       mode => maps:get(mode, Config, undefined),
       ip => maps:get(ip, Config, undefined),
       remote_peer_id => maps:get(remote_peer_id, Config, undefined),
+      authorization_mode => maps:get(authorization_mode, Config, policy),
+      authorized => maps:get(authorized, Config, false),
+      authorization_reason => maps:get(authorization_reason, Config, undefined),
       crypto_failures => maps:get(crypto_failures, LinkStats, 0),
       frames_rejected => maps:get(frames_rejected, LinkStats, 0),
       certificate => compact_certificate(Certificate)}.
@@ -95,6 +98,9 @@ peer_view(Peer) ->
       mode => json_value(maps:get(mode, Peer, undefined)),
       ip => json_value(maps:get(ip, Peer, undefined)),
       remote_peer_id => json_value(maps:get(remote_peer_id, Peer, undefined)),
+      authorization_mode => json_value(maps:get(authorization_mode, Peer, policy)),
+      authorized => maps:get(authorized, Peer, false),
+      authorization_reason => json_value(maps:get(authorization_reason, Peer, undefined)),
       crypto_failures => maps:get(crypto_failures, Peer, 0),
       frames_rejected => maps:get(frames_rejected, Peer, 0),
       certificate => certificate_view(maps:get(certificate, Peer, #{}))}.
