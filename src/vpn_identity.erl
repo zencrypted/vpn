@@ -5,7 +5,7 @@
 
 -include_lib("public_key/include/OTP-PUB-KEY.hrl").
 
--export([load/1, safe_info/1, verify_key_match/1]).
+-export([load/1, safe_info/1, verify_key_match/1, verify_pem_key_match/2]).
 
 load(Config) when is_map(Config) ->
     case required_identity_key(Config) of
@@ -136,6 +136,96 @@ verify_key_match(#{x509_certificate := Certificate,
             {error, key_mismatch};
         {error, Reason} ->
             {error, Reason}
+    end.
+
+verify_pem_key_match(CertPem, PrivateKeyPath) when is_binary(CertPem) ->
+    TempPath = temporary_certificate_path(),
+    try
+        case file:write_file(TempPath, CertPem, [exclusive]) of
+            ok ->
+                compare_openssl_public_keys(TempPath, PrivateKeyPath);
+            {error, Reason} ->
+                {error, {temporary_certificate_write_failed, Reason}}
+        end
+    after
+        _ = file:delete(TempPath)
+    end;
+verify_pem_key_match(_CertPem, _PrivateKeyPath) ->
+    {error, invalid_key_match_input}.
+
+compare_openssl_public_keys(CertPath, PrivateKeyPath) ->
+    case openssl_executable() of
+        {ok, OpenSSL} ->
+            case run_executable(OpenSSL, ["x509", "-in", CertPath, "-pubkey", "-noout"]) of
+                {ok, CertPublicKey} ->
+                    case run_executable(OpenSSL,
+                                        ["pkey", "-in", PrivateKeyPath, "-pubout"]) of
+                        {ok, PrivatePublicKey} ->
+                            case normalize_pem(CertPublicKey) =:= normalize_pem(PrivatePublicKey) of
+                                true -> ok;
+                                false -> {error, key_mismatch}
+                            end;
+                        {error, Reason} ->
+                            {error, {private_key_parse_failed, PrivateKeyPath, Reason}}
+                    end;
+                {error, Reason} ->
+                    {error, {certificate_public_key_failed, Reason}}
+            end;
+        {error, _} = Error ->
+            Error
+    end.
+
+openssl_executable() ->
+    Candidate = case os:getenv("OPENSSL3") of
+                    false -> "openssl";
+                    Value -> Value
+                end,
+    case filename:pathtype(Candidate) of
+        absolute ->
+            case filelib:is_regular(Candidate) of
+                true -> {ok, Candidate};
+                false -> {error, openssl_not_found}
+            end;
+        _ ->
+            case os:find_executable(Candidate) of
+                false -> {error, openssl_not_found};
+                Path -> {ok, Path}
+            end
+    end.
+
+run_executable(Executable, Args) ->
+    Port = open_port({spawn_executable, Executable},
+                     [binary, exit_status, use_stdio, stderr_to_stdout,
+                      {args, Args}]),
+    collect_port(Port, []).
+
+collect_port(Port, Acc) ->
+    receive
+        {Port, {data, Data}} ->
+            collect_port(Port, [Acc, Data]);
+        {Port, {exit_status, 0}} ->
+            {ok, iolist_to_binary(Acc)};
+        {Port, {exit_status, Status}} ->
+            {error, {openssl_exit_status, Status, iolist_to_binary(Acc)}}
+    after 10000 ->
+        catch port_close(Port),
+        {error, openssl_timeout}
+    end.
+
+normalize_pem(Pem) ->
+    iolist_to_binary([Line || Line <- binary:split(Pem, <<"\n">>, [global]),
+                              Line =/= <<>>]).
+
+temporary_certificate_path() ->
+    Name = io_lib:format("vpn-ovpn-cert-~p-~p.pem",
+                         [erlang:system_time(microsecond),
+                          erlang:unique_integer([positive])]),
+    filename:join(temp_directory(), lists:flatten(Name)).
+
+temp_directory() ->
+    case os:getenv("TMPDIR") of
+        false -> "/tmp";
+        Dir -> Dir
     end.
 
 parse_certificate(CertPem) ->

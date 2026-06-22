@@ -6,11 +6,13 @@
 line-oriented validation failures, and returns a normalized peer configuration
 without resolving keys, mutating runtime state, or starting a session.
 
-## TD-002 — EC P-384 identity support
+## Completed — OVPN local identity validation and EC P-384 ownership
 
-`vpn_identity` currently extracts the public part only from RSA private keys.
-IAS-managed Device enrollment uses EC `secp384r1`, so EC private-key parsing and
-certificate/key matching are required before IAS envelopes can be consumed.
+`vpn_ovpn_identity` now resolves the Device-local key relative to the envelope,
+validates the inline CA and certificate, and verifies RSA or EC P-384
+certificate/key ownership without exposing private-key material. The legacy
+file-config path in `vpn_identity` still uses its existing RSA record comparison;
+new OVPN imports use the algorithm-neutral OpenSSL ownership check.
 
 ## TD-003 — Certificate-authenticated session
 

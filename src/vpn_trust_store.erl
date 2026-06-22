@@ -3,7 +3,7 @@
 %%%-------------------------------------------------------------------
 -module(vpn_trust_store).
 
--export([load/1, verify/2]).
+-export([load/1, load_pem/1, verify/2]).
 
 load(CaPath) ->
     case file:read_file(CaPath) of
@@ -12,6 +12,11 @@ load(CaPath) ->
         {error, Reason} ->
             {error, {ca_certificate_read_failed, CaPath, Reason}}
     end.
+
+load_pem(CaPem) when is_binary(CaPem) ->
+    load_pem(inline, CaPem);
+load_pem(_Other) ->
+    {error, invalid_ca_certificate_pem}.
 
 verify(#{ca_certificate := CaCertificate}, Certificate) ->
     case public_key:pkix_is_self_signed(Certificate) of

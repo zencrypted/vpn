@@ -49,6 +49,12 @@ is available at `priv/examples/peer_a.ovpn`. Stage 27B adds the strict
 `vpn_ovpn_parser`, which accepts only this subset and converts it into a
 normalized peer configuration without resolving keys or starting a session.
 
+Stage 27C adds `vpn_ovpn_identity`, which resolves the relative `key` reference
+from the directory containing the `.ovpn` file, validates the inline CA and
+client certificate, verifies the certificate chain and validity policy, and
+proves that RSA or EC P-384 private-key ownership matches the certificate. The
+private-key body is never returned or logged.
+
 ## Modules
 
 - `vpn_app` - OTP application entry point.
@@ -63,6 +69,7 @@ normalized peer configuration without resolving keys or starting a session.
 - `vpn_trust_store` - development CA certificate trust store.
 - `vpn_ovpn_envelope` - canonical OVPN subset constants and value validators.
 - `vpn_ovpn_parser` - strict OVPN parser and normalized peer-config conversion.
+- `vpn_ovpn_identity` - local OVPN certificate, trust, and key-ownership validation.
 
 ## Build
 
@@ -75,6 +82,28 @@ rebar3 compile
 ```sh
 rebar3 eunit
 ```
+
+## Validate an IAS-generated OVPN identity
+
+Keep the envelope and its relative `keys/` directory together, for example:
+
+```text
+local/
+├── client.ovpn
+└── keys/
+    └── client.key
+```
+
+`local/` is ignored by Git. Validate from the Erlang shell:
+
+```erlang
+vpn_ovpn_identity:load("/absolute/path/to/local/client.ovpn").
+```
+
+A successful result contains `trusted => true`, `key_match => true`, and
+`identity_ready => true`. Use `vpn_ovpn_identity:safe_info/1` before presenting
+identity state; it excludes the embedded public PEM material and never exposes
+the private-key body.
 
 ## Demo Guide
 
@@ -228,11 +257,13 @@ Cowboy dashboard operational
 N2O dashboard operational
 Interactive peer management operational
 Canonical OVPN envelope contract defined
+Canonical OVPN parser operational
+OVPN local identity validation operational
 ```
 
-The contract milestone does not yet include envelope parsing, EC P-384 key
-support, certificate-authenticated session establishment, Device-lock
-enforcement, or a 2FA provider. These gaps are tracked in
+The OVPN import milestone now includes strict parsing and EC P-384 local
+identity validation. It does not yet include certificate-authenticated session
+establishment, Device-lock enforcement, or a 2FA provider. These gaps are tracked in
 [`docs/TECHNICAL-DEBT.md`](docs/TECHNICAL-DEBT.md).
 
 ## VPN Management API

@@ -1,6 +1,6 @@
 # Canonical OVPN Envelope
 
-Status: **Stage 27B parser implemented**
+Status: **Stage 27C local identity validation implemented**
 
 Contract version: **`ovpn/v1`**
 
@@ -158,6 +158,7 @@ service identity.
 The `<cert>` block carries the client public certificate. The matching private
 key remains at the path named by `key`.
 
+The `vpn_ovpn_identity` consumer now performs the local portions of this flow.
 Before session activation, the consumer MUST:
 
 1. parse both PEM blocks;
@@ -208,8 +209,9 @@ state containing authorization, Device binding, 2FA requirements, and
 provisioning lineage.
 
 The mapping does not imply that the current `vpn_peer` PSK configuration is the
-final session model. Stage 27C must replace or encapsulate the temporary PSK
-dataplane with a certificate-authenticated session.
+final session model. Local identity validation is complete; the next stage must
+replace or encapsulate the temporary PSK dataplane with a certificate-authenticated
+session.
 
 ## Canonical example
 
@@ -270,3 +272,28 @@ Stage 27C  Certificate-authenticated session, Device lock, and 2FA hook
 `vpn_ovpn_parser` now implements Stage 27B parsing and normalization. It does
 not resolve the private-key reference, validate X.509 cryptography, mutate the
 runtime registry, or start a VPN session. Those remain later stages.
+
+## Local identity validation
+
+`vpn_ovpn_identity:load/1` accepts an envelope path and performs a side-effect-free
+local validation step:
+
+1. parse the canonical envelope;
+2. resolve `key` relative to the envelope directory, never the process working
+   directory;
+3. require a regular, non-symlink private-key file;
+4. decode the inline CA and client certificates;
+5. verify the client certificate against the inline CA and current validity
+   policy;
+6. compare the certificate public key with the local private key through the
+   configured OpenSSL executable;
+7. return SHA-256 certificate fingerprints and readiness metadata without
+   returning private-key material.
+
+Both RSA development fixtures and IAS EC `secp384r1` keys are supported by the
+key-ownership check. `OPENSSL3` may name an alternate OpenSSL executable;
+otherwise `openssl` is resolved from `PATH`.
+
+The current lexical containment check and final-file symlink rejection are
+defense in depth. Full import-root and parent-directory symlink hardening remains
+tracked as technical debt.
