@@ -72,3 +72,12 @@ use substitution.
 Keep the `.ovpn` format as a strict ordinary-syntax subset with no vendor
 metadata. Do not silently grow the importer into a general OpenVPN configuration
 or wire-protocol implementation.
+
+
+### Debug bootstrap remains development-only
+
+The one-command debug flow creates and reuses credentials under Git-ignored
+`local/`. It intentionally does not model IAS authorization, revocation, Device
+attestation, 2FA, or production CA lifecycle. The temporary PSK dataplane also
+remains in `config/sys.debug.config` until certificate-authenticated session
+key establishment replaces it.

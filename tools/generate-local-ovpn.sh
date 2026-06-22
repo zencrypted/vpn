@@ -10,12 +10,14 @@ PORT=""
 OUTPUT_DIR="local"
 CA_DIR="local/ca"
 DAYS="365"
+BASENAME=""
 
 usage() {
     cat <<USAGE
 Usage:
   $0 --name <peer-name> --remote <host> --port <1-65535>
      [--output-dir <relative-path>] [--ca-dir <relative-path>] [--days <number>]
+     [--basename <safe-name>]
 
 Creates a Device-local EC P-384 key, CSR, CA-signed client certificate,
 and canonical OVPN envelope without IAS. Initialize the local CA first:
@@ -98,6 +100,11 @@ while [ "$#" -gt 0 ]; do
             DAYS="$2"
             shift 2
             ;;
+        --basename)
+            [ "$#" -ge 2 ] || fail "Missing value for --basename." 64
+            BASENAME="$2"
+            shift 2
+            ;;
         -h|--help)
             usage
             exit 0
@@ -112,6 +119,9 @@ done
 }
 
 validate_name "$NAME"
+if [ -n "$BASENAME" ]; then
+    validate_name "$BASENAME"
+fi
 validate_remote "$REMOTE"
 validate_positive_integer "$PORT" "Port"
 [ "$PORT" -le 65535 ] || fail "Port must not exceed 65535." 65
@@ -125,8 +135,10 @@ CA_CERT="$CA_DIR/ca.crt"
 [ -f "$CA_CERT" ] && [ ! -L "$CA_CERT" ] || fail "Local CA certificate not found: $CA_CERT. Run ./tools/init-local-ca.sh first."
 [ -x "$CSR_GENERATOR" ] || fail "CSR generator is not executable: $CSR_GENERATOR"
 
-STAMP=$(date +%Y%m%d-%H%M%S)
-BASENAME="${NAME}-${STAMP}"
+if [ -z "$BASENAME" ]; then
+    STAMP=$(date +%Y%m%d-%H%M%S)
+    BASENAME="${NAME}-${STAMP}"
+fi
 KEY_FILE="$OUTPUT_DIR/keys/${BASENAME}.key"
 CSR_FILE="$OUTPUT_DIR/csr/${BASENAME}.csr"
 CERT_FILE="$OUTPUT_DIR/certs/${BASENAME}.crt"

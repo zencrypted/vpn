@@ -178,6 +178,38 @@ Run the local provisioning smoke tests with:
 ./tools/test-local-ovpn.sh
 ```
 
+## One-command debug startup
+
+The debug bootstrap keeps a stable local Device identity at
+`local/debug/client_a.ovpn`. It creates the development CA and bundle only when
+they are missing, then reuses them on later starts:
+
+```sh
+./tools/run-debug.sh
+```
+
+This command runs `rebar3 as debug shell` with `config/sys.debug.config`. The
+debug configuration pairs the OVPN-backed `client_a` session with local
+`peer_b`. Use an explicit rotation only when needed:
+
+```sh
+./tools/run-debug.sh --force
+```
+
+`--force` replaces the Device key, CSR, certificate, and OVPN envelope while
+keeping the existing local development CA. The bootstrap can also be run
+without starting Erlang:
+
+```sh
+./tools/ensure-debug-ovpn.sh
+```
+
+Run its smoke test with:
+
+```sh
+./tools/test-debug-ovpn.sh
+```
+
 ## Demo Guide
 
 This guide shows the current end-to-end VPN milestone: encrypted TUN peers,

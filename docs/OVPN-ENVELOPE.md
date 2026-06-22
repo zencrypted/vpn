@@ -312,3 +312,13 @@ otherwise `openssl` is resolved from `PATH`.
 The current lexical containment check and final-file symlink rejection are
 defense in depth. Full import-root and parent-directory symlink hardening remains
 tracked as technical debt.
+
+
+## Stable debug producer
+
+`tools/ensure-debug-ovpn.sh` is the idempotent local debug producer. By default
+it maintains `local/debug/client_a.ovpn` and its relative `keys/client_a.key`.
+A complete bundle is reused, an incomplete bundle fails closed, and `--force`
+performs an explicit Device identity rotation without rotating the development
+CA. `tools/run-debug.sh` prepares this envelope before launching the debug
+Rebar3 profile.
