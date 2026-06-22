@@ -44,10 +44,10 @@ implements the OpenVPN wire protocol or accepts arbitrary third-party `.ovpn`
 configuration.
 
 Device lock, 2FA, authorization, and provisioning lineage remain in trusted
-IAS/VPN runtime state outside the file. The machine-readable contract surface is
-`vpn_ovpn_envelope`; a public example is available at
-`priv/examples/peer_a.ovpn`. Strict parsing and runtime conversion remain Stage
-27B work.
+IAS/VPN runtime state outside the file. The machine-readable contract surface is `vpn_ovpn_envelope`; a public example
+is available at `priv/examples/peer_a.ovpn`. Stage 27B adds the strict
+`vpn_ovpn_parser`, which accepts only this subset and converts it into a
+normalized peer configuration without resolving keys or starting a session.
 
 ## Modules
 
@@ -62,6 +62,7 @@ IAS/VPN runtime state outside the file. The machine-readable contract surface is
 - `vpn_manager` - read-only management API for supervised peers.
 - `vpn_trust_store` - development CA certificate trust store.
 - `vpn_ovpn_envelope` - canonical OVPN subset constants and value validators.
+- `vpn_ovpn_parser` - strict OVPN parser and normalized peer-config conversion.
 
 ## Build
 

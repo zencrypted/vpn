@@ -1,10 +1,10 @@
 # VPN Technical Debt
 
-## TD-001 — Canonical OVPN parser and validator
+## Completed — Canonical OVPN parser and validator
 
-Implement a strict `ovpn/v1` parser that accepts only the contract in
-`OVPN-ENVELOPE.md`, reports precise validation failures, and converts a valid
-envelope into an internal peer configuration without starting a session.
+`vpn_ovpn_parser` now accepts only the documented `ovpn/v1` subset, reports
+line-oriented validation failures, and returns a normalized peer configuration
+without resolving keys, mutating runtime state, or starting a session.
 
 ## TD-002 — EC P-384 identity support
 

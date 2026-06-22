@@ -1,6 +1,6 @@
 # Canonical OVPN Envelope
 
-Status: **Stage 27A contract**
+Status: **Stage 27B parser implemented**
 
 Contract version: **`ovpn/v1`**
 
@@ -263,8 +263,10 @@ in comments.
 
 ```text
 Stage 27A  Canonical ordinary OVPN subset and machine-readable constants
-Stage 27B  Strict parser, validator, and internal peer-config conversion
+Stage 27B  Strict parser, validator, and internal peer-config conversion (implemented)
 Stage 27C  Certificate-authenticated session, Device lock, and 2FA hook
 ```
 
-Stage 27A does not claim that import or authenticated sessions are operational.
+`vpn_ovpn_parser` now implements Stage 27B parsing and normalization. It does
+not resolve the private-key reference, validate X.509 cryptography, mutate the
+runtime registry, or start a VPN session. Those remain later stages.
