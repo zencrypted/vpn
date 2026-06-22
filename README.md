@@ -32,6 +32,22 @@ X.509 PKI integration is expected to use `synrc/ca` in a later milestone.
 The current development trust store only verifies that configured peer
 certificates are signed by the local development CA fixture.
 
+## Canonical OVPN Envelope
+
+Stage 27A defines the canonical IAS-to-VPN provisioning envelope in
+[`docs/OVPN-ENVELOPE.md`](docs/OVPN-ENVELOPE.md). The format is a strict,
+Zencrypted-controlled `.ovpn` subset carrying the endpoint, public certificates,
+Device-local key reference, Device-lock profile, and 2FA policy.
+
+This is an interchange envelope only. It does **not** mean that this runtime
+implements the OpenVPN wire protocol or accepts arbitrary third-party `.ovpn`
+configuration.
+
+The machine-readable contract surface is `vpn_ovpn_envelope`. A complete public
+example is available at
+`priv/examples/peer_a-device-bound.ovpn`. Strict parsing and runtime conversion
+remain Stage 27B work.
+
 ## Modules
 
 - `vpn_app` - OTP application entry point.
@@ -44,6 +60,7 @@ certificates are signed by the local development CA fixture.
 - `vpn_peer` - public runtime peer abstraction.
 - `vpn_manager` - read-only management API for supervised peers.
 - `vpn_trust_store` - development CA certificate trust store.
+- `vpn_ovpn_envelope` - canonical envelope constants and semantic validators.
 
 ## Build
 
@@ -208,7 +225,13 @@ JSON API operational
 Cowboy dashboard operational
 N2O dashboard operational
 Interactive peer management operational
+Canonical OVPN envelope contract defined
 ```
+
+The contract milestone does not yet include envelope parsing, EC P-384 key
+support, certificate-authenticated session establishment, Device-lock
+enforcement, or a 2FA provider. These gaps are tracked in
+[`docs/TECHNICAL-DEBT.md`](docs/TECHNICAL-DEBT.md).
 
 ## VPN Management API
 
