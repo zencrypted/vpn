@@ -43,7 +43,10 @@ unexpected_peer_is_rejected_test() ->
 
 certificate_common_name_mismatch_is_rejected_test() ->
     A0 = vpn_handshake:new(peer_a, peer_x, certificate_options("peer_a")),
-    B0 = vpn_handshake:new(peer_b, peer_a, certificate_options("peer_b")),
+    %% Use the expected control-plane peer id so the frame passes the early
+    %% peer-id check, while deliberately presenting peer_b's certificate.
+    %% The rejection must therefore come from certificate CN validation.
+    B0 = vpn_handshake:new(peer_x, peer_a, certificate_options("peer_b")),
     {send, HelloA, A1} = vpn_handshake:begin_handshake(A0),
     {send, HelloB, B1} = vpn_handshake:begin_handshake(B0),
     {send, ProofB, _B2} = vpn_handshake:handle_frame(HelloA, B1),
