@@ -25,4 +25,6 @@ chatgpt-packs/
 
 # log
 log
-/generate-device-csr.sh
+
+# misc
+/local
