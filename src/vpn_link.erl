@@ -5,7 +5,7 @@
 
 -behaviour(gen_server).
 
--export([start_link/5, start_link/6, start_link/8, start_link/9, stop/1, stats/1, reset_stats/1]).
+-export([start_link/5, start_link/6, start_link/8, start_link/9, start_link/10, stop/1, stats/1, reset_stats/1]).
 -export([validate_frame_peer_id/2]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
@@ -52,15 +52,13 @@ start_link(TunName,
            PeerId,
            RemotePeerId,
            Psk) ->
-    Args = {TunName,
-            TunIp,
-            Mode,
-            LocalUdpPort,
-            RemoteIp,
-            RemoteUdpPort,
-            PeerId,
-            RemotePeerId,
-            Psk},
+    start_link(TunName, TunIp, Mode, LocalUdpPort, RemoteIp, RemoteUdpPort,
+               PeerId, RemotePeerId, Psk, #{mode => disabled}).
+
+start_link(TunName, TunIp, Mode, LocalUdpPort, RemoteIp, RemoteUdpPort,
+           PeerId, RemotePeerId, Psk, HandshakeOptions) ->
+    Args = {TunName, TunIp, Mode, LocalUdpPort, RemoteIp, RemoteUdpPort,
+            PeerId, RemotePeerId, Psk, HandshakeOptions},
     gen_server:start_link(?MODULE, Args, []).
 
 stop(Pid) ->
@@ -76,11 +74,11 @@ init({psk_required, _TunName, _TunIp, _Mode, _LocalUdpPort, _RemoteIp, _RemoteUd
     {stop, psk_required};
 init({psk_required, _TunName, _TunIp, _Mode, _LocalUdpPort, _RemoteIp, _RemoteUdpPort, _PeerId, _RemotePeerId}) ->
     {stop, psk_required};
-init({TunName, TunIp, Mode, LocalUdpPort, RemoteIp, RemoteUdpPort, PeerId, RemotePeerId, Psk}) ->
+init({TunName, TunIp, Mode, LocalUdpPort, RemoteIp, RemoteUdpPort, PeerId, RemotePeerId, Psk, HandshakeOptions}) ->
     process_flag(trap_exit, true),
     case vpn_udp:start_link(LocalUdpPort, self()) of
         {ok, UdpPid} ->
-            init_tun(UdpPid, TunName, TunIp, Mode, RemoteIp, RemoteUdpPort, PeerId, RemotePeerId, Psk);
+            init_tun(UdpPid, TunName, TunIp, Mode, RemoteIp, RemoteUdpPort, PeerId, RemotePeerId, Psk, HandshakeOptions);
         {error, Reason} ->
             {stop, Reason}
     end.
@@ -95,6 +93,10 @@ handle_call(_Request, _From, State) ->
 handle_cast(_Request, State) ->
     {noreply, State}.
 
+handle_info(handshake_start, State) ->
+    start_handshake(State);
+handle_info(handshake_retry, State) ->
+    retry_handshake(State);
 handle_info({vpn_tun_packet, TunPid, Packet},
             State = #{tun_pid := TunPid,
                       udp_pid := UdpPid,
@@ -105,7 +107,12 @@ handle_info({vpn_tun_packet, TunPid, Packet},
     Size = byte_size(Packet),
     logger:info("vpn_link tun_rx kind=~p size=~p", [Kind, Size]),
     State1 = incr_counters(State, tun_rx_packets, tun_rx_bytes, Size),
-    encode_and_send(Packet, Kind, Size, UdpPid, RemoteIp, RemoteUdpPort, State1);
+    case handshake_established(State1) of
+        true -> encode_and_send(Packet, Kind, Size, UdpPid, RemoteIp, RemoteUdpPort, State1);
+        false ->
+            logger:debug("vpn_link blocked TUN packet until handshake is established", []),
+            {noreply, incr_counter(State1, handshake_blocked_packets)}
+    end;
 handle_info({vpn_tun_packet, _OtherTunPid, _Packet}, State) ->
     {noreply, State};
 handle_info({vpn_udp_packet, UdpPid, Ip, Port, Packet},
@@ -114,7 +121,16 @@ handle_info({vpn_udp_packet, UdpPid, Ip, Port, Packet},
     logger:info("vpn_link udp_rx from ~s:~p size=~p",
                 [format_ip(Ip), Port, Size]),
     State1 = incr_counters(State, udp_rx_packets, udp_rx_bytes, Size),
-    decode_and_write(Packet, Mode, TunPid, State1);
+    case vpn_handshake_frame:is_control(Packet) of
+        true -> handle_handshake_packet(Packet, State1);
+        false ->
+            case handshake_established(State1) of
+                true -> decode_and_write(Packet, Mode, TunPid, State1);
+                false ->
+                    logger:warning("vpn_link dropped data packet before handshake establishment", []),
+                    {noreply, incr_counter(State1, handshake_blocked_packets)}
+            end
+    end;
 handle_info({vpn_udp_packet, _OtherUdpPid, _Ip, _Port, _Packet}, State) ->
     {noreply, State};
 handle_info({'EXIT', TunPid, Reason}, State = #{tun_pid := TunPid}) ->
@@ -129,24 +145,97 @@ terminate(_Reason, State) ->
     stop_worker(maps:get(udp_pid, State, undefined), fun vpn_udp:stop/1),
     ok.
 
-init_tun(UdpPid, TunName, TunIp, Mode, RemoteIp, RemoteUdpPort, PeerId, RemotePeerId, Psk) ->
+init_tun(UdpPid, TunName, TunIp, Mode, RemoteIp, RemoteUdpPort, PeerId, RemotePeerId, Psk, HandshakeOptions) ->
     case vpn_tun:start_link(TunName, TunIp, self(), Mode) of
         {ok, TunPid} ->
-            {ok, maps:merge(#{udp_pid => UdpPid,
-                              tun_pid => TunPid,
-                              mode => Mode,
-                              peer_id => normalize_peer_id(PeerId),
-                              remote_peer_id => normalize_peer_id(RemotePeerId),
-                              crypto => vpn_crypto:new(Psk, normalize_peer_id(PeerId)),
-                              tx_seq => 0,
-                              rx_seq => 0,
-                              remote_ip => RemoteIp,
-                              remote_udp_port => RemoteUdpPort},
-                            zero_counters())};
+            Handshake = vpn_handshake:new(PeerId, RemotePeerId, HandshakeOptions),
+            State = maps:merge(#{udp_pid => UdpPid,
+                                 tun_pid => TunPid,
+                                 mode => Mode,
+                                 peer_id => normalize_peer_id(PeerId),
+                                 remote_peer_id => normalize_peer_id(RemotePeerId),
+                                 crypto => vpn_crypto:new(Psk, normalize_peer_id(PeerId)),
+                                 handshake => Handshake,
+                                 handshake_timer => undefined,
+                                 tx_seq => 0,
+                                 rx_seq => 0,
+                                 remote_ip => RemoteIp,
+                                 remote_udp_port => RemoteUdpPort},
+                               zero_counters()),
+            self() ! handshake_start,
+            {ok, State};
         {error, Reason} ->
             _ = vpn_udp:stop(UdpPid),
             {stop, Reason}
     end.
+
+
+start_handshake(State = #{handshake := Handshake}) ->
+    case vpn_handshake:begin_handshake(Handshake) of
+        {established, Handshake1} ->
+            {noreply, State#{handshake := Handshake1}};
+        {send, Packet, Handshake1} ->
+            send_handshake(Packet, State#{handshake := Handshake1})
+    end.
+
+retry_handshake(State = #{handshake := Handshake}) ->
+    case vpn_handshake:retry(Handshake) of
+        {established, Handshake1} ->
+            {noreply, State#{handshake := Handshake1, handshake_timer := undefined}};
+        {send, Packet, Handshake1} ->
+            send_handshake(Packet, State#{handshake := Handshake1, handshake_timer := undefined});
+        {failed, Reason, Handshake1} ->
+            logger:error("vpn_link handshake failed: ~p", [Reason]),
+            {noreply, incr_counter(State#{handshake := Handshake1,
+                                          handshake_timer := undefined},
+                                   handshake_failures)}
+    end.
+
+handle_handshake_packet(Packet, State = #{handshake := Handshake}) ->
+    State1 = incr_counter(State, handshake_control_rx),
+    case vpn_handshake:handle_frame(Packet, Handshake) of
+        {send, Reply, Handshake1} ->
+            send_handshake(Reply, State1#{handshake := Handshake1});
+        {established, Handshake1} ->
+            cancel_handshake_timer(State1),
+            logger:info("vpn_link handshake established with ~s",
+                        [maps:get(remote_peer_id, State1)]),
+            {noreply, State1#{handshake := Handshake1, handshake_timer := undefined}};
+        {reject, Reason, Handshake1} ->
+            logger:warning("vpn_link rejected handshake frame: ~p", [Reason]),
+            {noreply, incr_counter(State1#{handshake := Handshake1}, handshake_failures)}
+    end.
+
+send_handshake(Packet, State = #{udp_pid := UdpPid,
+                                 remote_ip := RemoteIp,
+                                 remote_udp_port := RemoteUdpPort,
+                                 handshake := Handshake}) ->
+    case vpn_udp:send(UdpPid, RemoteIp, RemoteUdpPort, Packet) of
+        ok ->
+            State1 = incr_counter(State, handshake_control_tx),
+            {noreply, schedule_handshake_retry(State1, Handshake)};
+        {error, Reason} ->
+            logger:error("vpn_link failed to send handshake frame: ~p", [Reason]),
+            {noreply, incr_counter(State, handshake_failures)}
+    end.
+
+schedule_handshake_retry(State, Handshake) ->
+    case vpn_handshake:established(Handshake) of
+        true -> State;
+        false ->
+            cancel_handshake_timer(State),
+            Ref = erlang:send_after(maps:get(retry_interval, Handshake), self(), handshake_retry),
+            State#{handshake_timer := Ref}
+    end.
+
+cancel_handshake_timer(State) ->
+    case maps:get(handshake_timer, State, undefined) of
+        undefined -> ok;
+        Ref -> _ = erlang:cancel_timer(Ref), ok
+    end.
+
+handshake_established(#{handshake := Handshake}) ->
+    vpn_handshake:established(Handshake).
 
 stop_worker(undefined, _StopFun) ->
     ok;
@@ -246,10 +335,12 @@ stats_map(State = #{tun_pid := TunPid,
                     udp_pid := UdpPid,
                     remote_ip := RemoteIp,
                     remote_udp_port := RemoteUdpPort}) ->
+    Handshake = maps:get(handshake, State),
     maps:merge(#{tun_pid => TunPid,
                  udp_pid => UdpPid,
                  remote_ip => RemoteIp,
-                 remote_port => RemoteUdpPort},
+                 remote_port => RemoteUdpPort,
+                 handshake => vpn_handshake:info(Handshake)},
                maps:with(counter_keys(), State)).
 
 zero_counters() ->
@@ -268,7 +359,11 @@ counter_keys() ->
      frames_rejected,
      crypto_encryptions,
      crypto_decryptions,
-     crypto_failures].
+     crypto_failures,
+     handshake_control_tx,
+     handshake_control_rx,
+     handshake_failures,
+     handshake_blocked_packets].
 
 reset_counter_values(State) ->
     maps:merge(State, zero_counters()).

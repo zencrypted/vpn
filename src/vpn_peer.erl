@@ -104,6 +104,9 @@ start_link_from_config(Config, IdentityInfo) ->
     RemoteUdpPort = maps:get(remote_udp_port, Config),
     RemotePeerId = maps:get(remote_peer_id, Config),
     Psk = maps:get(psk, Config),
+    HandshakeOptions = #{mode => maps:get(handshake_mode, Config, disabled),
+                         retry_interval => maps:get(handshake_retry_interval, Config, 1000),
+                         max_retries => maps:get(handshake_max_retries, Config, 5)},
     Identity = identity_from_config(Config),
     case vpn_link:start_link(IfName,
                              Ip,
@@ -113,7 +116,8 @@ start_link_from_config(Config, IdentityInfo) ->
                              RemoteUdpPort,
                              Id,
                              RemotePeerId,
-                             Psk) of
+                             Psk,
+                             HandshakeOptions) of
         {ok, LinkPid} ->
             logger:info("vpn_peer started: ~p", [Id]),
             {ok, #{id => Id,
@@ -197,7 +201,10 @@ runtime_config(Config) ->
                ovpn_path,
                authorization_mode,
                authorized,
-               authorization_reason],
+               authorization_reason,
+               handshake_mode,
+               handshake_retry_interval,
+               handshake_max_retries],
               Config).
 
 safe_identity_info(#{identity_ready := _} = IdentityInfo) ->

@@ -1174,3 +1174,24 @@ vpn_session_config:safe_info(Session).
 ### Debug authorization
 
 The debug profile explicitly sets `authorization_mode => development_bypass`. Ordinary OVPN sessions fail closed unless trusted runtime configuration supplies `authorized => true`; this state is never accepted from OVPN input.
+
+### Development control-plane handshake
+
+The debug profile enables `handshake_mode => development_control` for both
+local peers. Before encrypted PSK data frames are accepted, the peers exchange
+distinct `VPNH` control frames, verify the configured peer identifiers and
+move to `established`. TUN packets are blocked until establishment.
+
+This is a protocol skeleton, not certificate authentication. The existing PSK
+still protects data frames. Certificate exchange, transcript signatures and
+ephemeral key agreement are intentionally left for the next stages.
+
+Inspect the state after `./tools/run-debug.sh`:
+
+```erlang
+vpn_manager:peer_stats(client_a).
+vpn_manager:peer_stats(peer_b).
+```
+
+The nested link stats contain `handshake.status`, control-frame counters and
+blocked-packet/failure counters.

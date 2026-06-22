@@ -89,3 +89,11 @@ The one-command debug flow creates and reuses credentials under Git-ignored
 attestation, 2FA, or production CA lifecycle. The temporary PSK dataplane also
 remains in `config/sys.debug.config` until certificate-authenticated session
 key establishment replaces it.
+
+## Handshake skeleton follow-up
+
+The development control handshake currently proves only UDP liveness and
+configured peer-id agreement. Control frames are not authenticated and the
+PSK dataplane remains active after establishment. Replace this skeleton with
+certificate exchange, transcript signatures, ephemeral ECDH/HKDF session keys,
+replay-safe session identifiers, rekeying and production authorization binding.

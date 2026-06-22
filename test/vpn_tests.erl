@@ -109,6 +109,7 @@ vpn_link_exports_test() ->
     ?assert(erlang:function_exported(vpn_link, start_link, 6)),
     ?assert(erlang:function_exported(vpn_link, start_link, 8)),
     ?assert(erlang:function_exported(vpn_link, start_link, 9)),
+    ?assert(erlang:function_exported(vpn_link, start_link, 10)),
     ?assert(erlang:function_exported(vpn_link, stop, 1)),
     ?assert(erlang:function_exported(vpn_link, stats, 1)),
     ?assert(erlang:function_exported(vpn_link, reset_stats, 1)),
@@ -136,3 +137,12 @@ vpn_session_config_exports_test() ->
     ?assert(erlang:function_exported(vpn_session_config, from_spec, 1)),
     ?assert(erlang:function_exported(vpn_session_config, configured_peers, 0)),
     ?assert(erlang:function_exported(vpn_session_config, safe_info, 1)).
+
+
+vpn_handshake_exports_test() ->
+    ?assertMatch({module, vpn_handshake}, code:ensure_loaded(vpn_handshake)),
+    ?assert(erlang:function_exported(vpn_handshake, new, 3)),
+    ?assert(erlang:function_exported(vpn_handshake, begin_handshake, 1)),
+    ?assert(erlang:function_exported(vpn_handshake, handle_frame, 2)),
+    ?assertMatch({module, vpn_handshake_frame}, code:ensure_loaded(vpn_handshake_frame)),
+    ?assert(erlang:function_exported(vpn_handshake_frame, decode, 1)).
