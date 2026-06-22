@@ -15,6 +15,7 @@ cd "$WORK_DIR"
 [ "$(stat -c '%a' local/ca/ca.key)" = "600" ]
 [ "$(stat -c '%a' local/ca/ca.crt)" = "644" ]
 openssl verify -CAfile local/ca/ca.crt local/ca/ca.crt >/dev/null
+openssl x509 -in local/ca/ca.crt -noout -text | grep 'CA:TRUE' >/dev/null
 
 OUTPUT=$("$GEN_OVPN" --name client_a --remote 127.0.0.1 --port 5556)
 OVPN=$(printf '%s\n' "$OUTPUT" | sed -n 's/^OVPN: //p')

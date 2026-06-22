@@ -111,7 +111,6 @@ CN = $COMMON_NAME
 [v3_ca]
 basicConstraints = critical,CA:TRUE,pathlen:0
 keyUsage = critical,keyCertSign,cRLSign
-authorityKeyIdentifier = keyid:always,issuer
 subjectKeyIdentifier = hash
 EOF_CONF
 
