@@ -27,7 +27,7 @@ vpn_ovpn_envelope_exports_test() ->
     ?assertMatch({module, vpn_ovpn_envelope},
                  code:ensure_loaded(vpn_ovpn_envelope)),
     ?assert(erlang:function_exported(vpn_ovpn_envelope, contract, 0)),
-    ?assert(erlang:function_exported(vpn_ovpn_envelope, validate_metadata, 1)),
+    ?assert(erlang:function_exported(vpn_ovpn_envelope, required_directives, 0)),
     ?assert(erlang:function_exported(vpn_ovpn_envelope, validate_key_reference, 1)),
     ?assert(erlang:function_exported(vpn_ovpn_envelope, validate_remote, 2)).
 

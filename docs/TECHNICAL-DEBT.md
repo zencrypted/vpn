@@ -23,12 +23,15 @@ replay. Do not invent an unaudited custom handshake.
 
 Peers are currently loaded from `sys.config`. Add a runtime registry and a
 provisioning API that can create, update, disable, revoke, and reconcile peers
-without exposing client private keys.
+without exposing client private keys. The registry, not OVPN comments, must hold
+Device binding, 2FA policy, certificate lineage, and authorization state.
 
 ## TD-005 — Device-lock authorization
 
-For `device-bound` envelopes, bind the authenticated certificate/session to the
-IAS Device identifier and fail closed when authorization does not match.
+For Device-bound authorization, bind the authenticated certificate/session to
+the IAS Device identifier from trusted provisioning state and fail closed when
+authorization does not match. The Device identifier must not be trusted from the
+OVPN file.
 
 ## TD-006 — Two-factor provider hook
 
@@ -49,6 +52,6 @@ use substitution.
 
 ## TD-009 — OpenVPN compatibility boundary
 
-Keep the `.ovpn` format as a canonical Zencrypted provisioning envelope. Do not
-silently grow the importer into a general OpenVPN configuration or wire-protocol
-implementation.
+Keep the `.ovpn` format as a strict ordinary-syntax subset with no vendor
+metadata. Do not silently grow the importer into a general OpenVPN configuration
+or wire-protocol implementation.

@@ -1,29 +1,30 @@
-# Canonical Zencrypted OVPN Envelope
+# Canonical OVPN Envelope
 
 Status: **Stage 27A contract**
-Version: **`ovpn/v1`**
+
+Contract version: **`ovpn/v1`**
 
 ## Purpose
 
 The canonical OVPN envelope is the provisioning interchange format between IAS
-and the Zencrypted VPN runtime.
+and the VPN runtime.
 
-It intentionally reuses the familiar `.ovpn` text container so that endpoint,
-certificate, trust-anchor, and local-key-reference data do not require a new
-ad-hoc file format.
+It reuses ordinary `.ovpn` syntax for the remote endpoint, public certificates,
+and a Device-local private-key reference. It deliberately does not invent
+vendor-prefixed directives or comment metadata.
 
-The envelope **does not mean that `zencrypted/vpn` implements or promises
-compatibility with the OpenVPN wire protocol**. The runtime consumes a strict,
-Zencrypted-controlled subset and maps it into its own peer/session model.
+The envelope does **not** mean that this runtime implements the OpenVPN wire
+protocol or accepts arbitrary third-party configurations. The consumer supports
+a strict subset and maps it into its own peer/session model.
 
-The normative contract is this document. `vpn_ovpn_envelope` exposes the same
-version and value sets to Erlang code so that future parser and runtime work has
-a machine-readable source.
+`ovpn/v1` is the version of this document and parser contract. It is not written
+into the file. `vpn_ovpn_envelope` exposes the same contract constants to Erlang
+code.
 
 ## Normative language
 
-The words MUST, MUST NOT, SHOULD, SHOULD NOT, and MAY are to be interpreted as
-requirements for producers and consumers of this envelope.
+The words MUST, MUST NOT, SHOULD, SHOULD NOT, and MAY are requirements for
+producers and consumers of this envelope.
 
 ## File requirements
 
@@ -37,96 +38,33 @@ A canonical envelope:
 - contains exactly one inline client certificate block;
 - contains exactly one relative private-key reference;
 - MUST NOT contain private-key material;
+- MUST NOT rely on comments for security or runtime semantics;
 - SHOULD remain below 1 MiB.
 
-A consumer MUST reject an unsupported envelope version instead of attempting a
-best-effort import.
+Comments MAY be present and MAY be ignored. A consumer MUST NOT derive Device
+binding, authorization, 2FA policy, provisioning identity, or runtime selection
+from comments.
 
-## Required Zencrypted metadata
+## Security policy is external
 
-Metadata is encoded as comments before the compatibility directives:
+Portable versus Device-bound provisioning, the IAS Device identifier, 2FA
+policy, certificate lineage, revocation state, and authorization decisions are
+not encoded in the OVPN file.
 
-```ovpn
-# zencrypted-envelope: ovpn/v1
-# zencrypted-runtime: zencrypted-overlay
-# zencrypted-profile: device-bound
-# zencrypted-device-id: manual_device_123
-# zencrypted-2fa: optional
-```
+They belong to trusted IAS/VPN runtime state and are associated through the
+provisioning registry and authenticated certificate identity. Editing a local
+configuration file therefore cannot weaken Device lock or 2FA requirements.
 
-Required keys:
+The envelope itself proves no Device identity. Session activation requires:
 
-| Key | Allowed value |
-|---|---|
-| `zencrypted-envelope` | exactly `ovpn/v1` |
-| `zencrypted-runtime` | exactly `zencrypted-overlay` |
-| `zencrypted-profile` | `portable` or `device-bound` |
-| `zencrypted-2fa` | `disabled`, `optional`, or `required` |
-
-Conditional key:
-
-| Key | Rule |
-|---|---|
-| `zencrypted-device-id` | required for `device-bound`; forbidden for `portable` |
-
-Device and provisioning identifiers MUST be 1 to 255 ASCII characters and use
-only letters, digits, `.`, `_`, and `-`.
-
-Optional traceability keys:
-
-```ovpn
-# zencrypted-provisioning-id: provisioning_123
-# zencrypted-certificate-sha256: 5CEB02C7849E1CD9C12E124DFBFAD66366F4B2E9ED860C9A71B99A7412979CB9
-```
-
-Unknown `zencrypted-*` metadata MUST be rejected in strict mode. Ordinary
-non-Zencrypted comments MAY be ignored and MUST NOT alter security semantics.
-
-## Profiles
-
-### Portable
-
-```ovpn
-# zencrypted-profile: portable
-```
-
-A portable envelope is not authorized against one fixed Device identifier. The
-operator may place the envelope and its matching private key on a selected
-Device. Possession of the matching private key and successful certificate and
-policy validation remain mandatory.
-
-A portable envelope MUST NOT contain `zencrypted-device-id`.
-
-### Device-bound
-
-```ovpn
-# zencrypted-profile: device-bound
-# zencrypted-device-id: manual_device_123
-```
-
-A device-bound envelope is issued for one IAS Device object. The runtime MUST
-verify the certificate/key proof and MUST obtain an authorization result for the
-same Device identifier before activating the session.
-
-The identifier itself is not a secret and is not proof of Device ownership.
-Ownership is established by the private-key proof during the authenticated
-session and by IAS authorization policy.
-
-## Two-factor policy
-
-| Value | Session rule |
-|---|---|
-| `disabled` | no second-factor step is requested |
-| `optional` | a configured policy/provider MAY request a challenge |
-| `required` | the session MUST NOT become active before a successful challenge |
-
-The current runtime does not implement a 2FA provider. Until it does, a future
-importer MAY accept `required` metadata for inspection, but session activation
-MUST fail closed.
+1. possession of the matching private key;
+2. successful certificate and trust validation;
+3. current external authorization;
+4. Device-lock and 2FA enforcement when required by that authorization context.
 
 ## Canonical directive subset
 
-Version 1 supports only a TUN-over-UDP overlay profile.
+Version 1 supports a TUN-over-UDP overlay profile.
 
 Required directives and blocks:
 
@@ -161,19 +99,18 @@ remote-cert-tls server
 verb <0..11>
 ```
 
-IAS SHOULD emit directives in this canonical order:
+IAS SHOULD emit directives in this order:
 
-1. Zencrypted metadata;
-2. `client`;
-3. `dev tun`;
-4. `proto udp`;
-5. `remote`;
-6. optional compatibility directives;
-7. `<ca>` block;
-8. `<cert>` block;
-9. `key` reference.
+1. `client`;
+2. `dev tun`;
+3. `proto udp`;
+4. `remote`;
+5. optional compatibility directives;
+6. `<ca>` block;
+7. `<cert>` block;
+8. `key` reference.
 
-A consumer MAY parse the required entries independent of order, but MUST reject
+A consumer MAY parse required entries independent of order, but MUST reject
 duplicate singleton directives and duplicate certificate blocks.
 
 ## Private-key reference
@@ -226,8 +163,8 @@ Before session activation, the consumer MUST:
 1. parse both PEM blocks;
 2. validate certificate time and chain policy;
 3. prove that the local private key matches the client certificate public key;
-4. check revocation or current IAS authorization when available;
-5. enforce the selected profile and 2FA policy.
+4. check revocation and current IAS authorization;
+5. apply Device-lock and 2FA policy from trusted external runtime state.
 
 Certificate blocks are public material. Private-key blocks are forbidden.
 
@@ -251,13 +188,13 @@ pkcs12
 ```
 
 A strict consumer MUST also reject every unknown non-comment directive. This
-prevents a canonical envelope from becoming an accidental general-purpose
-OpenVPN configuration parser and blocks directives that execute local commands,
-load plugins, or introduce unmanaged credentials.
+prevents the importer from becoming an accidental general-purpose OpenVPN
+configuration parser and blocks directives that execute commands, load plugins,
+or introduce unmanaged credentials.
 
 ## Mapping to the internal peer model
 
-| Envelope value | Future internal value |
+| Envelope value | Internal value |
 |---|---|
 | `remote host port` | remote endpoint |
 | `proto udp` | UDP transport |
@@ -265,9 +202,10 @@ load plugins, or introduce unmanaged credentials.
 | `<ca>` | trust anchor |
 | `<cert>` | local peer certificate |
 | `key` | Device-local private-key reference |
-| `zencrypted-profile` | portable/device-lock authorization policy |
-| `zencrypted-device-id` | IAS Device identifier |
-| `zencrypted-2fa` | second-factor policy |
+
+The importer combines this parsed configuration with separate trusted runtime
+state containing authorization, Device binding, 2FA requirements, and
+provisioning lineage.
 
 The mapping does not imply that the current `vpn_peer` PSK configuration is the
 final session model. Stage 27C must replace or encapsulate the temporary PSK
@@ -278,48 +216,53 @@ dataplane with a certificate-authenticated session.
 A complete public example is stored at:
 
 ```text
-priv/examples/peer_a-device-bound.ovpn
+priv/examples/peer_a.ovpn
 ```
 
-It embeds the repository development CA and `peer_a` public certificate, but
-references a private key only by the safe relative path `keys/peer_a.key`.
+It contains only ordinary OVPN directives, embeds the repository development CA
+and `peer_a` public certificate, and references the private key by the safe
+relative path `keys/peer_a.key`.
 
 ## Producer responsibilities
 
 IAS, as producer, MUST:
 
-- emit only this canonical subset;
-- emit the exact version and runtime metadata;
+- emit only this canonical ordinary OVPN subset;
+- not emit custom vendor metadata;
 - never embed a private key;
 - emit a safe relative key reference;
-- emit a Device identifier only for device-bound profiles;
 - use a real configured endpoint before strict export;
-- preserve certificate and provisioning lineage.
+- preserve Device binding, 2FA, certificate, and provisioning lineage in trusted
+  state outside the file.
 
 ## Consumer responsibilities
 
-`zencrypted/vpn`, as consumer, MUST:
+The VPN runtime, as consumer, MUST:
 
 - parse strictly and reject ambiguity;
-- reject unsupported versions and unknown directives;
+- reject unknown directives;
+- ignore comments for security semantics;
 - resolve files beneath an explicit import root;
-- validate certificate, key ownership, authorization, device lock, and 2FA;
+- validate certificate and key ownership;
+- obtain authorization, Device lock, and 2FA requirements from trusted external
+  state;
 - convert the envelope into internal runtime configuration;
 - never interpret the envelope as permission to execute arbitrary OpenVPN
   directives.
 
 ## Versioning
 
-`ovpn/v1` is immutable once implemented by a released consumer. Any incompatible
-change requires a new version value such as `ovpn/v2`.
+`ovpn/v1` is an implementation and documentation contract label, not an on-wire
+field. Incompatible parser changes require a new contract version in code and
+documentation, together with explicit producer/consumer coordination.
 
-Optional metadata can be added only when an older strict consumer can reject it
-safely and the producer can negotiate the newer contract.
+No security-relevant version, profile, Device identifier, or 2FA value is stored
+in comments.
 
 ## Implementation stages
 
 ```text
-Stage 27A  Canonical envelope contract and machine-readable constants
+Stage 27A  Canonical ordinary OVPN subset and machine-readable constants
 Stage 27B  Strict parser, validator, and internal peer-config conversion
 Stage 27C  Certificate-authenticated session, Device lock, and 2FA hook
 ```

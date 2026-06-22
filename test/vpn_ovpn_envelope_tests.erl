@@ -2,78 +2,25 @@
 
 -include_lib("eunit/include/eunit.hrl").
 
-contract_declares_canonical_version_test() ->
+contract_declares_plain_ovpn_subset_test() ->
     Contract = vpn_ovpn_envelope:contract(),
     ?assertEqual(<<"ovpn/v1">>, maps:get(version, Contract)),
-    ?assertEqual(<<"zencrypted-overlay">>, maps:get(runtime, Contract)),
-    ?assertEqual([<<"portable">>, <<"device-bound">>],
-                 maps:get(profiles, Contract)),
+    ?assertEqual(false, maps:get(serialized_version, Contract)),
+    ?assertEqual(none, maps:get(custom_metadata, Contract)),
+    ?assertEqual(external, maps:get(security_policy, Contract)),
+    ?assertEqual(false, maps:is_key(runtime, Contract)),
+    ?assertEqual(false, maps:is_key(profiles, Contract)),
+    ?assertEqual(false, maps:is_key(two_factor_modes, Contract)),
     ?assert(lists:member(<<"<key>">>,
                          maps:get(forbidden_directives, Contract))).
 
-portable_metadata_is_valid_without_device_binding_test() ->
-    Metadata = #{envelope => <<"ovpn/v1">>,
-                 runtime => <<"zencrypted-overlay">>,
-                 profile => <<"portable">>,
-                 two_factor => <<"optional">>},
-    ?assertEqual(ok, vpn_ovpn_envelope:validate_metadata(Metadata)).
-
-portable_metadata_rejects_device_binding_test() ->
-    Metadata = #{envelope => <<"ovpn/v1">>,
-                 runtime => <<"zencrypted-overlay">>,
-                 profile => <<"portable">>,
-                 device_id => <<"peer_a">>,
-                 two_factor => <<"optional">>},
-    ?assertEqual({error, {unexpected_metadata, device_id}},
-                 vpn_ovpn_envelope:validate_metadata(Metadata)).
-
-device_bound_metadata_requires_device_id_test() ->
-    Metadata = #{envelope => <<"ovpn/v1">>,
-                 runtime => <<"zencrypted-overlay">>,
-                 profile => <<"device-bound">>,
-                 two_factor => <<"required">>},
-    ?assertEqual({error, {missing_metadata, device_id}},
-                 vpn_ovpn_envelope:validate_metadata(Metadata)).
-
-device_bound_metadata_is_valid_test() ->
-    Metadata = #{envelope => <<"ovpn/v1">>,
-                 runtime => <<"zencrypted-overlay">>,
-                 profile => <<"device-bound">>,
-                 device_id => <<"manual_device_123">>,
-                 two_factor => <<"disabled">>},
-    ?assertEqual(ok, vpn_ovpn_envelope:validate_metadata(Metadata)).
-
-unsupported_version_is_rejected_test() ->
-    Metadata = #{envelope => <<"ovpn/v2">>,
-                 runtime => <<"zencrypted-overlay">>,
-                 profile => <<"portable">>,
-                 two_factor => <<"disabled">>},
-    ?assertEqual({error,
-                  {unsupported_metadata_value, envelope, <<"ovpn/v2">>}},
-                 vpn_ovpn_envelope:validate_metadata(Metadata)).
-
-unknown_metadata_is_rejected_test() ->
-    Metadata = #{envelope => <<"ovpn/v1">>,
-                 runtime => <<"zencrypted-overlay">>,
-                 profile => <<"portable">>,
-                 two_factor => <<"disabled">>,
-                 arbitrary_extension => true},
-    ?assertEqual({error, {unknown_metadata, arbitrary_extension}},
-                 vpn_ovpn_envelope:validate_metadata(Metadata)).
-
-optional_traceability_metadata_is_validated_test() ->
-    Metadata = #{envelope => <<"ovpn/v1">>,
-                 runtime => <<"zencrypted-overlay">>,
-                 profile => <<"device-bound">>,
-                 device_id => <<"peer_a">>,
-                 two_factor => <<"optional">>,
-                 provisioning_id => <<"demo-peer-a">>,
-                 certificate_sha256 =>
-                   <<"5CEB02C7849E1CD9C12E124DFBFAD66366F4B2E9ED860C9A71B99A7412979CB9">>},
-    ?assertEqual(ok, vpn_ovpn_envelope:validate_metadata(Metadata)),
-    ?assertEqual({error, {invalid_metadata_value, certificate_sha256}},
-                 vpn_ovpn_envelope:validate_metadata(
-                   Metadata#{certificate_sha256 => <<"not-a-fingerprint">>})).
+canonical_directive_sets_are_disjoint_test() ->
+    Required = vpn_ovpn_envelope:required_directives(),
+    Optional = vpn_ovpn_envelope:optional_directives(),
+    Forbidden = vpn_ovpn_envelope:forbidden_directives(),
+    ?assertEqual([], [D || D <- Required, lists:member(D, Optional)]),
+    ?assertEqual([], [D || D <- Required, lists:member(D, Forbidden)]),
+    ?assertEqual([], [D || D <- Optional, lists:member(D, Forbidden)]).
 
 safe_relative_key_references_are_accepted_test() ->
     ?assertEqual(ok,
@@ -104,15 +51,15 @@ remote_endpoint_validation_test() ->
     ?assertEqual({error, invalid_remote_port},
                  vpn_ovpn_envelope:validate_remote(<<"vpn.example.net">>, 0)).
 
-canonical_example_contains_public_material_only_test() ->
+canonical_example_uses_plain_ovpn_syntax_test() ->
     PrivDir = code:priv_dir(vpn),
-    Path = filename:join([PrivDir, "examples", "peer_a-device-bound.ovpn"]),
+    Path = filename:join([PrivDir, "examples", "peer_a.ovpn"]),
     {ok, Envelope} = file:read_file(Path),
-    ?assertMatch({_, _},
-                 binary:match(Envelope,
-                              <<"# zencrypted-envelope: ovpn/v1">>)),
+    ?assertMatch({_, _}, binary:match(Envelope, <<"client\n">>)),
+    ?assertMatch({_, _}, binary:match(Envelope, <<"remote 127.0.0.1 5556">>)),
     ?assertMatch({_, _}, binary:match(Envelope, <<"<ca>">>)),
     ?assertMatch({_, _}, binary:match(Envelope, <<"<cert>">>)),
     ?assertMatch({_, _}, binary:match(Envelope, <<"key keys/peer_a.key">>)),
+    ?assertEqual(nomatch, binary:match(Envelope, <<"zencrypted", "-">>)),
     ?assertEqual(nomatch, binary:match(Envelope, <<"<key>">>)),
     ?assertEqual(nomatch, binary:match(Envelope, <<"PRIVATE KEY">>)).

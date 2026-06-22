@@ -35,18 +35,19 @@ certificates are signed by the local development CA fixture.
 ## Canonical OVPN Envelope
 
 Stage 27A defines the canonical IAS-to-VPN provisioning envelope in
-[`docs/OVPN-ENVELOPE.md`](docs/OVPN-ENVELOPE.md). The format is a strict,
-Zencrypted-controlled `.ovpn` subset carrying the endpoint, public certificates,
-Device-local key reference, Device-lock profile, and 2FA policy.
+[`docs/OVPN-ENVELOPE.md`](docs/OVPN-ENVELOPE.md). The format is a strict subset
+of ordinary `.ovpn` syntax carrying the endpoint, public certificates, and a
+Device-local key reference. It defines no vendor-prefixed metadata.
 
 This is an interchange envelope only. It does **not** mean that this runtime
 implements the OpenVPN wire protocol or accepts arbitrary third-party `.ovpn`
 configuration.
 
-The machine-readable contract surface is `vpn_ovpn_envelope`. A complete public
-example is available at
-`priv/examples/peer_a-device-bound.ovpn`. Strict parsing and runtime conversion
-remain Stage 27B work.
+Device lock, 2FA, authorization, and provisioning lineage remain in trusted
+IAS/VPN runtime state outside the file. The machine-readable contract surface is
+`vpn_ovpn_envelope`; a public example is available at
+`priv/examples/peer_a.ovpn`. Strict parsing and runtime conversion remain Stage
+27B work.
 
 ## Modules
 
@@ -60,7 +61,7 @@ remain Stage 27B work.
 - `vpn_peer` - public runtime peer abstraction.
 - `vpn_manager` - read-only management API for supervised peers.
 - `vpn_trust_store` - development CA certificate trust store.
-- `vpn_ovpn_envelope` - canonical envelope constants and semantic validators.
+- `vpn_ovpn_envelope` - canonical OVPN subset constants and value validators.
 
 ## Build
 
