@@ -61,6 +61,35 @@ provisioning_contract_test_() ->
                       end)]
      end}.
 
+authorization_metadata_normalization_test_() ->
+    {setup,
+     fun setup/0,
+     fun cleanup/1,
+     fun({_Registry, _Provisioning}) ->
+             [?_test(begin
+                          Policy = command(1, upsert,
+                                           #{authorization_mode => policy,
+                                             authorized => true}),
+                          ?assertMatch({ok, #{operation := upsert}},
+                                       vpn_provisioning:apply(Policy)),
+                          {ok, PolicyEntry} = vpn_peer_registry:get(peer_a),
+                          ?assertEqual(policy, maps:get(authorization_mode, PolicyEntry)),
+                          ?assertEqual(true, maps:get(authorized, PolicyEntry)),
+                          ?assertEqual(undefined,
+                                       maps:get(authorization_reason, PolicyEntry)),
+
+                          ExplicitReason = command(2, upsert,
+                                                   #{authorized => false,
+                                                     authorization_reason => denied_by_policy}),
+                          ?assertMatch({ok, #{operation := upsert}},
+                                       vpn_provisioning:apply(ExplicitReason)),
+                          {ok, DeniedEntry} = vpn_peer_registry:get(peer_a),
+                          ?assertEqual(false, maps:get(authorized, DeniedEntry)),
+                          ?assertEqual(denied_by_policy,
+                                       maps:get(authorization_reason, DeniedEntry))
+                      end)]
+     end}.
+
 new_peer_requires_runtime_config_test_() ->
     {setup,
      fun setup/0,
@@ -122,6 +151,9 @@ peer_config(PeerId) ->
       ifname => atom_to_list(PeerId),
       ip => "10.20.20.1",
       remote_peer_id => peer_a,
+      authorization_mode => development_bypass,
+      authorized => true,
+      authorization_reason => development_bypass,
       psk => <<"secret">>}.
 
 stop(Name) ->

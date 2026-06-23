@@ -131,13 +131,15 @@ base_config(PeerId, Desired) ->
 next_config(upsert, Base, Desired) ->
     Runtime = maps:get(runtime_config, Desired, #{}),
     Public = maps:without([runtime_config], Desired),
+    DesiredFields = maps:merge(Runtime, Public),
     RevokedBefore = maps:get(revoked, Base, false),
     Revoked = case maps:find(revoked, Public) of
                   {ok, false} -> false;
                   {ok, true} -> true;
                   error -> RevokedBefore
               end,
-    {ok, (maps:merge(maps:merge(Base, Runtime), Public))#{revoked => Revoked}};
+    Merged = (maps:merge(Base, DesiredFields))#{revoked => Revoked},
+    {ok, normalize_authorization_metadata(Merged, DesiredFields)};
 next_config(enable, Base, _Desired) ->
     case maps:get(revoked, Base, false) of
         true -> {error, revoked};
@@ -151,6 +153,16 @@ next_config(revoke, Base, Desired) ->
                                    authorized => false,
                                    authorization_reason => revoked,
                                    revoked => true}}.
+
+
+normalize_authorization_metadata(Config, DesiredFields) ->
+    AuthorizationChanged = maps:is_key(authorization_mode, DesiredFields) orelse
+                           maps:is_key(authorized, DesiredFields),
+    ReasonProvided = maps:is_key(authorization_reason, DesiredFields),
+    case AuthorizationChanged andalso not ReasonProvided of
+        true -> Config#{authorization_reason => undefined};
+        false -> Config
+    end.
 
 validate_command(Command) when is_map(Command) ->
     PeerId = maps:get(peer_id, Command, undefined),
