@@ -7,9 +7,11 @@
 
 -define(REPLAY_WINDOW_SIZE, 64).
 -define(DEFAULT_PREVIOUS_EPOCH_GRACE_MS, 5000).
+-define(DEBUG_FRAME_HISTORY_LIMIT, 256).
 
 -export([start_link/5, start_link/6, start_link/8, start_link/9, start_link/10,
-         stop/1, stats/1, reset_stats/1, rekey/1]).
+         stop/1, stats/1, reset_stats/1, rekey/1,
+         debug_frame_history/1, debug_replay_frame/3]).
 -export([validate_frame_peer_id/2]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
@@ -77,6 +79,12 @@ reset_stats(Pid) ->
 rekey(Pid) ->
     gen_server:call(Pid, rekey).
 
+debug_frame_history(Pid) ->
+    gen_server:call(Pid, debug_frame_history).
+
+debug_replay_frame(Pid, KeyEpoch, Seq) ->
+    gen_server:call(Pid, {debug_replay_frame, KeyEpoch, Seq}).
+
 init({psk_required, _TunName, _TunIp, _Mode, _LocalUdpPort, _RemoteIp, _RemoteUdpPort}) ->
     {stop, psk_required};
 init({psk_required, _TunName, _TunIp, _Mode, _LocalUdpPort, _RemoteIp, _RemoteUdpPort, _PeerId, _RemotePeerId}) ->
@@ -96,6 +104,13 @@ handle_call(reset_stats, _From, State) ->
     {reply, ok, reset_counter_values(State)};
 handle_call(rekey, _From, State) ->
     initiate_rekey(State);
+handle_call(debug_frame_history, _From, State) ->
+    case maps:get(debug_replay_enabled, State, false) of
+        true -> {reply, {ok, debug_frame_history_info(State)}, State};
+        false -> {reply, {error, debug_replay_disabled}, State}
+    end;
+handle_call({debug_replay_frame, KeyEpoch, Seq}, _From, State) ->
+    replay_debug_frame(KeyEpoch, Seq, State);
 handle_call(_Request, _From, State) ->
     {reply, {error, not_implemented}, State}.
 
@@ -184,6 +199,11 @@ init_tun(UdpPid, TunName, TunIp, Mode, RemoteIp, RemoteUdpPort, PeerId, RemotePe
                                      maps:get(previous_epoch_grace_ms,
                                               HandshakeOptions,
                                               ?DEFAULT_PREVIOUS_EPOCH_GRACE_MS),
+                                 debug_replay_enabled =>
+                                     maps:get(debug_replay_controls,
+                                              HandshakeOptions,
+                                              false),
+                                 debug_frame_history => [],
                                  current_replay_window => vpn_replay_window:new(?REPLAY_WINDOW_SIZE),
                                  crypto_session_id => undefined,
                                  handshake => Handshake,
@@ -453,7 +473,8 @@ send_encoded(EncodedPacket, Kind, Size, Seq, UdpPid, RemoteIp, RemoteUdpPort, St
                         [Kind, format_ip(RemoteIp), RemoteUdpPort, Size]),
             State1 = incr_counters(State, udp_tx_packets, udp_tx_bytes, Size),
             State2 = record_session_tx(Size, State1),
-            {noreply, State2#{tx_seq := Seq + 1}};
+            State3 = remember_debug_frame(EncodedPacket, Size, Seq, State2),
+            {noreply, State3#{tx_seq := Seq + 1}};
         {error, Reason} ->
             logger:error("vpn_link failed to forward packet: ~p", [Reason]),
             {noreply, State}
@@ -569,7 +590,8 @@ stats_map(State = #{tun_pid := TunPid,
                  handshake => vpn_handshake:info(Handshake),
                  crypto => crypto_info(State),
                  session => session_info(State),
-                 replay => replay_info(State)},
+                 replay => replay_info(State),
+                 debug_replay => debug_replay_info(State)},
                maps:with(counter_keys(), State)).
 
 current_key_epoch(#{session_lifecycle := Lifecycle}) when is_map(Lifecycle) ->
@@ -656,7 +678,8 @@ counter_keys() ->
      replay_drops,
      duplicate_frames,
      stale_epoch_drops,
-     previous_epoch_accepted].
+     previous_epoch_accepted,
+     debug_replayed_frames].
 
 reset_counter_values(State) ->
     maps:merge(State, zero_counters()).
@@ -683,8 +706,68 @@ normalize_peer_id(PeerId) when is_binary(PeerId) ->
 normalize_peer_id(PeerId) when is_atom(PeerId) ->
     atom_to_binary(PeerId, utf8).
 
+debug_replay_info(State) ->
+    Enabled = maps:get(debug_replay_enabled, State, false),
+    History = maps:get(debug_frame_history, State, []),
+    #{enabled => Enabled,
+      retained_frames => length(History),
+      history_limit => ?DEBUG_FRAME_HISTORY_LIMIT,
+      replayed_frames => maps:get(debug_replayed_frames, State, 0)}.
+
+debug_frame_history_info(State) ->
+    [maps:without([packet], Entry)
+     || Entry <- lists:reverse(maps:get(debug_frame_history, State, []))].
+
+remember_debug_frame(_Packet, _Size, _Seq,
+                     State = #{debug_replay_enabled := false}) ->
+    State;
+remember_debug_frame(Packet, Size, Seq, State) ->
+    Entry = #{key_epoch => current_key_epoch(State),
+              seq => Seq,
+              plaintext_size => Size,
+              encrypted_size => byte_size(Packet),
+              packet => Packet},
+    History0 = [Entry | maps:get(debug_frame_history, State, [])],
+    History1 = lists:sublist(History0, ?DEBUG_FRAME_HISTORY_LIMIT),
+    State#{debug_frame_history := History1}.
+
+replay_debug_frame(_KeyEpoch, _Seq,
+                   State = #{debug_replay_enabled := false}) ->
+    {reply, {error, debug_replay_disabled}, State};
+replay_debug_frame(KeyEpoch, Seq,
+                   State = #{udp_pid := UdpPid,
+                             remote_ip := RemoteIp,
+                             remote_udp_port := RemoteUdpPort})
+  when is_integer(KeyEpoch), KeyEpoch >= 0,
+       is_integer(Seq), Seq >= 0 ->
+    case find_debug_frame(KeyEpoch, Seq,
+                          maps:get(debug_frame_history, State, [])) of
+        {ok, #{packet := Packet}} ->
+            case vpn_udp:send(UdpPid, RemoteIp, RemoteUdpPort, Packet) of
+                ok ->
+                    logger:warning("vpn_link replayed debug frame epoch=~p seq=~p",
+                                   [KeyEpoch, Seq]),
+                    {reply, ok, incr_counter(State, debug_replayed_frames)};
+                {error, Reason} ->
+                    {reply, {error, Reason}, State}
+            end;
+        error ->
+            {reply, {error, frame_not_retained}, State}
+    end;
+replay_debug_frame(_KeyEpoch, _Seq, State) ->
+    {reply, {error, invalid_frame_selector}, State}.
+
+find_debug_frame(_KeyEpoch, _Seq, []) ->
+    error;
+find_debug_frame(KeyEpoch, Seq,
+                 [#{key_epoch := KeyEpoch, seq := Seq} = Entry | _]) ->
+    {ok, Entry};
+find_debug_frame(KeyEpoch, Seq, [_ | Rest]) ->
+    find_debug_frame(KeyEpoch, Seq, Rest).
+
 packet_kind(Packet, tap) ->
     ethernet_packet_kind(Packet);
+
 packet_kind(Packet, tun) ->
     ip_packet_kind(Packet).
 

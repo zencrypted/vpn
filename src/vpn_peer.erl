@@ -5,7 +5,7 @@
 
 -behaviour(gen_server).
 
--export([start_link/1, stop/1, stats/1, reset_stats/1, rekey/1,
+-export([start_link/1, stop/1, stats/1, reset_stats/1, rekey/1, debug_frame_history/1, debug_replay_frame/3,
          identity/1, identity_info/1, config/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
@@ -23,6 +23,12 @@ reset_stats(Pid) ->
 
 rekey(Pid) ->
     gen_server:call(Pid, rekey).
+
+debug_frame_history(Pid) ->
+    gen_server:call(Pid, debug_frame_history).
+
+debug_replay_frame(Pid, KeyEpoch, Seq) ->
+    gen_server:call(Pid, {debug_replay_frame, KeyEpoch, Seq}).
 
 identity(Pid) ->
     gen_server:call(Pid, identity).
@@ -49,6 +55,11 @@ handle_call(reset_stats, _From, State = #{link_pid := LinkPid}) ->
     {reply, vpn_link:reset_stats(LinkPid), State};
 handle_call(rekey, _From, State = #{link_pid := LinkPid}) ->
     {reply, vpn_link:rekey(LinkPid), State};
+handle_call(debug_frame_history, _From, State = #{link_pid := LinkPid}) ->
+    {reply, vpn_link:debug_frame_history(LinkPid), State};
+handle_call({debug_replay_frame, KeyEpoch, Seq}, _From,
+            State = #{link_pid := LinkPid}) ->
+    {reply, vpn_link:debug_replay_frame(LinkPid, KeyEpoch, Seq), State};
 handle_call(identity, _From, State = #{identity := Identity}) ->
     {reply, Identity, State};
 handle_call(identity_info, _From, State = #{identity_info := IdentityInfo}) ->
@@ -139,7 +150,9 @@ handshake_options(Config, IdentityInfo) ->
              retry_interval => maps:get(handshake_retry_interval, Config, 1000),
              max_retries => maps:get(handshake_max_retries, Config, 5),
              previous_epoch_grace_ms =>
-                 maps:get(previous_epoch_grace_ms, Config, 5000)},
+                 maps:get(previous_epoch_grace_ms, Config, 5000),
+             debug_replay_controls =>
+                 maps:get(debug_replay_controls, Config, false)},
     case maps:get(handshake_mode, Config, disabled) of
         certificate_control ->
             Base#{local_certificate_pem => maps:get(certificate_pem, IdentityInfo),
@@ -213,8 +226,16 @@ validate_handshake_config(Config) ->
 
 validate_previous_epoch_grace(Config) ->
     case maps:get(previous_epoch_grace_ms, Config, 5000) of
-        GraceMs when is_integer(GraceMs), GraceMs > 0 -> ok;
-        GraceMs -> {error, {invalid_previous_epoch_grace_ms, GraceMs}}
+        GraceMs when is_integer(GraceMs), GraceMs > 0 ->
+            validate_debug_replay_controls(Config);
+        GraceMs ->
+            {error, {invalid_previous_epoch_grace_ms, GraceMs}}
+    end.
+
+validate_debug_replay_controls(Config) ->
+    case maps:get(debug_replay_controls, Config, false) of
+        Value when is_boolean(Value) -> ok;
+        Value -> {error, {invalid_debug_replay_controls, Value}}
     end.
 
 validate_mode(tap) ->

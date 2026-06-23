@@ -126,3 +126,7 @@ profile). The following hardening remains intentionally separate:
   packets without exposing them in production APIs;
 - consider a bounded packet-count condition in addition to the grace timer for
   retiring the previous epoch.
+
+## Debug replay controls
+
+The encrypted-frame history and replay API are intentionally debug-only. Production configurations must keep `debug_replay_controls` disabled. The retained history is bounded to 256 ciphertext frames and exposes only metadata through the read API. A future hardening pass should compile these controls out of release builds or protect them behind a dedicated development feature flag.

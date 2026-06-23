@@ -8,6 +8,8 @@ vpn_peer_exports_test() ->
     ?assert(erlang:function_exported(vpn_peer, stop, 1)),
     ?assert(erlang:function_exported(vpn_peer, stats, 1)),
     ?assert(erlang:function_exported(vpn_peer, reset_stats, 1)),
+    ?assert(erlang:function_exported(vpn_peer, debug_frame_history, 1)),
+    ?assert(erlang:function_exported(vpn_peer, debug_replay_frame, 3)),
     ?assert(erlang:function_exported(vpn_peer, identity, 1)),
     ?assert(erlang:function_exported(vpn_peer, identity_info, 1)),
     ?assert(erlang:function_exported(vpn_peer, config, 1)).
@@ -42,6 +44,8 @@ vpn_manager_exports_test() ->
     ?assert(erlang:function_exported(vpn_manager, certificate_status, 1)),
     ?assert(erlang:function_exported(vpn_manager, peer_info, 1)),
     ?assert(erlang:function_exported(vpn_manager, peer_stats, 1)),
+    ?assert(erlang:function_exported(vpn_manager, debug_frame_history, 1)),
+    ?assert(erlang:function_exported(vpn_manager, debug_replay_frame, 3)),
     ?assert(erlang:function_exported(vpn_manager, start_peer, 1)),
     ?assert(erlang:function_exported(vpn_manager, stop_peer, 1)),
     ?assert(erlang:function_exported(vpn_manager, reload_config, 0)),
@@ -113,6 +117,8 @@ vpn_link_exports_test() ->
     ?assert(erlang:function_exported(vpn_link, stop, 1)),
     ?assert(erlang:function_exported(vpn_link, stats, 1)),
     ?assert(erlang:function_exported(vpn_link, reset_stats, 1)),
+    ?assert(erlang:function_exported(vpn_link, debug_frame_history, 1)),
+    ?assert(erlang:function_exported(vpn_link, debug_replay_frame, 3)),
     ?assert(erlang:function_exported(vpn_link, validate_frame_peer_id, 2)).
 
 vpn_replay_window_exports_test() ->

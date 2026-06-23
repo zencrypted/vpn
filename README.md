@@ -1271,3 +1271,19 @@ maps:get(replay, Link),
 maps:with([replay_drops, duplicate_frames, stale_epoch_drops,
            previous_epoch_accepted], Link).
 ```
+
+### Debug replay verification
+
+The debug profile enables an explicit encrypted-frame replay hook. It is disabled by default and must never be enabled in production. After `./tools/run-debug.sh`, inspect retained outbound frames with:
+
+```erlang
+vpn_manager:debug_frame_history(client_a).
+```
+
+Replay a retained frame by epoch and sequence number:
+
+```erlang
+vpn_manager:debug_replay_frame(client_a, 1, 0).
+```
+
+This sends the exact retained ciphertext again, allowing the remote peer replay window to be verified without exposing session keys or plaintext. Generate more than 64 packets and replay an old retained sequence to test the too-old path. Retain an epoch-1 frame, rekey, wait for the previous-epoch grace period to expire, and replay it to test stale-epoch rejection.
