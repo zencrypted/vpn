@@ -28,3 +28,4 @@ log
 
 # misc
 /local
+rebar.lock
