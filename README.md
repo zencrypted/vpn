@@ -1432,3 +1432,22 @@ fail-closed with `certificate_fingerprint_unavailable` or
 the IAS certificate identity. Development tests must therefore provision the
 actual fingerprint of the certificate referenced by the configured OVPN
 artifact.
+
+
+### Debug dataplane payload probe
+
+When `debug_replay_controls` is enabled for a peer, the runtime exposes a
+userspace dataplane probe that exercises the real session framing, encryption,
+UDP transport, decryption, peer validation, epoch validation, and replay
+window without requiring a kernel TUN assertion.
+
+```erlang
+ok = vpn_manager:debug_clear_received_payloads(peer_b),
+Payload = <<"ias-vpn-dataplane-probe">>,
+{ok, Sent} = vpn_manager:debug_send_payload(client_a, Payload),
+{ok, Received} = vpn_manager:debug_received_payloads(peer_b).
+```
+
+Each received entry contains the original payload, byte count, key epoch,
+sequence number, peer id, and SHA-256 digest. The history is bounded and is
+available only when debug replay controls are enabled.

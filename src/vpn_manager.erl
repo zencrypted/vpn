@@ -13,6 +13,7 @@
          peer_info/1,
          peer_stats/1,
          rekey/1, debug_frame_history/1, debug_replay_frame/3, debug_send_frames/2,
+         debug_send_payload/2, debug_received_payloads/1, debug_clear_received_payloads/1,
          start_peer/1,
          stop_peer/1,
          reload_config/0,
@@ -98,6 +99,24 @@ debug_replay_frame(PeerId, KeyEpoch, Seq) ->
 debug_send_frames(PeerId, Count) ->
     case find_peer(PeerId) of
         {ok, Pid} -> vpn_peer:debug_send_frames(Pid, Count);
+        {error, not_found} -> {error, not_found}
+    end.
+
+debug_send_payload(PeerId, Payload) when is_binary(Payload) ->
+    case find_peer(PeerId) of
+        {ok, Pid} -> vpn_peer:debug_send_payload(Pid, Payload);
+        {error, not_found} -> {error, not_found}
+    end.
+
+debug_received_payloads(PeerId) ->
+    case find_peer(PeerId) of
+        {ok, Pid} -> vpn_peer:debug_received_payloads(Pid);
+        {error, not_found} -> {error, not_found}
+    end.
+
+debug_clear_received_payloads(PeerId) ->
+    case find_peer(PeerId) of
+        {ok, Pid} -> vpn_peer:debug_clear_received_payloads(Pid);
         {error, not_found} -> {error, not_found}
     end.
 

@@ -8,13 +8,16 @@
 -define(REPLAY_WINDOW_SIZE, 64).
 -define(DEFAULT_PREVIOUS_EPOCH_GRACE_MS, 5000).
 -define(DEBUG_FRAME_HISTORY_LIMIT, 256).
+-define(DEBUG_PAYLOAD_HISTORY_LIMIT, 64).
 -define(DEFAULT_AUTO_REKEY_CHECK_INTERVAL_MS, 1000).
 -define(DEFAULT_AUTO_REKEY_FAILURE_COOLDOWN_MS, 5000).
 -define(DEFAULT_AUTO_REKEY_JITTER_MS, 0).
 
 -export([start_link/5, start_link/6, start_link/8, start_link/9, start_link/10,
          stop/1, stats/1, reset_stats/1, rekey/1,
-         debug_frame_history/1, debug_replay_frame/3, debug_send_frames/2]).
+         debug_frame_history/1, debug_replay_frame/3, debug_send_frames/2,
+         debug_send_payload/2, debug_received_payloads/1,
+         debug_clear_received_payloads/1]).
 -export([validate_frame_peer_id/2]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
@@ -91,6 +94,15 @@ debug_replay_frame(Pid, KeyEpoch, Seq) ->
 debug_send_frames(Pid, Count) ->
     gen_server:call(Pid, {debug_send_frames, Count}, 30000).
 
+debug_send_payload(Pid, Payload) when is_binary(Payload) ->
+    gen_server:call(Pid, {debug_send_payload, Payload}, 30000).
+
+debug_received_payloads(Pid) ->
+    gen_server:call(Pid, debug_received_payloads).
+
+debug_clear_received_payloads(Pid) ->
+    gen_server:call(Pid, debug_clear_received_payloads).
+
 init({psk_required, _TunName, _TunIp, _Mode, _LocalUdpPort, _RemoteIp, _RemoteUdpPort}) ->
     {stop, psk_required};
 init({psk_required, _TunName, _TunIp, _Mode, _LocalUdpPort, _RemoteIp, _RemoteUdpPort, _PeerId, _RemotePeerId}) ->
@@ -124,6 +136,22 @@ handle_call({debug_replay_frame, KeyEpoch, Seq}, _From, State) ->
     replay_debug_frame(KeyEpoch, Seq, State);
 handle_call({debug_send_frames, Count}, _From, State) ->
     send_debug_frames(Count, State);
+handle_call({debug_send_payload, Payload}, _From, State) ->
+    send_debug_payload(Payload, State);
+handle_call(debug_received_payloads, _From, State) ->
+    case maps:get(debug_replay_enabled, State, false) of
+        true ->
+            {reply,
+             {ok, lists:reverse(maps:get(debug_received_payloads, State, []))},
+             State};
+        false ->
+            {reply, {error, debug_replay_disabled}, State}
+    end;
+handle_call(debug_clear_received_payloads, _From, State) ->
+    case maps:get(debug_replay_enabled, State, false) of
+        true -> {reply, ok, State#{debug_received_payloads := []}};
+        false -> {reply, {error, debug_replay_disabled}, State}
+    end;
 handle_call(_Request, _From, State) ->
     {reply, {error, not_implemented}, State}.
 
@@ -228,6 +256,7 @@ init_tun(UdpPid, TunName, TunIp, Mode, RemoteIp, RemoteUdpPort, PeerId, RemotePe
                                               HandshakeOptions,
                                               false),
                                  debug_frame_history => [],
+                                 debug_received_payloads => [],
                                  current_replay_window => vpn_replay_window:new(?REPLAY_WINDOW_SIZE),
                                  crypto_session_id => undefined,
                                  remote_restart_pending => false,
@@ -689,8 +718,10 @@ validate_and_write(KeyEpoch, PeerId, Seq, DecodedPacket, CryptoSlot, Mode, TunPi
                                  previous -> incr_counter(State3, previous_epoch_accepted);
                                  current -> State3
                              end,
+                    State5 = remember_debug_received_payload(
+                               DecodedPacket, KeyEpoch, Seq, PeerId, State4),
                     Kind = packet_kind(DecodedPacket, Mode),
-                    write_decoded(DecodedPacket, Kind, Size, TunPid, State4);
+                    write_decoded(DecodedPacket, Kind, Size, TunPid, State5);
                 {error, duplicate, State1} ->
                     logger:warning("vpn_link rejected duplicate frame epoch=~p seq=~p",
                                    [KeyEpoch, Seq]),
@@ -1060,6 +1091,50 @@ replay_debug_frame(KeyEpoch, Seq,
 replay_debug_frame(_KeyEpoch, _Seq, State) ->
     {reply, {error, invalid_frame_selector}, State}.
 
+
+send_debug_payload(_Payload, State = #{debug_replay_enabled := false}) ->
+    {reply, {error, debug_replay_disabled}, State};
+send_debug_payload(Payload,
+                   State = #{udp_pid := UdpPid,
+                             remote_ip := RemoteIp,
+                             remote_udp_port := RemoteUdpPort,
+                             tx_seq := TxSeq})
+  when is_binary(Payload), byte_size(Payload) > 0 ->
+    case handshake_established(State) of
+        true ->
+            Size = byte_size(Payload),
+            case encode_and_send(Payload, debug, Size, UdpPid, RemoteIp,
+                                 RemoteUdpPort, State) of
+                {noreply, State1 = #{tx_seq := NextSeq}} when NextSeq > TxSeq ->
+                    {reply,
+                     {ok, #{sent => true,
+                            bytes => Size,
+                            key_epoch => current_key_epoch(State1),
+                            seq => TxSeq,
+                            sha256 => crypto:hash(sha256, Payload)}},
+                     State1};
+                {noreply, State1} ->
+                    {reply, {error, send_failed}, State1}
+            end;
+        false ->
+            {reply, {error, handshake_not_established}, State}
+    end;
+send_debug_payload(_Payload, State) ->
+    {reply, {error, invalid_payload}, State}.
+
+remember_debug_received_payload(_Payload, _KeyEpoch, _Seq, _PeerId,
+                                State = #{debug_replay_enabled := false}) ->
+    State;
+remember_debug_received_payload(Payload, KeyEpoch, Seq, PeerId, State) ->
+    Entry = #{payload => Payload,
+              bytes => byte_size(Payload),
+              key_epoch => KeyEpoch,
+              seq => Seq,
+              peer_id => normalize_peer_id(PeerId),
+              sha256 => crypto:hash(sha256, Payload)},
+    History0 = [Entry | maps:get(debug_received_payloads, State, [])],
+    State#{debug_received_payloads :=
+               lists:sublist(History0, ?DEBUG_PAYLOAD_HISTORY_LIMIT)}.
 
 send_debug_frames(_Count, State = #{debug_replay_enabled := false}) ->
     {reply, {error, debug_replay_disabled}, State};
