@@ -3,7 +3,7 @@
 %%%-------------------------------------------------------------------
 -module(vpn_session_lifecycle).
 
--export([new/1, record_tx/2, record_rx/2, info/1, info/2]).
+-export([new/1, rekey/2, record_tx/2, record_rx/2, info/1, info/2]).
 
 new(KeyEpoch) when is_integer(KeyEpoch), KeyEpoch > 0 ->
     Now = erlang:system_time(second),
@@ -13,7 +13,19 @@ new(KeyEpoch) when is_integer(KeyEpoch), KeyEpoch > 0 ->
       tx_packets_since_rekey => 0,
       tx_bytes_since_rekey => 0,
       rx_packets_since_rekey => 0,
-      rx_bytes_since_rekey => 0}.
+      rx_bytes_since_rekey => 0,
+      rekey_count => 0}.
+
+rekey(State = #{key_epoch := CurrentKeyEpoch}, NewKeyEpoch)
+  when is_integer(NewKeyEpoch), NewKeyEpoch > CurrentKeyEpoch ->
+    Now = erlang:system_time(second),
+    State#{last_rekey_at := Now,
+           key_epoch := NewKeyEpoch,
+           tx_packets_since_rekey := 0,
+           tx_bytes_since_rekey := 0,
+           rx_packets_since_rekey := 0,
+           rx_bytes_since_rekey := 0,
+           rekey_count := maps:get(rekey_count, State, 0) + 1}.
 
 record_tx(Size, State) when is_integer(Size), Size >= 0 ->
     State#{tx_packets_since_rekey := maps:get(tx_packets_since_rekey, State) + 1,

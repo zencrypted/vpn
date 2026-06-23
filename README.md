@@ -1241,3 +1241,13 @@ The session map contains `established_at`, `session_age_seconds`, `key_epoch`,
 `last_rekey_at`, directional packet/byte counters, and aggregate
 `packets_since_rekey` / `bytes_since_rekey`. This stage records lifecycle data
 only; automatic or manual rekey exchange is implemented separately.
+
+### Manual authenticated rekey
+
+Certificate-control peers can rotate their traffic keys without restarting the TUN or UDP workers:
+
+```erlang
+vpn_manager:rekey(client_a).
+```
+
+The rekey performs a fresh certificate-authenticated ephemeral P-384 ECDH exchange, advances the key epoch, resets per-epoch counters, and temporarily retains the previous receive key for delayed UDP packets.

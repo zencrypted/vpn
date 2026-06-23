@@ -12,6 +12,7 @@
          certificate_status/1,
          peer_info/1,
          peer_stats/1,
+         rekey/1,
          start_peer/1,
          stop_peer/1,
          reload_config/0,
@@ -74,6 +75,12 @@ peer_stats(PeerId) ->
             vpn_peer:stats(Pid);
         {error, not_found} ->
             {error, not_found}
+    end.
+
+rekey(PeerId) ->
+    case find_peer(PeerId) of
+        {ok, Pid} -> vpn_peer:rekey(Pid);
+        {error, not_found} -> {error, not_found}
     end.
 
 running_peer_status(PeerId) ->

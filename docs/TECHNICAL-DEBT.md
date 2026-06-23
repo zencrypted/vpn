@@ -110,3 +110,5 @@ time plus per-epoch traffic counters. The initial certificate session uses
 epoch 1. Authenticated epoch rollover, previous-epoch grace handling, replay
 windows, automatic rekey triggers, and session-expiration enforcement remain
 future work.
+
+- Manual authenticated rekey is implemented. Automatic time/packet triggers and bounded previous-epoch retirement remain to be added.

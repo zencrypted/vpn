@@ -43,6 +43,36 @@ mutual_certificate_proof_establishes_both_sides_test() ->
     ?assertEqual(maps:get(tx_key, KeysA), maps:get(rx_key, KeysB)),
     ?assertEqual(maps:get(rx_key, KeysA), maps:get(tx_key, KeysB)).
 
+
+manual_authenticated_rekey_derives_fresh_mirrored_keys_test() ->
+    {A4, B4} = established_certificate_pair(),
+    {ok, OldA} = vpn_handshake:session_keys(A4),
+    {send, RekeyHelloA, A5} = vpn_handshake:begin_rekey(A4),
+    {send, ProofB, B5} = vpn_handshake:handle_frame(RekeyHelloA, B4),
+    {send, ProofA, A6} = vpn_handshake:handle_frame(ProofB, A5),
+    {send_established, AckToA, B6} = vpn_handshake:handle_frame(ProofA, B5),
+    {established, A7} = vpn_handshake:handle_frame(AckToA, A6),
+    {ok, NewA} = vpn_handshake:session_keys(A7),
+    {ok, NewB} = vpn_handshake:session_keys(B6),
+    ?assert(vpn_handshake:established(A7)),
+    ?assert(vpn_handshake:established(B6)),
+    ?assertNotEqual(maps:get(tx_key, OldA), maps:get(tx_key, NewA)),
+    ?assertEqual(maps:get(tx_key, NewA), maps:get(rx_key, NewB)),
+    ?assertEqual(maps:get(rx_key, NewA), maps:get(tx_key, NewB)).
+
+established_certificate_pair() ->
+    A0 = vpn_handshake:new(peer_a, peer_b, certificate_options("peer_a")),
+    B0 = vpn_handshake:new(peer_b, peer_a, certificate_options("peer_b")),
+    {send, HelloA, A1} = vpn_handshake:begin_handshake(A0),
+    {send, HelloB, B1} = vpn_handshake:begin_handshake(B0),
+    {send, ProofB, B2} = vpn_handshake:handle_frame(HelloA, B1),
+    {send, ProofA, A2} = vpn_handshake:handle_frame(HelloB, A1),
+    {send, AckToB, A3} = vpn_handshake:handle_frame(ProofB, A2),
+    {send, AckToA, B3} = vpn_handshake:handle_frame(ProofA, B2),
+    {established, A4} = vpn_handshake:handle_frame(AckToA, A3),
+    {established, B4} = vpn_handshake:handle_frame(AckToB, B3),
+    {A4, B4}.
+
 certificate_ack_before_proof_is_deferred_test() ->
     A0 = vpn_handshake:new(peer_a, peer_b, certificate_options("peer_a")),
     B0 = vpn_handshake:new(peer_b, peer_a, certificate_options("peer_b")),

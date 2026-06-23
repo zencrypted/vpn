@@ -8,7 +8,7 @@
 %%%-------------------------------------------------------------------
 -module(vpn_handshake).
 
--export([new/3, begin_handshake/1, handle_frame/2, retry/1,
+-export([new/3, begin_handshake/1, begin_rekey/1, handle_frame/2, retry/1,
          established/1, status/1, info/1, session_keys/1]).
 
 -define(ID_SIZE, 16).
@@ -27,6 +27,8 @@ new(LocalPeerId, RemotePeerId, Options) when is_map(Options) ->
              remote_certificate_fingerprint => undefined,
              session_keys => undefined,
              pending_ack => undefined,
+             local_proof_sent => false,
+             exchange_role => initial,
              retries => 0,
              max_retries => maps:get(max_retries, Options, 5),
              retry_interval => maps:get(retry_interval, Options, 1000)},
@@ -37,9 +39,18 @@ begin_handshake(State = #{mode := disabled}) ->
 begin_handshake(State) ->
     {send, hello(State), State#{status := waiting_peer, retries := 1}}.
 
+begin_rekey(State = #{mode := certificate_control, status := established}) ->
+    Fresh = fresh_exchange(State, initiator),
+    {send, hello(Fresh), Fresh#{status := rekey_waiting_peer, retries := 1}};
+begin_rekey(#{mode := certificate_control}) ->
+    {error, handshake_not_established};
+begin_rekey(_State) ->
+    {error, rekey_not_supported}.
+
 handle_frame(Packet, State) ->
     case vpn_handshake_frame:decode(Packet) of
-        {ok, #{type := hello} = Frame} -> handle_hello(Frame, State);
+        {ok, #{type := hello} = Frame} ->
+            handle_hello(Frame, prepare_incoming_exchange(Frame, State));
         {ok, #{type := proof} = Frame} -> handle_proof(Frame, State);
         {ok, #{type := ack} = Frame} -> handle_ack(Frame, State);
         {error, _} = Error -> {reject, Error, State}
@@ -61,7 +72,7 @@ status(State) -> maps:get(status, State).
 info(State) ->
     Info0 = maps:with([mode, status, retries, max_retries, retry_interval,
                        session_id, remote_session_id, remote_authenticated,
-                       remote_certificate_fingerprint], State),
+                       remote_certificate_fingerprint, exchange_role], State),
     Info0#{session_keys_ready => is_map(maps:get(session_keys, State, undefined)),
            key_source => key_source(State)}.
 
@@ -81,7 +92,8 @@ handle_hello(#{peer_id := PeerId, session_id := RemoteSession, nonce := RemoteNo
                             case proof(State2) of
                                 {ok, Proof} ->
                                     {send, Proof, State2#{status := preserve_established(State2,
-                                                                                       waiting_proof_ack)}};
+                                                                                       waiting_proof_ack),
+                                                          local_proof_sent := true}};
                                 {error, Reason} -> {reject, {error, Reason}, State2#{status := failed}}
                             end;
                         _ ->
@@ -144,6 +156,17 @@ complete_proof(State = #{pending_ack := Pending}) when is_map(Pending) ->
     Established = State#{status := established,
                          remote_session_id := RemoteSession,
                          pending_ack := undefined},
+    {send_established, ack(Established), Established};
+complete_proof(State = #{local_proof_sent := false}) ->
+    case proof(State) of
+        {ok, Proof} ->
+            {send, Proof, State#{status := waiting_ack,
+                                local_proof_sent := true}};
+        {error, Reason} ->
+            {reject, {error, Reason}, State#{status := failed}}
+    end;
+complete_proof(State = #{exchange_role := responder}) ->
+    Established = State#{status := established},
     {send_established, ack(Established), Established};
 complete_proof(State) ->
     {send, ack(State),
@@ -220,6 +243,38 @@ retry_frame(State) -> hello(State).
 
 preserve_established(#{status := established}, _Next) -> established;
 preserve_established(_State, Next) -> Next.
+
+
+prepare_incoming_exchange(#{peer_id := PeerId, session_id := RemoteSession},
+                          State = #{mode := certificate_control,
+                                    status := established,
+                                    remote_peer_id := ExpectedPeerId,
+                                    remote_session_id := CurrentRemote})
+  when RemoteSession =/= CurrentRemote ->
+    case normalize_peer_id(PeerId) =:= ExpectedPeerId of
+        true -> fresh_exchange(State, responder);
+        false -> State
+    end;
+prepare_incoming_exchange(_Frame, State) ->
+    State.
+
+fresh_exchange(State, Role) ->
+    {EphemeralPublicKey, EphemeralPrivateKey} = vpn_session_kdf:generate_key_pair(),
+    State#{status := idle,
+           session_id := crypto:strong_rand_bytes(?ID_SIZE),
+           nonce := crypto:strong_rand_bytes(?ID_SIZE),
+           remote_session_id := undefined,
+           remote_nonce := undefined,
+           remote_authenticated := false,
+           remote_certificate_fingerprint := undefined,
+           session_keys := undefined,
+           pending_ack := undefined,
+           local_proof_sent := false,
+           exchange_role := Role,
+           retries := 0,
+           local_ephemeral_public_key := EphemeralPublicKey,
+           local_ephemeral_private_key := EphemeralPrivateKey,
+           remote_ephemeral_public_key := undefined}.
 
 authentication_complete(#{mode := certificate_control,
                           remote_authenticated := true}) -> true;

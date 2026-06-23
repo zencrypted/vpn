@@ -5,7 +5,8 @@
 
 -behaviour(gen_server).
 
--export([start_link/1, stop/1, stats/1, reset_stats/1, identity/1, identity_info/1, config/1]).
+-export([start_link/1, stop/1, stats/1, reset_stats/1, rekey/1,
+         identity/1, identity_info/1, config/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 start_link(Config) ->
@@ -19,6 +20,9 @@ stats(Pid) ->
 
 reset_stats(Pid) ->
     gen_server:call(Pid, reset_stats).
+
+rekey(Pid) ->
+    gen_server:call(Pid, rekey).
 
 identity(Pid) ->
     gen_server:call(Pid, identity).
@@ -43,6 +47,8 @@ handle_call(stats, _From, State = #{id := Id, link_pid := LinkPid}) ->
     {reply, #{id => Id, link => LinkStats}, State};
 handle_call(reset_stats, _From, State = #{link_pid := LinkPid}) ->
     {reply, vpn_link:reset_stats(LinkPid), State};
+handle_call(rekey, _From, State = #{link_pid := LinkPid}) ->
+    {reply, vpn_link:rekey(LinkPid), State};
 handle_call(identity, _From, State = #{identity := Identity}) ->
     {reply, Identity, State};
 handle_call(identity_info, _From, State = #{identity_info := IdentityInfo}) ->

@@ -5,7 +5,8 @@
 
 -behaviour(gen_server).
 
--export([start_link/5, start_link/6, start_link/8, start_link/9, start_link/10, stop/1, stats/1, reset_stats/1]).
+-export([start_link/5, start_link/6, start_link/8, start_link/9, start_link/10,
+         stop/1, stats/1, reset_stats/1, rekey/1]).
 -export([validate_frame_peer_id/2]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
@@ -70,6 +71,9 @@ stats(Pid) ->
 reset_stats(Pid) ->
     gen_server:call(Pid, reset_stats).
 
+rekey(Pid) ->
+    gen_server:call(Pid, rekey).
+
 init({psk_required, _TunName, _TunIp, _Mode, _LocalUdpPort, _RemoteIp, _RemoteUdpPort}) ->
     {stop, psk_required};
 init({psk_required, _TunName, _TunIp, _Mode, _LocalUdpPort, _RemoteIp, _RemoteUdpPort, _PeerId, _RemotePeerId}) ->
@@ -87,6 +91,8 @@ handle_call(stats, _From, State) ->
     {reply, stats_map(State), State};
 handle_call(reset_stats, _From, State) ->
     {reply, ok, reset_counter_values(State)};
+handle_call(rekey, _From, State) ->
+    initiate_rekey(State);
 handle_call(_Request, _From, State) ->
     {reply, {error, not_implemented}, State}.
 
@@ -155,6 +161,8 @@ init_tun(UdpPid, TunName, TunIp, Mode, RemoteIp, RemoteUdpPort, PeerId, RemotePe
                                  peer_id => normalize_peer_id(PeerId),
                                  remote_peer_id => normalize_peer_id(RemotePeerId),
                                  crypto => initial_crypto(Psk, normalize_peer_id(PeerId), HandshakeOptions),
+                                 previous_crypto => undefined,
+                                 crypto_session_id => undefined,
                                  handshake => Handshake,
                                  handshake_timer => undefined,
                                  session_lifecycle => undefined,
@@ -170,6 +178,24 @@ init_tun(UdpPid, TunName, TunIp, Mode, RemoteIp, RemoteUdpPort, PeerId, RemotePe
             {stop, Reason}
     end.
 
+
+initiate_rekey(State = #{handshake := Handshake,
+                               udp_pid := UdpPid,
+                               remote_ip := RemoteIp,
+                               remote_udp_port := RemoteUdpPort}) ->
+    case vpn_handshake:begin_rekey(Handshake) of
+        {send, Packet, Handshake1} ->
+            case vpn_udp:send(UdpPid, RemoteIp, RemoteUdpPort, Packet) of
+                ok ->
+                    State1 = incr_counter(State#{handshake := Handshake1}, handshake_control_tx),
+                    NextEpoch = current_key_epoch(State) + 1,
+                    {reply, {ok, NextEpoch}, schedule_handshake_retry(State1, Handshake1)};
+                {error, Reason} ->
+                    {reply, {error, Reason}, incr_counter(State, handshake_failures)}
+            end;
+        {error, Reason} ->
+            {reply, {error, Reason}, State}
+    end.
 
 start_handshake(State = #{handshake := Handshake}) ->
     case vpn_handshake:begin_handshake(Handshake) of
@@ -262,6 +288,7 @@ cancel_handshake_timer(State) ->
         Ref -> _ = erlang:cancel_timer(Ref), ok
     end.
 
+handshake_established(#{crypto := Crypto}) when is_map(Crypto) -> true;
 handshake_established(#{handshake := Handshake}) ->
     vpn_handshake:established(Handshake).
 
@@ -270,16 +297,30 @@ initial_crypto(_Psk, _PeerId, #{mode := certificate_control}) ->
 initial_crypto(Psk, PeerId, _HandshakeOptions) ->
     vpn_crypto:new(Psk, PeerId).
 
-activate_session_crypto(State = #{crypto := Crypto}) when is_map(Crypto) ->
-    State;
 activate_session_crypto(State = #{handshake := Handshake, peer_id := PeerId}) ->
     case vpn_handshake:session_keys(Handshake) of
         {ok, #{tx_key := TxKey, rx_key := RxKey}} ->
-            KeyEpoch = 1,
-            State#{crypto := vpn_crypto:new_session(TxKey, RxKey, PeerId, KeyEpoch),
-                   session_lifecycle := vpn_session_lifecycle:new(KeyEpoch),
-                   tx_seq := 0,
-                   rx_seq := 0};
+            SessionId = maps:get(session_id, Handshake),
+            case SessionId =:= maps:get(crypto_session_id, State, undefined) of
+                true -> State;
+                false ->
+                    CurrentEpoch = current_key_epoch(State),
+                    KeyEpoch = CurrentEpoch + 1,
+                    Lifecycle = case maps:get(session_lifecycle, State, undefined) of
+                                    undefined -> vpn_session_lifecycle:new(KeyEpoch);
+                                    Existing -> vpn_session_lifecycle:rekey(Existing, KeyEpoch)
+                                end,
+                    RekeyedState = case CurrentEpoch > 0 of
+                                         true -> incr_counter(State, rekeys_completed);
+                                         false -> State
+                                     end,
+                    RekeyedState#{previous_crypto := maps:get(crypto, State, undefined),
+                           crypto := vpn_crypto:new_session(TxKey, RxKey, PeerId, KeyEpoch),
+                           crypto_session_id := SessionId,
+                           session_lifecycle := Lifecycle,
+                           tx_seq := 0,
+                           rx_seq := 0}
+            end;
         {error, session_keys_not_ready} ->
             State
     end.
@@ -340,13 +381,28 @@ decode_and_write(Packet, Mode, TunPid, State = #{crypto := Crypto0}) ->
             State1 = State#{crypto := Crypto1},
             State2 = incr_counter(State1, crypto_decryptions),
             decode_frame_and_write(DecodedFrame, Mode, TunPid, State2);
-        {error, Reason, Crypto1} ->
+        {error, _Reason, Crypto1} ->
+            decode_with_previous_crypto(Packet, Mode, TunPid, State#{crypto := Crypto1});
+        {error, _Reason} ->
+            decode_with_previous_crypto(Packet, Mode, TunPid, State)
+    end.
+
+decode_with_previous_crypto(Packet, Mode, TunPid,
+                            State = #{previous_crypto := Previous}) when is_map(Previous) ->
+    case vpn_crypto:decode(Packet, Previous) of
+        {ok, DecodedFrame, Previous1} ->
+            State1 = incr_counter(State#{previous_crypto := Previous1}, crypto_decryptions),
+            decode_frame_and_write(DecodedFrame, Mode, TunPid, State1);
+        {error, Reason, Previous1} ->
             logger:error("vpn_link failed to decode packet: ~p", [Reason]),
-            {noreply, incr_counter(State#{crypto := Crypto1}, crypto_failures)};
+            {noreply, incr_counter(State#{previous_crypto := Previous1}, crypto_failures)};
         {error, Reason} ->
             logger:error("vpn_link failed to decode packet: ~p", [Reason]),
             {noreply, incr_counter(State, crypto_failures)}
-    end.
+    end;
+decode_with_previous_crypto(_Packet, _Mode, _TunPid, State) ->
+    logger:error("vpn_link failed to decode packet: authentication_failed", []),
+    {noreply, incr_counter(State, crypto_failures)}.
 
 decode_frame_and_write(DecodedFrame, Mode, TunPid, State) ->
     case vpn_frame:decode(DecodedFrame) of
@@ -413,7 +469,11 @@ current_key_epoch(_State) ->
 
 validate_frame_epoch(KeyEpoch, State) ->
     Expected = current_key_epoch(State),
-    case KeyEpoch =:= Expected of
+    PreviousEpoch = case maps:get(previous_crypto, State, undefined) of
+                        #{key_epoch := Epoch} -> Epoch;
+                        _ -> undefined
+                    end,
+    case KeyEpoch =:= Expected orelse KeyEpoch =:= PreviousEpoch of
         true -> ok;
         false -> {error, {key_epoch_mismatch, Expected, KeyEpoch}}
     end.
@@ -453,7 +513,8 @@ counter_keys() ->
      handshake_control_tx,
      handshake_control_rx,
      handshake_failures,
-     handshake_blocked_packets].
+     handshake_blocked_packets,
+     rekeys_completed].
 
 reset_counter_values(State) ->
     maps:merge(State, zero_counters()).
