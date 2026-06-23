@@ -1221,3 +1221,23 @@ maps:get(handshake, Link).
 ```
 
 Expected fields include `#{key_source => ephemeral_ecdh_hkdf_sha256}` and `session_keys_ready => true`. Legacy disabled/development-control peers retain the PSK path for compatibility. Rekeying and replay windows remain separate follow-up work.
+
+### Session lifecycle and key epochs
+
+Certificate-authenticated sessions now expose lifecycle metadata for the active
+ephemeral traffic-key generation. Data frames carry an explicit `key_epoch`,
+and the AEAD nonce derivation binds both the epoch and sequence number. The
+initial certificate handshake installs epoch `1`; later authenticated rekeying
+will advance it without reusing nonce space.
+
+Inspect the current lifecycle with:
+
+```erlang
+#{link := Link} = vpn_manager:peer_stats(client_a),
+maps:get(session, Link).
+```
+
+The session map contains `established_at`, `session_age_seconds`, `key_epoch`,
+`last_rekey_at`, directional packet/byte counters, and aggregate
+`packets_since_rekey` / `bytes_since_rekey`. This stage records lifecycle data
+only; automatic or manual rekey exchange is implemented separately.

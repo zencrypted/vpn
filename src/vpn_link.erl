@@ -157,6 +157,7 @@ init_tun(UdpPid, TunName, TunIp, Mode, RemoteIp, RemoteUdpPort, PeerId, RemotePe
                                  crypto => initial_crypto(Psk, normalize_peer_id(PeerId), HandshakeOptions),
                                  handshake => Handshake,
                                  handshake_timer => undefined,
+                                 session_lifecycle => undefined,
                                  tx_seq => 0,
                                  rx_seq => 0,
                                  remote_ip => RemoteIp,
@@ -269,10 +270,16 @@ initial_crypto(_Psk, _PeerId, #{mode := certificate_control}) ->
 initial_crypto(Psk, PeerId, _HandshakeOptions) ->
     vpn_crypto:new(Psk, PeerId).
 
+activate_session_crypto(State = #{crypto := Crypto}) when is_map(Crypto) ->
+    State;
 activate_session_crypto(State = #{handshake := Handshake, peer_id := PeerId}) ->
     case vpn_handshake:session_keys(Handshake) of
         {ok, #{tx_key := TxKey, rx_key := RxKey}} ->
-            State#{crypto := vpn_crypto:new_session(TxKey, RxKey, PeerId)};
+            KeyEpoch = 1,
+            State#{crypto := vpn_crypto:new_session(TxKey, RxKey, PeerId, KeyEpoch),
+                   session_lifecycle := vpn_session_lifecycle:new(KeyEpoch),
+                   tx_seq := 0,
+                   rx_seq := 0};
         {error, session_keys_not_ready} ->
             State
     end.
@@ -298,7 +305,8 @@ encode_and_send(Packet,
                 RemoteIp,
                 RemoteUdpPort,
                 State = #{crypto := Crypto0, tx_seq := Seq, peer_id := PeerId}) ->
-    Frame = vpn_frame:encode(PeerId, Seq, Packet),
+    KeyEpoch = current_key_epoch(State),
+    Frame = vpn_frame:encode(PeerId, KeyEpoch, Seq, Packet),
     logger:debug("vpn_frame tx seq=~p", [Seq]),
     case vpn_crypto:encode(Frame, Crypto0) of
         {ok, EncodedPacket, Crypto1} ->
@@ -319,7 +327,8 @@ send_encoded(EncodedPacket, Kind, Size, Seq, UdpPid, RemoteIp, RemoteUdpPort, St
             logger:info("vpn_link udp_tx kind=~p to ~s:~p size=~p",
                         [Kind, format_ip(RemoteIp), RemoteUdpPort, Size]),
             State1 = incr_counters(State, udp_tx_packets, udp_tx_bytes, Size),
-            {noreply, State1#{tx_seq := Seq + 1}};
+            State2 = record_session_tx(Size, State1),
+            {noreply, State2#{tx_seq := Seq + 1}};
         {error, Reason} ->
             logger:error("vpn_link failed to forward packet: ~p", [Reason]),
             {noreply, State}
@@ -341,22 +350,31 @@ decode_and_write(Packet, Mode, TunPid, State = #{crypto := Crypto0}) ->
 
 decode_frame_and_write(DecodedFrame, Mode, TunPid, State) ->
     case vpn_frame:decode(DecodedFrame) of
-        {ok, #{seq := Seq, peer_id := PeerId, payload := DecodedPacket}} ->
-            logger:debug("vpn_frame rx seq=~p peer_id=~p", [Seq, PeerId]),
-            validate_and_write(PeerId, Seq, DecodedPacket, Mode, TunPid, State);
+        {ok, #{key_epoch := KeyEpoch, seq := Seq,
+               peer_id := PeerId, payload := DecodedPacket}} ->
+            logger:debug("vpn_frame rx epoch=~p seq=~p peer_id=~p",
+                         [KeyEpoch, Seq, PeerId]),
+            validate_and_write(KeyEpoch, PeerId, Seq, DecodedPacket,
+                               Mode, TunPid, State);
         {error, Reason} ->
             logger:error("vpn_link failed to decode frame: ~p", [Reason]),
             {noreply, State}
     end.
 
-validate_and_write(PeerId, Seq, DecodedPacket, Mode, TunPid, State) ->
-    case validate_frame_peer_id(PeerId, maps:get(remote_peer_id, State)) of
-        ok ->
-            State1 = incr_counter(State#{rx_seq := Seq}, frames_accepted),
-            Kind = packet_kind(DecodedPacket, Mode),
+validate_and_write(KeyEpoch, PeerId, Seq, DecodedPacket, Mode, TunPid, State) ->
+    case {validate_frame_epoch(KeyEpoch, State),
+          validate_frame_peer_id(PeerId, maps:get(remote_peer_id, State))} of
+        {ok, ok} ->
             Size = byte_size(DecodedPacket),
-            write_decoded(DecodedPacket, Kind, Size, TunPid, State1);
-        {error, {peer_id_mismatch, Expected, Received}} ->
+            State1 = incr_counter(State#{rx_seq := Seq}, frames_accepted),
+            State2 = record_session_rx(Size, State1),
+            Kind = packet_kind(DecodedPacket, Mode),
+            write_decoded(DecodedPacket, Kind, Size, TunPid, State2);
+        {{error, {key_epoch_mismatch, ExpectedEpoch, ReceivedEpoch}}, _} ->
+            logger:warning("vpn_link rejected frame: expected key epoch ~p received ~p",
+                           [ExpectedEpoch, ReceivedEpoch]),
+            {noreply, incr_counter(State, frames_rejected)};
+        {ok, {error, {peer_id_mismatch, Expected, Received}}} ->
             logger:warning("vpn_link rejected frame: expected ~s received ~s",
                            [Expected, Received]),
             {noreply, incr_counter(State, frames_rejected)}
@@ -384,8 +402,36 @@ stats_map(State = #{tun_pid := TunPid,
                  remote_ip => RemoteIp,
                  remote_port => RemoteUdpPort,
                  handshake => vpn_handshake:info(Handshake),
-                 crypto => crypto_info(State)},
+                 crypto => crypto_info(State),
+                 session => session_info(State)},
                maps:with(counter_keys(), State)).
+
+current_key_epoch(#{session_lifecycle := Lifecycle}) when is_map(Lifecycle) ->
+    maps:get(key_epoch, Lifecycle);
+current_key_epoch(_State) ->
+    0.
+
+validate_frame_epoch(KeyEpoch, State) ->
+    Expected = current_key_epoch(State),
+    case KeyEpoch =:= Expected of
+        true -> ok;
+        false -> {error, {key_epoch_mismatch, Expected, KeyEpoch}}
+    end.
+
+record_session_tx(_Size, State = #{session_lifecycle := undefined}) ->
+    State;
+record_session_tx(Size, State = #{session_lifecycle := Lifecycle}) ->
+    State#{session_lifecycle := vpn_session_lifecycle:record_tx(Size, Lifecycle)}.
+
+record_session_rx(_Size, State = #{session_lifecycle := undefined}) ->
+    State;
+record_session_rx(Size, State = #{session_lifecycle := Lifecycle}) ->
+    State#{session_lifecycle := vpn_session_lifecycle:record_rx(Size, Lifecycle)}.
+
+session_info(#{session_lifecycle := undefined}) ->
+    undefined;
+session_info(#{session_lifecycle := Lifecycle}) ->
+    vpn_session_lifecycle:info(Lifecycle).
 
 zero_counters() ->
     maps:from_list([{Key, 0} || Key <- counter_keys()]).

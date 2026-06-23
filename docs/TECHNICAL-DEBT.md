@@ -101,3 +101,12 @@ replay-safe session identifiers, rekeying and production authorization binding.
 ## Certificate handshake follow-up
 
 The control plane now proves mutual possession of configured certificate private keys, validates each remote certificate against an explicit trust anchor, and derives directional traffic keys with ephemeral P-384 ECDH plus HKDF-SHA256. Remaining work includes replay windows, periodic rekeying, key erasure hardening, certificate revocation, production authorization binding, and removal of the legacy PSK compatibility path.
+
+## Authenticated session lifecycle
+
+Authenticated dataplane frames now carry an explicit key epoch, nonce
+derivation includes that epoch, and runtime statistics expose establishment
+time plus per-epoch traffic counters. The initial certificate session uses
+epoch 1. Authenticated epoch rollover, previous-epoch grace handling, replay
+windows, automatic rekey triggers, and session-expiration enforcement remain
+future work.

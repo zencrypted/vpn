@@ -71,6 +71,7 @@ summary_peer(PeerId, PeerStatus, Certificates) ->
       authorization_reason => maps:get(authorization_reason, Config, undefined),
       crypto_failures => maps:get(crypto_failures, LinkStats, 0),
       frames_rejected => maps:get(frames_rejected, LinkStats, 0),
+      session => maps:get(session, LinkStats, undefined),
       certificate => compact_certificate(Certificate)}.
 
 certificate_for_peer(PeerId, Certificates) ->
@@ -103,6 +104,7 @@ peer_view(Peer) ->
       authorization_reason => json_value(maps:get(authorization_reason, Peer, undefined)),
       crypto_failures => maps:get(crypto_failures, Peer, 0),
       frames_rejected => maps:get(frames_rejected, Peer, 0),
+      session => session_view(maps:get(session, Peer, undefined)),
       certificate => certificate_view(maps:get(certificate, Peer, #{}))}.
 
 certificate_view(Certificate) ->
@@ -148,6 +150,21 @@ time_value({generalTime, Value}) ->
     json_value(Value);
 time_value(Value) ->
     json_value(Value).
+
+session_view(undefined) ->
+    null;
+session_view(Session) when is_map(Session) ->
+    maps:with([established_at,
+               session_age_seconds,
+               key_epoch,
+               last_rekey_at,
+               tx_packets_since_rekey,
+               tx_bytes_since_rekey,
+               rx_packets_since_rekey,
+               rx_bytes_since_rekey,
+               packets_since_rekey,
+               bytes_since_rekey],
+              Session).
 
 json_value(undefined) ->
     null;

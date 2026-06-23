@@ -64,5 +64,14 @@ session_directional_keys_roundtrip_test() ->
     Receiver = vpn_crypto:new_session(RxKey, TxKey, peer_b),
     {ok, Encrypted, Sender1} = vpn_crypto:encode(Frame, Sender),
     ?assertEqual({ok, Frame, Receiver}, vpn_crypto:decode(Encrypted, Receiver)),
-    ?assertEqual(#{key_source => ephemeral_ecdh_hkdf_sha256},
+    ?assertEqual(#{key_source => ephemeral_ecdh_hkdf_sha256, key_epoch => 1},
                  vpn_crypto:info(Sender1)).
+
+
+different_key_epochs_produce_different_nonces_test() ->
+    Frame1 = vpn_frame:encode(peer_a, 1, 7, <<"payload">>),
+    Frame2 = vpn_frame:encode(peer_a, 2, 7, <<"payload">>),
+    State = vpn_crypto:new_session(?KEY_A, ?KEY_A, peer_a, 1),
+    {ok, <<Nonce1:12/binary, _/binary>>, _} = vpn_crypto:encode(Frame1, State),
+    {ok, <<Nonce2:12/binary, _/binary>>, _} = vpn_crypto:encode(Frame2, State),
+    ?assertNotEqual(Nonce1, Nonce2).
