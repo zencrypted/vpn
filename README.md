@@ -1451,3 +1451,19 @@ Payload = <<"ias-vpn-dataplane-probe">>,
 Each received entry contains the original payload, byte count, key epoch,
 sequence number, peer id, and SHA-256 digest. The history is bounded and is
 available only when debug replay controls are enabled.
+
+### Debug rekey probes
+
+Debug runtimes with `debug_replay_controls` enabled expose a concise, secret-free
+session snapshot and an epoch wait helper for cross-repository integration tests:
+
+```erlang
+{ok, Before} = vpn_manager:debug_session_state(client_a),
+CurrentEpoch = maps:get(current_epoch, Before),
+{ok, NextEpoch} = vpn_manager:rekey(client_a),
+{ok, After} = vpn_manager:debug_wait_for_epoch(client_a, NextEpoch, 5000).
+```
+
+The snapshot reports handshake status, current and previous key epochs, previous
+epoch grace time, rekey counters, and packet counters since the latest rekey. It
+never exposes session keys or private key material.

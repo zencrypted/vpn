@@ -17,7 +17,7 @@
          stop/1, stats/1, reset_stats/1, rekey/1,
          debug_frame_history/1, debug_replay_frame/3, debug_send_frames/2,
          debug_send_payload/2, debug_received_payloads/1,
-         debug_clear_received_payloads/1]).
+         debug_clear_received_payloads/1, debug_session_state/1]).
 -export([validate_frame_peer_id/2]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
@@ -103,6 +103,9 @@ debug_received_payloads(Pid) ->
 debug_clear_received_payloads(Pid) ->
     gen_server:call(Pid, debug_clear_received_payloads).
 
+debug_session_state(Pid) ->
+    gen_server:call(Pid, debug_session_state).
+
 init({psk_required, _TunName, _TunIp, _Mode, _LocalUdpPort, _RemoteIp, _RemoteUdpPort}) ->
     {stop, psk_required};
 init({psk_required, _TunName, _TunIp, _Mode, _LocalUdpPort, _RemoteIp, _RemoteUdpPort, _PeerId, _RemotePeerId}) ->
@@ -150,6 +153,11 @@ handle_call(debug_received_payloads, _From, State) ->
 handle_call(debug_clear_received_payloads, _From, State) ->
     case maps:get(debug_replay_enabled, State, false) of
         true -> {reply, ok, State#{debug_received_payloads := []}};
+        false -> {reply, {error, debug_replay_disabled}, State}
+    end;
+handle_call(debug_session_state, _From, State) ->
+    case maps:get(debug_replay_enabled, State, false) of
+        true -> {reply, {ok, debug_session_state_info(State)}, State};
         false -> {reply, {error, debug_replay_disabled}, State}
     end;
 handle_call(_Request, _From, State) ->
@@ -780,6 +788,29 @@ stats_map(State = #{tun_pid := TunPid,
                  auto_rekey => auto_rekey_info(State),
                  session_reset => session_reset_info(State)},
                maps:with(counter_keys(), State)).
+
+debug_session_state_info(State) ->
+    Session = session_info(State),
+    Replay = replay_info(State),
+    Handshake = vpn_handshake:info(maps:get(handshake, State)),
+    #{handshake_status => maps:get(status, Handshake, undefined),
+      current_epoch => maps:get(current_epoch, Replay, 0),
+      previous_epoch => maps:get(previous_epoch, Replay, undefined),
+      previous_epoch_expires_in_ms =>
+          maps:get(previous_epoch_expires_in_ms, Replay, undefined),
+      rekey_count => case Session of
+                         #{rekey_count := Count} -> Count;
+                         _ -> 0
+                     end,
+      rekeys_completed => maps:get(rekeys_completed, State, 0),
+      tx_packets_since_rekey => case Session of
+                                    #{tx_packets_since_rekey := Count1} -> Count1;
+                                    _ -> 0
+                                end,
+      rx_packets_since_rekey => case Session of
+                                    #{rx_packets_since_rekey := Count2} -> Count2;
+                                    _ -> 0
+                                end}.
 
 session_reset_info(State) ->
     #{pending => maps:get(remote_restart_pending, State, false),

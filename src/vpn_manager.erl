@@ -14,6 +14,7 @@
          peer_stats/1,
          rekey/1, debug_frame_history/1, debug_replay_frame/3, debug_send_frames/2,
          debug_send_payload/2, debug_received_payloads/1, debug_clear_received_payloads/1,
+         debug_session_state/1, debug_wait_for_epoch/3,
          start_peer/1,
          stop_peer/1,
          reload_config/0,
@@ -118,6 +119,31 @@ debug_clear_received_payloads(PeerId) ->
     case find_peer(PeerId) of
         {ok, Pid} -> vpn_peer:debug_clear_received_payloads(Pid);
         {error, not_found} -> {error, not_found}
+    end.
+
+debug_session_state(PeerId) ->
+    case find_peer(PeerId) of
+        {ok, Pid} -> vpn_peer:debug_session_state(Pid);
+        {error, not_found} -> {error, not_found}
+    end.
+
+debug_wait_for_epoch(PeerId, ExpectedEpoch, TimeoutMs)
+  when is_integer(ExpectedEpoch), ExpectedEpoch >= 0,
+       is_integer(TimeoutMs), TimeoutMs >= 0 ->
+    Deadline = erlang:monotonic_time(millisecond) + TimeoutMs,
+    wait_for_epoch(PeerId, ExpectedEpoch, Deadline).
+
+wait_for_epoch(PeerId, ExpectedEpoch, Deadline) ->
+    case debug_session_state(PeerId) of
+        {ok, #{current_epoch := ExpectedEpoch} = SessionState} ->
+            {ok, SessionState};
+        {ok, SessionState} ->
+            case erlang:monotonic_time(millisecond) >= Deadline of
+                true -> {error, {epoch_wait_timeout, ExpectedEpoch, SessionState}};
+                false -> timer:sleep(25), wait_for_epoch(PeerId, ExpectedEpoch, Deadline)
+            end;
+        {error, _} = Error ->
+            Error
     end.
 
 running_peer_status(PeerId) ->
