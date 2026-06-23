@@ -1308,3 +1308,19 @@ debug-only and returns `debug_replay_disabled` when the controls are disabled.
 A retained early frame from the same epoch can then be replayed with
 `debug_replay_frame/3` to verify the `too_old` path once the receive window has
 advanced by at least 64 sequence numbers.
+
+### Automatic authenticated rekey
+
+Certificate-control peers may trigger the existing authenticated ECDH rekey automatically.
+The feature is disabled unless at least one threshold is positive:
+
+```erlang
+#{auto_rekey_after_seconds => 3600,
+  auto_rekey_after_packets => 1000000,
+  auto_rekey_check_interval_ms => 1000,
+  auto_rekey_failure_cooldown_ms => 5000}
+```
+
+The first reached threshold starts one rekey operation. Concurrent automatic attempts are
+suppressed, failures enter a cooldown, and runtime/admin statistics expose the trigger,
+progress, and completion counters. Production defaults keep automatic rekey disabled.

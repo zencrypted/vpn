@@ -108,10 +108,12 @@ Authenticated dataplane frames now carry an explicit key epoch, nonce
 derivation includes that epoch, and runtime statistics expose establishment
 time plus per-epoch traffic counters. The initial certificate session uses
 epoch 1. Authenticated epoch rollover, previous-epoch grace handling, replay
-windows, automatic rekey triggers, and session-expiration enforcement remain
-future work.
+windows and session-expiration enforcement remain future work.
 
-- Manual authenticated rekey is implemented. Automatic time/packet triggers and bounded previous-epoch retirement remain to be added.
+- Manual and automatic authenticated rekey are implemented. Automatic rekey can be
+  triggered by elapsed time or packets since the previous key epoch, suppresses
+  concurrent attempts, and applies a cooldown after failures. Production defaults
+  leave both thresholds disabled. Session-expiration enforcement remains to be added.
 
 ## Replay-window follow-ups
 

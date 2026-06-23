@@ -75,8 +75,12 @@ summary_peer(PeerId, PeerStatus, Certificates) ->
       duplicate_frames => maps:get(duplicate_frames, LinkStats, 0),
       stale_epoch_drops => maps:get(stale_epoch_drops, LinkStats, 0),
       previous_epoch_accepted => maps:get(previous_epoch_accepted, LinkStats, 0),
+      auto_rekeys_started => maps:get(auto_rekeys_started, LinkStats, 0),
+      auto_rekeys_completed => maps:get(auto_rekeys_completed, LinkStats, 0),
+      auto_rekeys_failed => maps:get(auto_rekeys_failed, LinkStats, 0),
       session => maps:get(session, LinkStats, undefined),
       replay => maps:get(replay, LinkStats, undefined),
+      auto_rekey => maps:get(auto_rekey, LinkStats, undefined),
       certificate => compact_certificate(Certificate)}.
 
 certificate_for_peer(PeerId, Certificates) ->
@@ -113,8 +117,12 @@ peer_view(Peer) ->
       duplicate_frames => maps:get(duplicate_frames, Peer, 0),
       stale_epoch_drops => maps:get(stale_epoch_drops, Peer, 0),
       previous_epoch_accepted => maps:get(previous_epoch_accepted, Peer, 0),
+      auto_rekeys_started => maps:get(auto_rekeys_started, Peer, 0),
+      auto_rekeys_completed => maps:get(auto_rekeys_completed, Peer, 0),
+      auto_rekeys_failed => maps:get(auto_rekeys_failed, Peer, 0),
       session => session_view(maps:get(session, Peer, undefined)),
       replay => replay_view(maps:get(replay, Peer, undefined)),
+      auto_rekey => auto_rekey_view(maps:get(auto_rekey, Peer, undefined)),
       certificate => certificate_view(maps:get(certificate, Peer, #{}))}.
 
 certificate_view(Certificate) ->
@@ -160,6 +168,16 @@ time_value({generalTime, Value}) ->
     json_value(Value);
 time_value(Value) ->
     json_value(Value).
+
+
+auto_rekey_view(undefined) ->
+    null;
+auto_rekey_view(AutoRekey) when is_map(AutoRekey) ->
+    maps:with([enabled, after_seconds, after_packets, check_interval_ms,
+               failure_cooldown_ms, in_progress, last_reason,
+               last_started_at, last_completed_at, last_error,
+               cooldown_remaining_ms],
+              AutoRekey).
 
 replay_view(undefined) ->
     null;

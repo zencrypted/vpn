@@ -157,7 +157,15 @@ handshake_options(Config, IdentityInfo) ->
              previous_epoch_grace_ms =>
                  maps:get(previous_epoch_grace_ms, Config, 5000),
              debug_replay_controls =>
-                 maps:get(debug_replay_controls, Config, false)},
+                 maps:get(debug_replay_controls, Config, false),
+             auto_rekey_after_seconds =>
+                 maps:get(auto_rekey_after_seconds, Config, 0),
+             auto_rekey_after_packets =>
+                 maps:get(auto_rekey_after_packets, Config, 0),
+             auto_rekey_check_interval_ms =>
+                 maps:get(auto_rekey_check_interval_ms, Config, 1000),
+             auto_rekey_failure_cooldown_ms =>
+                 maps:get(auto_rekey_failure_cooldown_ms, Config, 5000)},
     case maps:get(handshake_mode, Config, disabled) of
         certificate_control ->
             Base#{local_certificate_pem => maps:get(certificate_pem, IdentityInfo),
@@ -239,9 +247,41 @@ validate_previous_epoch_grace(Config) ->
 
 validate_debug_replay_controls(Config) ->
     case maps:get(debug_replay_controls, Config, false) of
-        Value when is_boolean(Value) -> ok;
+        Value when is_boolean(Value) -> validate_auto_rekey_config(Config);
         Value -> {error, {invalid_debug_replay_controls, Value}}
     end.
+
+validate_auto_rekey_config(Config) ->
+    Values = [{auto_rekey_after_seconds, maps:get(auto_rekey_after_seconds, Config, 0)},
+              {auto_rekey_after_packets, maps:get(auto_rekey_after_packets, Config, 0)}],
+    case [{Key, Value} || {Key, Value} <- Values,
+                          not (is_integer(Value) andalso Value >= 0)] of
+        [] ->
+            case auto_rekey_enabled_in_config(Config) andalso
+                 maps:get(handshake_mode, Config, disabled) =/= certificate_control of
+                true -> {error, auto_rekey_requires_certificate_control};
+                false -> validate_positive_auto_rekey_value(auto_rekey_check_interval_ms,
+                                                             maps:get(auto_rekey_check_interval_ms, Config, 1000),
+                                                             Config)
+            end;
+        [{Key, Value} | _] -> {error, {invalid_auto_rekey_value, Key, Value}}
+    end.
+
+auto_rekey_enabled_in_config(Config) ->
+    maps:get(auto_rekey_after_seconds, Config, 0) > 0 orelse
+    maps:get(auto_rekey_after_packets, Config, 0) > 0.
+
+validate_positive_auto_rekey_value(Key, Value, Config)
+  when is_integer(Value), Value > 0 ->
+    case Key of
+        auto_rekey_check_interval_ms ->
+            validate_positive_auto_rekey_value(auto_rekey_failure_cooldown_ms,
+                                               maps:get(auto_rekey_failure_cooldown_ms, Config, 5000),
+                                               Config);
+        auto_rekey_failure_cooldown_ms -> ok
+    end;
+validate_positive_auto_rekey_value(Key, Value, _Config) ->
+    {error, {invalid_auto_rekey_value, Key, Value}}.
 
 validate_mode(tap) ->
     ok;
@@ -275,6 +315,10 @@ runtime_config(Config) ->
                handshake_retry_interval,
                handshake_max_retries,
                previous_epoch_grace_ms,
+               auto_rekey_after_seconds,
+               auto_rekey_after_packets,
+               auto_rekey_check_interval_ms,
+               auto_rekey_failure_cooldown_ms,
                handshake_remote_ca_certificate_path],
               Config).
 

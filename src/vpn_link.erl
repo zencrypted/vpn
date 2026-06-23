@@ -8,6 +8,8 @@
 -define(REPLAY_WINDOW_SIZE, 64).
 -define(DEFAULT_PREVIOUS_EPOCH_GRACE_MS, 5000).
 -define(DEBUG_FRAME_HISTORY_LIMIT, 256).
+-define(DEFAULT_AUTO_REKEY_CHECK_INTERVAL_MS, 1000).
+-define(DEFAULT_AUTO_REKEY_FAILURE_COOLDOWN_MS, 5000).
 
 -export([start_link/5, start_link/6, start_link/8, start_link/9, start_link/10,
          stop/1, stats/1, reset_stats/1, rekey/1,
@@ -106,7 +108,12 @@ handle_call(stats, _From, State) ->
 handle_call(reset_stats, _From, State) ->
     {reply, ok, reset_counter_values(State)};
 handle_call(rekey, _From, State) ->
-    initiate_rekey(State);
+    case begin_rekey(State) of
+        {ok, NextEpoch, State1} ->
+            {reply, {ok, NextEpoch}, State1};
+        {error, Reason, State1} ->
+            {reply, {error, Reason}, State1}
+    end;
 handle_call(debug_frame_history, _From, State) ->
     case maps:get(debug_replay_enabled, State, false) of
         true -> {reply, {ok, debug_frame_history_info(State)}, State};
@@ -124,6 +131,8 @@ handle_cast(_Request, State) ->
 
 handle_info(handshake_start, State) ->
     start_handshake(State);
+handle_info(auto_rekey_check, State) ->
+    {noreply, schedule_auto_rekey_check(maybe_auto_rekey(State))};
 handle_info(handshake_retry, State) ->
     retry_handshake(State);
 handle_info({vpn_tun_packet, TunPid, Packet},
@@ -214,36 +223,48 @@ init_tun(UdpPid, TunName, TunIp, Mode, RemoteIp, RemoteUdpPort, PeerId, RemotePe
                                  handshake => Handshake,
                                  handshake_timer => undefined,
                                  session_lifecycle => undefined,
+                                 auto_rekey_after_seconds => maps:get(auto_rekey_after_seconds, HandshakeOptions, 0),
+                                 auto_rekey_after_packets => maps:get(auto_rekey_after_packets, HandshakeOptions, 0),
+                                 auto_rekey_check_interval_ms => maps:get(auto_rekey_check_interval_ms, HandshakeOptions, ?DEFAULT_AUTO_REKEY_CHECK_INTERVAL_MS),
+                                 auto_rekey_failure_cooldown_ms => maps:get(auto_rekey_failure_cooldown_ms, HandshakeOptions, ?DEFAULT_AUTO_REKEY_FAILURE_COOLDOWN_MS),
+                                 auto_rekey_timer => undefined,
+                                 auto_rekey_in_progress => false,
+                                 auto_rekey_last_reason => undefined,
+                                 auto_rekey_last_started_at => undefined,
+                                 auto_rekey_last_completed_at => undefined,
+                                 auto_rekey_last_error => undefined,
+                                 auto_rekey_cooldown_until => 0,
                                  tx_seq => 0,
                                  rx_seq => 0,
                                  remote_ip => RemoteIp,
                                  remote_udp_port => RemoteUdpPort},
                                zero_counters()),
             self() ! handshake_start,
-            {ok, State};
+            {ok, schedule_auto_rekey_check(State)};
         {error, Reason} ->
             _ = vpn_udp:stop(UdpPid),
             {stop, Reason}
     end.
 
 
-initiate_rekey(State = #{handshake := Handshake,
-                               udp_pid := UdpPid,
-                               remote_ip := RemoteIp,
-                               remote_udp_port := RemoteUdpPort}) ->
+begin_rekey(State = #{handshake := Handshake,
+                      udp_pid := UdpPid,
+                      remote_ip := RemoteIp,
+                      remote_udp_port := RemoteUdpPort}) ->
     case vpn_handshake:begin_rekey(Handshake) of
         {send, Packet, Handshake1} ->
             case vpn_udp:send(UdpPid, RemoteIp, RemoteUdpPort, Packet) of
                 ok ->
                     State1 = incr_counter(State#{handshake := Handshake1}, handshake_control_tx),
                     NextEpoch = current_key_epoch(State) + 1,
-                    {reply, {ok, NextEpoch}, schedule_handshake_retry(State1, Handshake1)};
+                    {ok, NextEpoch, schedule_handshake_retry(State1, Handshake1)};
                 {error, Reason} ->
-                    {reply, {error, Reason}, incr_counter(State, handshake_failures)}
+                    {error, Reason, incr_counter(State, handshake_failures)}
             end;
         {error, Reason} ->
-            {reply, {error, Reason}, State}
+            {error, Reason, State}
     end.
+
 
 start_handshake(State = #{handshake := Handshake}) ->
     case vpn_handshake:begin_handshake(Handshake) of
@@ -262,9 +283,10 @@ retry_handshake(State = #{handshake := Handshake}) ->
             send_handshake(Packet, State#{handshake := Handshake1, handshake_timer := undefined});
         {failed, Reason, Handshake1} ->
             logger:error("vpn_link handshake failed: ~p", [Reason]),
-            {noreply, incr_counter(State#{handshake := Handshake1,
-                                          handshake_timer := undefined},
-                                   handshake_failures)}
+            FailedState = incr_counter(State#{handshake := Handshake1,
+                                               handshake_timer := undefined},
+                                       handshake_failures),
+            {noreply, mark_auto_rekey_failed(FailedState, Reason)}
     end.
 
 handle_handshake_packet(Packet, State = #{handshake := Handshake}) ->
@@ -287,7 +309,8 @@ handle_handshake_packet(Packet, State = #{handshake := Handshake}) ->
             {noreply, EstablishedState};
         {reject, Reason, Handshake1} ->
             logger:warning("vpn_link rejected handshake frame: ~p", [Reason]),
-            {noreply, incr_counter(State1#{handshake := Handshake1}, handshake_failures)}
+            FailedState = incr_counter(State1#{handshake := Handshake1}, handshake_failures),
+            {noreply, mark_auto_rekey_failed(FailedState, Reason)}
     end.
 
 
@@ -303,7 +326,7 @@ send_established_handshake(Packet, State = #{udp_pid := UdpPid,
             {noreply, incr_counter(EstablishedState, handshake_control_tx)};
         {error, Reason} ->
             logger:error("vpn_link failed to send final handshake frame: ~p", [Reason]),
-            {noreply, incr_counter(State, handshake_failures)}
+            {noreply, mark_auto_rekey_failed(incr_counter(State, handshake_failures), Reason)}
     end.
 
 send_handshake(Packet, State = #{udp_pid := UdpPid,
@@ -358,10 +381,11 @@ activate_session_crypto(State = #{handshake := Handshake, peer_id := PeerId}) ->
                                     undefined -> vpn_session_lifecycle:new(KeyEpoch);
                                     Existing -> vpn_session_lifecycle:rekey(Existing, KeyEpoch)
                                 end,
-                    RekeyedState = case CurrentEpoch > 0 of
-                                         true -> incr_counter(State, rekeys_completed);
-                                         false -> State
-                                     end,
+                    RekeyedState0 = case CurrentEpoch > 0 of
+                                          true -> incr_counter(State, rekeys_completed);
+                                          false -> State
+                                      end,
+                    RekeyedState = mark_auto_rekey_completed(RekeyedState0, CurrentEpoch),
                     install_session_crypto(RekeyedState, TxKey, RxKey, PeerId,
                                            KeyEpoch, SessionId, Lifecycle)
             end;
@@ -639,7 +663,8 @@ stats_map(State = #{tun_pid := TunPid,
                  crypto => crypto_info(State),
                  session => session_info(State),
                  replay => replay_info(State),
-                 debug_replay => debug_replay_info(State)},
+                 debug_replay => debug_replay_info(State),
+                 auto_rekey => auto_rekey_info(State)},
                maps:with(counter_keys(), State)).
 
 current_key_epoch(#{session_lifecycle := Lifecycle}) when is_map(Lifecycle) ->
@@ -723,6 +748,9 @@ counter_keys() ->
      handshake_failures,
      handshake_blocked_packets,
      rekeys_completed,
+     auto_rekeys_started,
+     auto_rekeys_completed,
+     auto_rekeys_failed,
      replay_drops,
      duplicate_frames,
      stale_epoch_drops,
@@ -753,6 +781,104 @@ normalize_peer_id(PeerId) when is_binary(PeerId) ->
     PeerId;
 normalize_peer_id(PeerId) when is_atom(PeerId) ->
     atom_to_binary(PeerId, utf8).
+
+auto_rekey_info(State) ->
+    #{enabled => auto_rekey_enabled(State),
+      after_seconds => maps:get(auto_rekey_after_seconds, State, 0),
+      after_packets => maps:get(auto_rekey_after_packets, State, 0),
+      check_interval_ms => maps:get(auto_rekey_check_interval_ms, State,
+                                    ?DEFAULT_AUTO_REKEY_CHECK_INTERVAL_MS),
+      failure_cooldown_ms => maps:get(auto_rekey_failure_cooldown_ms, State,
+                                      ?DEFAULT_AUTO_REKEY_FAILURE_COOLDOWN_MS),
+      in_progress => maps:get(auto_rekey_in_progress, State, false),
+      last_reason => maps:get(auto_rekey_last_reason, State, undefined),
+      last_started_at => maps:get(auto_rekey_last_started_at, State, undefined),
+      last_completed_at => maps:get(auto_rekey_last_completed_at, State, undefined),
+      last_error => maps:get(auto_rekey_last_error, State, undefined),
+      cooldown_remaining_ms => max(0, maps:get(auto_rekey_cooldown_until, State, 0) -
+                                      erlang:monotonic_time(millisecond))}.
+
+auto_rekey_enabled(State) ->
+    maps:get(auto_rekey_after_seconds, State, 0) > 0 orelse
+    maps:get(auto_rekey_after_packets, State, 0) > 0.
+
+schedule_auto_rekey_check(State) ->
+    case auto_rekey_enabled(State) of
+        false -> State;
+        true ->
+            case maps:get(auto_rekey_timer, State, undefined) of
+                undefined ->
+                    Interval = maps:get(auto_rekey_check_interval_ms, State,
+                                        ?DEFAULT_AUTO_REKEY_CHECK_INTERVAL_MS),
+                    Ref = erlang:send_after(Interval, self(), auto_rekey_check),
+                    State#{auto_rekey_timer := Ref};
+                _ -> State
+            end
+    end.
+
+maybe_auto_rekey(State0) ->
+    State = State0#{auto_rekey_timer := undefined},
+    case auto_rekey_reason(State) of
+        none -> State;
+        Reason ->
+            case begin_rekey(State) of
+                {ok, NextEpoch, State1} ->
+                    logger:info("vpn_link automatic rekey started reason=~p next_epoch=~p",
+                                [Reason, NextEpoch]),
+                    incr_counter(State1#{auto_rekey_in_progress := true,
+                                        auto_rekey_last_reason := Reason,
+                                        auto_rekey_last_started_at := erlang:system_time(second),
+                                        auto_rekey_last_error := undefined},
+                                 auto_rekeys_started);
+                {error, rekey_in_progress, State1} -> State1;
+                {error, Reason2, State1} ->
+                    mark_auto_rekey_failed(State1#{auto_rekey_in_progress := true}, Reason2)
+            end
+    end.
+
+auto_rekey_reason(State) ->
+    NowMs = erlang:monotonic_time(millisecond),
+    case {auto_rekey_enabled(State),
+          maps:get(auto_rekey_in_progress, State, false),
+          NowMs < maps:get(auto_rekey_cooldown_until, State, 0),
+          maps:get(session_lifecycle, State, undefined)} of
+        {true, false, false, Lifecycle} when is_map(Lifecycle) ->
+            Info = vpn_session_lifecycle:info(Lifecycle),
+            Seconds = max(0, erlang:system_time(second) - maps:get(last_rekey_at, Lifecycle)),
+            Packets = maps:get(packets_since_rekey, Info),
+            SecondsLimit = maps:get(auto_rekey_after_seconds, State, 0),
+            PacketsLimit = maps:get(auto_rekey_after_packets, State, 0),
+            case {SecondsLimit > 0 andalso Seconds >= SecondsLimit,
+                  PacketsLimit > 0 andalso Packets >= PacketsLimit} of
+                {true, _} -> session_age;
+                {false, true} -> packet_count;
+                _ -> none
+            end;
+        _ -> none
+    end.
+
+mark_auto_rekey_completed(State, CurrentEpoch) when CurrentEpoch > 0 ->
+    case maps:get(auto_rekey_in_progress, State, false) of
+        true ->
+            incr_counter(State#{auto_rekey_in_progress := false,
+                                auto_rekey_last_completed_at := erlang:system_time(second),
+                                auto_rekey_cooldown_until := 0},
+                         auto_rekeys_completed);
+        false -> State
+    end;
+mark_auto_rekey_completed(State, _CurrentEpoch) -> State.
+
+mark_auto_rekey_failed(State, Reason) ->
+    case maps:get(auto_rekey_in_progress, State, false) of
+        true ->
+            Cooldown = maps:get(auto_rekey_failure_cooldown_ms, State,
+                                ?DEFAULT_AUTO_REKEY_FAILURE_COOLDOWN_MS),
+            incr_counter(State#{auto_rekey_in_progress := false,
+                                auto_rekey_last_error := iolist_to_binary(io_lib:format("~p", [Reason])),
+                                auto_rekey_cooldown_until := erlang:monotonic_time(millisecond) + Cooldown},
+                         auto_rekeys_failed);
+        false -> State
+    end.
 
 debug_replay_info(State) ->
     Enabled = maps:get(debug_replay_enabled, State, false),
