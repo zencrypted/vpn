@@ -1288,3 +1288,23 @@ vpn_manager:debug_replay_frame(client_a, 1, 0).
 ```
 
 This sends the exact retained ciphertext again, allowing the remote peer replay window to be verified without exposing session keys or plaintext. Generate more than 64 packets and replay an old retained sequence to test the too-old path. Retain an epoch-1 frame, rekey, wait for the previous-epoch grace period to expire, and replay it to test stale-epoch rejection.
+
+
+### Debug dataplane burst for replay-window verification
+
+When `debug_replay_controls => true`, a running certificate session can send a
+controlled burst of unique encrypted dataplane frames without relying on host
+routing through the local TUN addresses:
+
+```erlang
+vpn_manager:debug_send_frames(client_a, 70).
+```
+
+The call returns the current key epoch and the generated sequence range. The
+frames use the normal VPN framing, AEAD encryption, UDP transport, peer checks,
+and receive replay window. Counts from 1 through 256 are accepted. The helper is
+debug-only and returns `debug_replay_disabled` when the controls are disabled.
+
+A retained early frame from the same epoch can then be replayed with
+`debug_replay_frame/3` to verify the `too_old` path once the receive window has
+advanced by at least 64 sequence numbers.

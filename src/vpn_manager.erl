@@ -12,7 +12,7 @@
          certificate_status/1,
          peer_info/1,
          peer_stats/1,
-         rekey/1, debug_frame_history/1, debug_replay_frame/3,
+         rekey/1, debug_frame_history/1, debug_replay_frame/3, debug_send_frames/2,
          start_peer/1,
          stop_peer/1,
          reload_config/0,
@@ -92,6 +92,12 @@ debug_frame_history(PeerId) ->
 debug_replay_frame(PeerId, KeyEpoch, Seq) ->
     case find_peer(PeerId) of
         {ok, Pid} -> vpn_peer:debug_replay_frame(Pid, KeyEpoch, Seq);
+        {error, not_found} -> {error, not_found}
+    end.
+
+debug_send_frames(PeerId, Count) ->
+    case find_peer(PeerId) of
+        {ok, Pid} -> vpn_peer:debug_send_frames(Pid, Count);
         {error, not_found} -> {error, not_found}
     end.
 

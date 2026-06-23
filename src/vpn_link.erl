@@ -11,7 +11,7 @@
 
 -export([start_link/5, start_link/6, start_link/8, start_link/9, start_link/10,
          stop/1, stats/1, reset_stats/1, rekey/1,
-         debug_frame_history/1, debug_replay_frame/3]).
+         debug_frame_history/1, debug_replay_frame/3, debug_send_frames/2]).
 -export([validate_frame_peer_id/2]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
@@ -85,6 +85,9 @@ debug_frame_history(Pid) ->
 debug_replay_frame(Pid, KeyEpoch, Seq) ->
     gen_server:call(Pid, {debug_replay_frame, KeyEpoch, Seq}).
 
+debug_send_frames(Pid, Count) ->
+    gen_server:call(Pid, {debug_send_frames, Count}, 30000).
+
 init({psk_required, _TunName, _TunIp, _Mode, _LocalUdpPort, _RemoteIp, _RemoteUdpPort}) ->
     {stop, psk_required};
 init({psk_required, _TunName, _TunIp, _Mode, _LocalUdpPort, _RemoteIp, _RemoteUdpPort, _PeerId, _RemotePeerId}) ->
@@ -111,6 +114,8 @@ handle_call(debug_frame_history, _From, State) ->
     end;
 handle_call({debug_replay_frame, KeyEpoch, Seq}, _From, State) ->
     replay_debug_frame(KeyEpoch, Seq, State);
+handle_call({debug_send_frames, Count}, _From, State) ->
+    send_debug_frames(Count, State);
 handle_call(_Request, _From, State) ->
     {reply, {error, not_implemented}, State}.
 
@@ -799,6 +804,55 @@ replay_debug_frame(KeyEpoch, Seq,
     end;
 replay_debug_frame(_KeyEpoch, _Seq, State) ->
     {reply, {error, invalid_frame_selector}, State}.
+
+
+send_debug_frames(_Count, State = #{debug_replay_enabled := false}) ->
+    {reply, {error, debug_replay_disabled}, State};
+send_debug_frames(Count, State)
+  when is_integer(Count), Count > 0, Count =< ?DEBUG_FRAME_HISTORY_LIMIT ->
+    case handshake_established(State) of
+        true ->
+            StartSeq = maps:get(tx_seq, State),
+            case send_debug_frames_loop(Count, 0, State) of
+                {ok, State1} ->
+                    EndSeq = maps:get(tx_seq, State1) - 1,
+                    logger:warning(
+                      "vpn_link sent ~p debug dataplane frames epoch=~p seq=~p..~p",
+                      [Count, current_key_epoch(State1), StartSeq, EndSeq]),
+                    {reply, {ok, #{sent => Count,
+                                   key_epoch => current_key_epoch(State1),
+                                   first_seq => StartSeq,
+                                   last_seq => EndSeq}},
+                     State1};
+                {error, Reason, State1} ->
+                    {reply, {error, Reason}, State1}
+            end;
+        false ->
+            {reply, {error, handshake_not_established}, State}
+    end;
+send_debug_frames(_Count, State) ->
+    {reply, {error, invalid_frame_count}, State}.
+
+send_debug_frames_loop(Count, Count, State) ->
+    {ok, State};
+send_debug_frames_loop(Count, Index,
+                       State = #{udp_pid := UdpPid,
+                                 remote_ip := RemoteIp,
+                                 remote_udp_port := RemoteUdpPort}) ->
+    Packet = debug_payload(Index),
+    Size = byte_size(Packet),
+    #{tx_seq := TxSeq} = State,
+    case encode_and_send(Packet, debug, Size, UdpPid, RemoteIp, RemoteUdpPort, #{tx_seq := TxSeq} = State) of
+        {noreply, State1 = #{tx_seq := TxSeq2}} when TxSeq2 > TxSeq ->
+            send_debug_frames_loop(Count, Index + 1, State1);
+        {noreply, State1} ->
+            {error, send_failed, State1}
+    end.
+
+debug_payload(Index) ->
+    <<16#45, 0, 0, 48,
+      Index:32/unsigned-big,
+      0:320>>.
 
 find_debug_frame(_KeyEpoch, _Seq, []) ->
     error;

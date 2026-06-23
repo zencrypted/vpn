@@ -5,7 +5,7 @@
 
 -behaviour(gen_server).
 
--export([start_link/1, stop/1, stats/1, reset_stats/1, rekey/1, debug_frame_history/1, debug_replay_frame/3,
+-export([start_link/1, stop/1, stats/1, reset_stats/1, rekey/1, debug_frame_history/1, debug_replay_frame/3, debug_send_frames/2,
          identity/1, identity_info/1, config/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
@@ -29,6 +29,9 @@ debug_frame_history(Pid) ->
 
 debug_replay_frame(Pid, KeyEpoch, Seq) ->
     gen_server:call(Pid, {debug_replay_frame, KeyEpoch, Seq}).
+
+debug_send_frames(Pid, Count) ->
+    gen_server:call(Pid, {debug_send_frames, Count}, 30000).
 
 identity(Pid) ->
     gen_server:call(Pid, identity).
@@ -60,6 +63,8 @@ handle_call(debug_frame_history, _From, State = #{link_pid := LinkPid}) ->
 handle_call({debug_replay_frame, KeyEpoch, Seq}, _From,
             State = #{link_pid := LinkPid}) ->
     {reply, vpn_link:debug_replay_frame(LinkPid, KeyEpoch, Seq), State};
+handle_call({debug_send_frames, Count}, _From, State = #{link_pid := LinkPid}) ->
+    {reply, vpn_link:debug_send_frames(LinkPid, Count), State};
 handle_call(identity, _From, State = #{identity := Identity}) ->
     {reply, Identity, State};
 handle_call(identity_info, _From, State = #{identity_info := IdentityInfo}) ->
