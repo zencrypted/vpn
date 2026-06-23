@@ -1358,3 +1358,12 @@ Automatic rekey checks may add a bounded random delay before initiating a new au
 ```
 
 A value of `0` preserves immediate triggering. While the delay is pending, repeated checks do not schedule duplicate rekeys. Runtime statistics expose `pending`, `pending_reason`, and `pending_remaining_ms`. If another exchange refreshes the key epoch before the delay expires, the pending trigger is re-evaluated and safely abandoned.
+
+### Authenticated peer restart recovery
+
+Handshake version 4 marks initial exchanges separately from rekeys. When an
+already authenticated peer presents a fresh initial session, the remote link
+pauses dataplane delivery until certificate authentication completes, then
+installs a fresh epoch-1 session and clears obsolete replay/key state. This
+prevents restart traffic from being misclassified as AEAD failures while
+preserving normal epoch-incrementing rekeys.

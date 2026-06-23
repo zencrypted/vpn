@@ -9,7 +9,7 @@
 
 -include_lib("public_key/include/OTP-PUB-KEY.hrl").
 
--export([certificate_der/1, proof_data/9, sign/2, verify/5]).
+-export([certificate_der/1, proof_data/9, proof_data/10, sign/2, verify/5]).
 
 certificate_der(CertificatePem) when is_binary(CertificatePem) ->
     try
@@ -30,15 +30,27 @@ proof_data(SenderPeerId, ReceiverPeerId,
            SenderNonce, ReceiverNonce,
            SenderEphemeralPublicKey, ReceiverEphemeralPublicKey,
            CertificateDer) ->
+    proof_data(SenderPeerId, ReceiverPeerId,
+               SenderSessionId, ReceiverSessionId,
+               SenderNonce, ReceiverNonce,
+               SenderEphemeralPublicKey, ReceiverEphemeralPublicKey,
+               initial, CertificateDer).
+
+proof_data(SenderPeerId, ReceiverPeerId,
+           SenderSessionId, ReceiverSessionId,
+           SenderNonce, ReceiverNonce,
+           SenderEphemeralPublicKey, ReceiverEphemeralPublicKey,
+           ExchangeKind, CertificateDer) ->
     Sender = peer_id(SenderPeerId),
     Receiver = peer_id(ReceiverPeerId),
     crypto:hash(sha256,
-                [<<"vpn-certificate-proof-v2">>,
+                [<<"vpn-certificate-proof-v3">>,
                  length_prefixed(Sender), length_prefixed(Receiver),
                  SenderSessionId, ReceiverSessionId,
                  SenderNonce, ReceiverNonce,
                  length_prefixed(SenderEphemeralPublicKey),
                  length_prefixed(ReceiverEphemeralPublicKey),
+                 atom_to_binary(ExchangeKind, utf8),
                  crypto:hash(sha256, CertificateDer)]).
 
 sign(Data, PrivateKeyPath) when is_binary(Data) ->

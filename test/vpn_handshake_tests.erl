@@ -73,6 +73,22 @@ established_certificate_pair() ->
     {established, B4} = vpn_handshake:handle_frame(AckToB, B3),
     {A4, B4}.
 
+
+remote_restart_is_distinguished_from_rekey_test() ->
+    {A4, B4} = established_certificate_pair(),
+    RestartedA0 = vpn_handshake:new(peer_a, peer_b, certificate_options("peer_a")),
+    {send, RestartHello, _RestartedA1} = vpn_handshake:begin_handshake(RestartedA0),
+    {send, _ProofB, B5} = vpn_handshake:handle_frame(RestartHello, B4),
+    RestartInfo = vpn_handshake:info(B5),
+    ?assertEqual(initial, maps:get(exchange_kind, RestartInfo)),
+    ?assertEqual(remote_restart, maps:get(transition_reason, RestartInfo)),
+
+    {send, RekeyHello, _A5} = vpn_handshake:begin_rekey(A4),
+    {send, _RekeyProof, B6} = vpn_handshake:handle_frame(RekeyHello, B4),
+    RekeyInfo = vpn_handshake:info(B6),
+    ?assertEqual(rekey, maps:get(exchange_kind, RekeyInfo)),
+    ?assertEqual(rekey, maps:get(transition_reason, RekeyInfo)).
+
 certificate_ack_before_proof_is_deferred_test() ->
     A0 = vpn_handshake:new(peer_a, peer_b, certificate_options("peer_a")),
     B0 = vpn_handshake:new(peer_b, peer_a, certificate_options("peer_b")),

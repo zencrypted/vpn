@@ -29,6 +29,8 @@ new(LocalPeerId, RemotePeerId, Options) when is_map(Options) ->
              pending_ack => undefined,
              local_proof_sent => false,
              exchange_role => initial,
+             exchange_kind => initial,
+             transition_reason => initial,
              retries => 0,
              max_retries => maps:get(max_retries, Options, 5),
              retry_interval => maps:get(retry_interval, Options, 1000)},
@@ -40,7 +42,7 @@ begin_handshake(State) ->
     {send, hello(State), State#{status := waiting_peer, retries := 1}}.
 
 begin_rekey(State = #{mode := certificate_control, status := established}) ->
-    Fresh = fresh_exchange(State, initiator),
+    Fresh = fresh_exchange(State, initiator, rekey, rekey),
     {send, hello(Fresh), Fresh#{status := rekey_waiting_peer, retries := 1}};
 begin_rekey(#{mode := certificate_control}) ->
     {error, handshake_not_established};
@@ -72,7 +74,8 @@ status(State) -> maps:get(status, State).
 info(State) ->
     Info0 = maps:with([mode, status, retries, max_retries, retry_interval,
                        session_id, remote_session_id, remote_authenticated,
-                       remote_certificate_fingerprint, exchange_role], State),
+                       remote_certificate_fingerprint, exchange_role,
+                       exchange_kind, transition_reason], State),
     Info0#{session_keys_ready => is_map(maps:get(session_keys, State, undefined)),
            key_source => key_source(State)}.
 
@@ -206,6 +209,7 @@ proof_data(State, CertificateDer) ->
       maps:get(nonce, State), maps:get(remote_nonce, State),
       maps:get(local_ephemeral_public_key, State),
       maps:get(remote_ephemeral_public_key, State),
+      maps:get(exchange_kind, State, initial),
       CertificateDer).
 
 remote_proof_data(State, CertificateDer) ->
@@ -215,13 +219,15 @@ remote_proof_data(State, CertificateDer) ->
       maps:get(remote_nonce, State), maps:get(nonce, State),
       maps:get(remote_ephemeral_public_key, State),
       maps:get(local_ephemeral_public_key, State),
+      maps:get(exchange_kind, State, initial),
       CertificateDer).
 
 hello(State = #{mode := certificate_control}) ->
     vpn_handshake_frame:encode_hello(maps:get(local_peer_id, State),
                                      maps:get(session_id, State),
                                      maps:get(nonce, State),
-                                     maps:get(local_ephemeral_public_key, State));
+                                     maps:get(local_ephemeral_public_key, State),
+                                     maps:get(exchange_kind, State, initial));
 hello(State) ->
     vpn_handshake_frame:encode_hello(maps:get(local_peer_id, State),
                                      maps:get(session_id, State),
@@ -245,20 +251,27 @@ preserve_established(#{status := established}, _Next) -> established;
 preserve_established(_State, Next) -> Next.
 
 
-prepare_incoming_exchange(#{peer_id := PeerId, session_id := RemoteSession},
+prepare_incoming_exchange(#{peer_id := PeerId,
+                            session_id := RemoteSession,
+                            exchange_kind := ExchangeKind},
                           State = #{mode := certificate_control,
                                     status := established,
                                     remote_peer_id := ExpectedPeerId,
                                     remote_session_id := CurrentRemote})
   when RemoteSession =/= CurrentRemote ->
     case normalize_peer_id(PeerId) =:= ExpectedPeerId of
-        true -> fresh_exchange(State, responder);
+        true ->
+            Reason = case ExchangeKind of
+                         rekey -> rekey;
+                         initial -> remote_restart
+                     end,
+            fresh_exchange(State, responder, ExchangeKind, Reason);
         false -> State
     end;
 prepare_incoming_exchange(_Frame, State) ->
     State.
 
-fresh_exchange(State, Role) ->
+fresh_exchange(State, Role, ExchangeKind, TransitionReason) ->
     {EphemeralPublicKey, EphemeralPrivateKey} = vpn_session_kdf:generate_key_pair(),
     State#{status := idle,
            session_id := crypto:strong_rand_bytes(?ID_SIZE),
@@ -271,6 +284,8 @@ fresh_exchange(State, Role) ->
            pending_ack := undefined,
            local_proof_sent := false,
            exchange_role := Role,
+           exchange_kind := ExchangeKind,
+           transition_reason := TransitionReason,
            retries := 0,
            local_ephemeral_public_key := EphemeralPublicKey,
            local_ephemeral_private_key := EphemeralPrivateKey,

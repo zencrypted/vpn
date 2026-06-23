@@ -7,10 +7,22 @@ hello_roundtrip_test() ->
     Frame = vpn_handshake_frame:encode_hello(peer_a, Session, Nonce,
                                              EphemeralPublicKey),
     ?assert(vpn_handshake_frame:is_control(Frame)),
-    ?assertEqual({ok, #{version => 3, type => hello,
+    ?assertEqual({ok, #{version => 4, type => hello,
+                        exchange_kind => initial,
                         session_id => Session, peer_id => <<"peer_a">>,
                         nonce => Nonce,
                         ephemeral_public_key => EphemeralPublicKey}},
+                 vpn_handshake_frame:decode(Frame)).
+
+
+rekey_hello_roundtrip_test() ->
+    Session = <<5:128>>, Nonce = <<6:128>>,
+    EphemeralPublicKey = <<7,8,9>>,
+    Frame = vpn_handshake_frame:encode_hello(peer_a, Session, Nonce,
+                                             EphemeralPublicKey, rekey),
+    ?assertMatch({ok, #{version := 4, type := hello,
+                        exchange_kind := rekey,
+                        session_id := Session, peer_id := <<"peer_a">>}},
                  vpn_handshake_frame:decode(Frame)).
 
 ack_roundtrip_test() ->

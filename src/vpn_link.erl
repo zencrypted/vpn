@@ -230,6 +230,9 @@ init_tun(UdpPid, TunName, TunIp, Mode, RemoteIp, RemoteUdpPort, PeerId, RemotePe
                                  debug_frame_history => [],
                                  current_replay_window => vpn_replay_window:new(?REPLAY_WINDOW_SIZE),
                                  crypto_session_id => undefined,
+                                 remote_restart_pending => false,
+                                 pre_restart_handshake => undefined,
+                                 last_session_reset_reason => undefined,
                                  handshake => Handshake,
                                  handshake_timer => undefined,
                                  session_lifecycle => undefined,
@@ -308,25 +311,56 @@ handle_handshake_packet(Packet, State = #{handshake := Handshake}) ->
     State1 = incr_counter(State, handshake_control_rx),
     case vpn_handshake:handle_frame(Packet, Handshake) of
         {send, Reply, Handshake1} ->
-            send_handshake(Reply, State1#{handshake := Handshake1});
+            State2 = prepare_handshake_transition(State1, Handshake1),
+            send_handshake(Reply, State2#{handshake := Handshake1});
         {send_established, Reply, Handshake1} ->
-            send_established_handshake(Reply, State1#{handshake := Handshake1});
+            State2 = prepare_handshake_transition(State1, Handshake1),
+            send_established_handshake(Reply, State2#{handshake := Handshake1});
         {defer, Handshake1} ->
+            State2 = prepare_handshake_transition(State1, Handshake1),
             logger:debug("vpn_link deferred handshake frame until certificate authentication completes", []),
-            {noreply, State1#{handshake := Handshake1}};
+            {noreply, State2#{handshake := Handshake1}};
         {established, Handshake1} ->
-            cancel_handshake_timer(State1),
+            State2 = prepare_handshake_transition(State1, Handshake1),
+            cancel_handshake_timer(State2),
             logger:info("vpn_link handshake established with ~s",
-                        [maps:get(remote_peer_id, State1)]),
+                        [maps:get(remote_peer_id, State2)]),
             EstablishedState = activate_session_crypto(
-                                 State1#{handshake := Handshake1,
+                                 State2#{handshake := Handshake1,
                                          handshake_timer := undefined}),
             {noreply, EstablishedState};
         {reject, Reason, Handshake1} ->
             logger:warning("vpn_link rejected handshake frame: ~p", [Reason]),
-            FailedState = incr_counter(State1#{handshake := Handshake1}, handshake_failures),
+            RejectedState = rollback_remote_restart(
+                              State1#{handshake := Handshake1}),
+            FailedState = incr_counter(RejectedState, handshake_failures),
             {noreply, mark_auto_rekey_failed(FailedState, Reason)}
     end.
+
+prepare_handshake_transition(State, Handshake) ->
+    case {maps:get(transition_reason, Handshake, undefined),
+          maps:get(remote_restart_pending, State, false)} of
+        {remote_restart, false} ->
+            logger:notice("vpn_link detected remote peer restart; dataplane was paused", []),
+            cancel_handshake_timer(State),
+            State#{remote_restart_pending := true,
+                   pre_restart_handshake := maps:get(handshake, State),
+                   auto_rekey_pending := false,
+                   auto_rekey_pending_token := undefined,
+                   auto_rekey_pending_reason := undefined,
+                   auto_rekey_pending_deadline_ms := undefined,
+                   auto_rekey_in_progress := false};
+        _ -> State
+    end.
+
+rollback_remote_restart(State = #{remote_restart_pending := true,
+                                  pre_restart_handshake := Previous})
+  when is_map(Previous) ->
+    logger:warning("vpn_link restored the previous authenticated session after restart authentication failed", []),
+    State#{remote_restart_pending := false,
+           pre_restart_handshake := undefined,
+           handshake := Previous};
+rollback_remote_restart(State) -> State.
 
 
 send_established_handshake(Packet, State = #{udp_pid := UdpPid,
@@ -374,6 +408,7 @@ cancel_handshake_timer(State) ->
         Ref -> _ = erlang:cancel_timer(Ref), ok
     end.
 
+handshake_established(#{remote_restart_pending := true}) -> false;
 handshake_established(#{crypto := Crypto}) when is_map(Crypto) -> true;
 handshake_established(#{handshake := Handshake}) ->
     vpn_handshake:established(Handshake).
@@ -390,23 +425,55 @@ activate_session_crypto(State = #{handshake := Handshake, peer_id := PeerId}) ->
             case SessionId =:= maps:get(crypto_session_id, State, undefined) of
                 true -> State;
                 false ->
-                    CurrentEpoch = current_key_epoch(State),
-                    KeyEpoch = CurrentEpoch + 1,
-                    Lifecycle = case maps:get(session_lifecycle, State, undefined) of
-                                    undefined -> vpn_session_lifecycle:new(KeyEpoch);
-                                    Existing -> vpn_session_lifecycle:rekey(Existing, KeyEpoch)
-                                end,
-                    RekeyedState0 = case CurrentEpoch > 0 of
-                                          true -> incr_counter(State, rekeys_completed);
-                                          false -> State
-                                      end,
-                    RekeyedState = mark_auto_rekey_completed(RekeyedState0, CurrentEpoch),
-                    install_session_crypto(RekeyedState, TxKey, RxKey, PeerId,
-                                           KeyEpoch, SessionId, Lifecycle)
+                    case maps:get(remote_restart_pending, State, false) of
+                        true ->
+                            install_remote_restart_crypto(State, TxKey, RxKey,
+                                                          PeerId, SessionId);
+                        false ->
+                            CurrentEpoch = current_key_epoch(State),
+                            KeyEpoch = CurrentEpoch + 1,
+                            Lifecycle = case maps:get(session_lifecycle, State, undefined) of
+                                            undefined -> vpn_session_lifecycle:new(KeyEpoch);
+                                            Existing -> vpn_session_lifecycle:rekey(Existing, KeyEpoch)
+                                        end,
+                            RekeyedState0 = case CurrentEpoch > 0 of
+                                                  true -> incr_counter(State, rekeys_completed);
+                                                  false -> State
+                                              end,
+                            RekeyedState = mark_auto_rekey_completed(RekeyedState0, CurrentEpoch),
+                            install_session_crypto(RekeyedState, TxKey, RxKey, PeerId,
+                                                   KeyEpoch, SessionId, Lifecycle)
+                    end
             end;
         {error, session_keys_not_ready} ->
             State
     end.
+
+install_remote_restart_crypto(State, TxKey, RxKey, PeerId, SessionId) ->
+    State1 = cancel_previous_crypto_timer(State),
+    logger:notice("vpn_link installed a fresh authenticated session after remote restart", []),
+    incr_counter(
+      State1#{previous_crypto := undefined,
+              previous_replay_window := undefined,
+              previous_crypto_expires_at := undefined,
+              previous_crypto_timer := undefined,
+              previous_crypto_timer_token := undefined,
+              current_replay_window := vpn_replay_window:new(?REPLAY_WINDOW_SIZE),
+              crypto := vpn_crypto:new_session(TxKey, RxKey, PeerId, 1),
+              crypto_session_id := SessionId,
+              session_lifecycle := vpn_session_lifecycle:new(1),
+              tx_seq := 0,
+              rx_seq := 0,
+              remote_restart_pending := false,
+              pre_restart_handshake := undefined,
+              last_session_reset_reason := remote_restart,
+              auto_rekey_pending := false,
+              auto_rekey_pending_token := undefined,
+              auto_rekey_pending_reason := undefined,
+              auto_rekey_pending_deadline_ms := undefined,
+              auto_rekey_in_progress := false,
+              auto_rekey_cooldown_until := undefined},
+      peer_session_resets).
 
 install_session_crypto(State, TxKey, RxKey, PeerId, KeyEpoch, SessionId, Lifecycle) ->
     CurrentCrypto = maps:get(crypto, State, undefined),
@@ -679,8 +746,13 @@ stats_map(State = #{tun_pid := TunPid,
                  session => session_info(State),
                  replay => replay_info(State),
                  debug_replay => debug_replay_info(State),
-                 auto_rekey => auto_rekey_info(State)},
+                 auto_rekey => auto_rekey_info(State),
+                 session_reset => session_reset_info(State)},
                maps:with(counter_keys(), State)).
+
+session_reset_info(State) ->
+    #{pending => maps:get(remote_restart_pending, State, false),
+      last_reason => maps:get(last_session_reset_reason, State, undefined)}.
 
 current_key_epoch(#{session_lifecycle := Lifecycle}) when is_map(Lifecycle) ->
     maps:get(key_epoch, Lifecycle);
@@ -763,6 +835,7 @@ counter_keys() ->
      handshake_failures,
      handshake_blocked_packets,
      rekeys_completed,
+     peer_session_resets,
      auto_rekeys_started,
      auto_rekeys_completed,
      auto_rekeys_failed,

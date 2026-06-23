@@ -1,15 +1,16 @@
 %%%-------------------------------------------------------------------
 %% @doc Wire format for VPN control-plane handshake frames.
 %%
-%% Version 3 adds an ephemeral ECDH public key to certificate hello frames.
+%% Version 4 adds an authenticated exchange-kind marker to hello frames.
 %%%-------------------------------------------------------------------
 -module(vpn_handshake_frame).
 
--export([encode_hello/3, encode_hello/4, encode_proof/6, encode_proof/7, encode_ack/4,
+-export([encode_hello/3, encode_hello/4, encode_hello/5, encode_proof/6, encode_proof/7, encode_ack/4,
          decode/1, is_control/1]).
 
 -define(MAGIC, "VPNH").
--define(VERSION, 3).
+-define(VERSION, 4).
+-define(LEGACY_VERSION, 3).
 -define(TYPE_HELLO, 1).
 -define(TYPE_ACK, 2).
 -define(TYPE_PROOF, 3).
@@ -17,19 +18,24 @@
 -define(FIXED_SIZE, 56).
 
 encode_hello(PeerId, SessionId, Nonce) ->
-    encode_hello(PeerId, SessionId, Nonce, <<>>).
+    encode_hello(PeerId, SessionId, Nonce, <<>>, initial).
 
-encode_hello(PeerId0, SessionId, Nonce, EphemeralPublicKey)
+encode_hello(PeerId, SessionId, Nonce, EphemeralPublicKey) ->
+    encode_hello(PeerId, SessionId, Nonce, EphemeralPublicKey, initial).
+
+encode_hello(PeerId0, SessionId, Nonce, EphemeralPublicKey, ExchangeKind)
   when is_binary(EphemeralPublicKey) ->
     PeerId = peer_id_to_binary(PeerId0),
     PeerLen = byte_size(PeerId),
     KeyLen = byte_size(EphemeralPublicKey),
     validate_lengths(PeerLen, 0, 0),
     validate_key_length(KeyLen),
+    KindCode = exchange_kind_code(ExchangeKind),
     <<?MAGIC, ?VERSION:8, ?TYPE_HELLO:8,
       SessionId:?ID_SIZE/binary, 0:?ID_SIZE/unit:8,
       PeerLen:16/unsigned, Nonce:?ID_SIZE/binary,
-      KeyLen:16/unsigned, PeerId/binary, EphemeralPublicKey/binary>>.
+      KeyLen:16/unsigned, KindCode:8,
+      PeerId/binary, EphemeralPublicKey/binary>>.
 
 encode_ack(PeerId, SessionId, AckFor, Nonce) ->
     encode_basic(?TYPE_ACK, PeerId, SessionId, AckFor, Nonce).
@@ -59,12 +65,13 @@ decode(Binary) when not is_binary(Binary) ->
     {error, invalid_control_frame};
 decode(Binary) when byte_size(Binary) < ?FIXED_SIZE ->
     {error, truncated_control_frame};
-decode(<<?MAGIC, Version:8, _/binary>>) when Version =/= ?VERSION ->
+decode(<<?MAGIC, Version:8, _/binary>>)
+  when Version =/= ?VERSION, Version =/= ?LEGACY_VERSION ->
     {error, {unsupported_handshake_version, Version}};
-decode(<<?MAGIC, ?VERSION:8, Type:8,
+decode(<<?MAGIC, Version:8, Type:8,
          SessionId:?ID_SIZE/binary, AckFor:?ID_SIZE/binary,
          PeerLen:16/unsigned, Nonce:?ID_SIZE/binary, Rest/binary>>) ->
-    decode_payload(Type, SessionId, AckFor, PeerLen, Nonce, Rest);
+    decode_payload(Version, Type, SessionId, AckFor, PeerLen, Nonce, Rest);
 decode(_) ->
     {error, invalid_control_magic}.
 
@@ -79,26 +86,21 @@ encode_basic(Type, PeerId0, SessionId, AckFor, Nonce)
       SessionId/binary, AckFor/binary,
       PeerLen:16/unsigned, Nonce/binary, PeerId/binary>>.
 
-decode_payload(?TYPE_HELLO, SessionId, _AckFor, PeerLen, Nonce,
-               <<KeyLen:16/unsigned, Payload/binary>>) ->
-    Expected = PeerLen + KeyLen,
-    case byte_size(Payload) of
-        Expected ->
-            <<PeerId:PeerLen/binary, EphemeralPublicKey:KeyLen/binary>> = Payload,
-            Base = #{version => ?VERSION,
-                     type => hello,
-                     session_id => SessionId,
-                     peer_id => PeerId,
-                     nonce => Nonce},
-            case KeyLen of
-                0 -> {ok, Base};
-                _ -> {ok, Base#{ephemeral_public_key => EphemeralPublicKey}}
-            end;
-        _ -> {error, invalid_control_length}
+decode_payload(?VERSION, ?TYPE_HELLO, SessionId, _AckFor, PeerLen, Nonce,
+               <<KeyLen:16/unsigned, KindCode:8, Payload/binary>>) ->
+    case exchange_kind(KindCode) of
+        {ok, ExchangeKind} ->
+            decode_hello_payload(?VERSION, SessionId, PeerLen, Nonce, KeyLen,
+                                 ExchangeKind, Payload);
+        {error, _} = Error -> Error
     end;
-decode_payload(?TYPE_HELLO, _SessionId, _AckFor, _PeerLen, _Nonce, _Rest) ->
+decode_payload(?LEGACY_VERSION, ?TYPE_HELLO, SessionId, _AckFor, PeerLen, Nonce,
+               <<KeyLen:16/unsigned, Payload/binary>>) ->
+    decode_hello_payload(?LEGACY_VERSION, SessionId, PeerLen, Nonce, KeyLen,
+                         initial, Payload);
+decode_payload(_Version, ?TYPE_HELLO, _SessionId, _AckFor, _PeerLen, _Nonce, _Rest) ->
     {error, truncated_control_frame};
-decode_payload(?TYPE_PROOF, SessionId, AckFor, PeerLen, Nonce,
+decode_payload(Version, ?TYPE_PROOF, SessionId, AckFor, PeerLen, Nonce,
                <<KeyLen:16/unsigned, CertLen:32/unsigned, SignatureLen:16/unsigned,
                  Payload/binary>>) ->
     Expected = PeerLen + KeyLen + CertLen + SignatureLen,
@@ -108,7 +110,7 @@ decode_payload(?TYPE_PROOF, SessionId, AckFor, PeerLen, Nonce,
               EphemeralPublicKey:KeyLen/binary,
               CertificateDer:CertLen/binary,
               Signature:SignatureLen/binary>> = Payload,
-            {ok, #{version => ?VERSION,
+            {ok, #{version => Version,
                    type => proof,
                    session_id => SessionId,
                    ack_for => AckFor,
@@ -120,25 +122,51 @@ decode_payload(?TYPE_PROOF, SessionId, AckFor, PeerLen, Nonce,
         _ ->
             {error, invalid_control_length}
     end;
-decode_payload(?TYPE_PROOF, _SessionId, _AckFor, _PeerLen, _Nonce, _Rest) ->
+decode_payload(_Version, ?TYPE_PROOF, _SessionId, _AckFor, _PeerLen, _Nonce, _Rest) ->
     {error, truncated_control_frame};
-decode_payload(Type, SessionId, AckFor, PeerLen, Nonce, Rest) ->
+decode_payload(Version, Type, SessionId, AckFor, PeerLen, Nonce, Rest) ->
     case Rest of
         <<PeerId:PeerLen/binary>> ->
-            decode_basic_type(Type, SessionId, AckFor, PeerId, Nonce);
+            decode_basic_type(Version, Type, SessionId, AckFor, PeerId, Nonce);
         _ ->
             {error, invalid_control_length}
     end.
 
-decode_basic_type(?TYPE_ACK, SessionId, AckFor, PeerId, Nonce) ->
-    {ok, #{version => ?VERSION,
+decode_hello_payload(Version, SessionId, PeerLen, Nonce, KeyLen, ExchangeKind, Payload) ->
+    Expected = PeerLen + KeyLen,
+    case byte_size(Payload) of
+        Expected ->
+            <<PeerId:PeerLen/binary, EphemeralPublicKey:KeyLen/binary>> = Payload,
+            Base = #{version => Version,
+                     type => hello,
+                     exchange_kind => ExchangeKind,
+                     session_id => SessionId,
+                     peer_id => PeerId,
+                     nonce => Nonce},
+            case KeyLen of
+                0 -> {ok, Base};
+                _ -> {ok, Base#{ephemeral_public_key => EphemeralPublicKey}}
+            end;
+        _ -> {error, invalid_control_length}
+    end.
+
+decode_basic_type(Version, ?TYPE_ACK, SessionId, AckFor, PeerId, Nonce) ->
+    {ok, #{version => Version,
            type => ack,
            session_id => SessionId,
            ack_for => AckFor,
            peer_id => PeerId,
            nonce => Nonce}};
-decode_basic_type(Type, _SessionId, _AckFor, _PeerId, _Nonce) ->
+decode_basic_type(_Version, Type, _SessionId, _AckFor, _PeerId, _Nonce) ->
     {error, {unsupported_handshake_type, Type}}.
+
+exchange_kind_code(initial) -> 0;
+exchange_kind_code(rekey) -> 1;
+exchange_kind_code(Kind) -> erlang:error({invalid_exchange_kind, Kind}).
+
+exchange_kind(0) -> {ok, initial};
+exchange_kind(1) -> {ok, rekey};
+exchange_kind(Code) -> {error, {unsupported_exchange_kind, Code}}.
 
 validate_lengths(PeerLen, CertLen, SignatureLen)
   when PeerLen =< 16#FFFF, CertLen =< 16#FFFFFFFF, SignatureLen =< 16#FFFF -> ok;
