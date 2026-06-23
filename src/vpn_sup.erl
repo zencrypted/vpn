@@ -20,6 +20,12 @@ init([]) ->
         period => 5
     },
     ChildSpecs = [
+        #{id => vpn_peer_registry,
+          start => {vpn_peer_registry, start_link, []},
+          restart => permanent,
+          shutdown => 5000,
+          type => worker,
+          modules => [vpn_peer_registry]},
         #{id => vpn_peer_sup,
           start => {vpn_peer_sup, start_link, []},
           restart => permanent,

@@ -37,19 +37,22 @@ runtime summaries together with its reason. OVPN certificate validity metadata,
 including expiration, is also exposed through safe management status. This bypass
 remains debug-only and is never read from the OVPN envelope.
 
-## TD-003 — Certificate-authenticated session
+## Completed — Certificate-authenticated session lifecycle
 
-The current dataplane uses a static PSK. Replace or encapsulate it with a
-standard authenticated handshake that proves certificate/private-key ownership,
-validates the remote service, derives per-session traffic keys, and prevents
-replay. Do not invent an unaudited custom handshake.
+Certificate-control peers mutually authenticate certificate ownership, derive
+directional keys from ephemeral P-384 ECDH with HKDF-SHA256, rotate key epochs
+manually or automatically, and enforce replay windows with previous-epoch grace.
+The legacy PSK path remains only as an explicit compatibility mode.
 
-## TD-004 — Runtime provisioning registry
+## In progress — Runtime provisioning registry
 
-Peers are currently loaded from `sys.config`. Add a runtime registry and a
-provisioning API that can create, update, disable, revoke, and reconcile peers
-without exposing client private keys. The registry, not OVPN comments, must hold
-Device binding, 2FA policy, certificate lineage, and authorization state.
+`vpn_peer_registry` now provides an ETS-backed runtime inventory bootstrapped
+from trusted application configuration. Safe registry reads expose provisioning
+metadata without PSKs, private-key paths, or complete runtime configuration.
+Enabled entries drive startup and explicit `vpn_manager:reload_config/0`
+reconciliation. Remaining work includes automatic live reconciliation, IAS
+synchronization, revocation, Device binding, 2FA policy, and persistent/audited
+provisioning storage.
 
 ## TD-005 — Device-lock authorization
 

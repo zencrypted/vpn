@@ -1,5 +1,5 @@
 %%%-------------------------------------------------------------------
-%% @doc Read-only VPN management API.
+%% @doc VPN runtime management and explicit registry reconciliation API.
 %%%-------------------------------------------------------------------
 -module(vpn_manager).
 
@@ -181,7 +181,7 @@ certificate_summary(Identity) ->
       certificate_path => maps:get(certificate_path, Identity, undefined)}.
 
 reload_config() ->
-    ConfiguredIds = configured_peer_ids(),
+    ConfiguredIds = desired_peer_ids(),
     RunningIds = running_peer_ids(),
     ToStop = RunningIds -- ConfiguredIds,
     ToStart = ConfiguredIds -- RunningIds,
@@ -225,6 +225,14 @@ find_peer(PeerId) ->
     end.
 
 start_configured_peer(PeerId) ->
+    case peer_enabled(PeerId) of
+        false ->
+            {error, disabled};
+        true ->
+            start_enabled_peer(PeerId)
+    end.
+
+start_enabled_peer(PeerId) ->
     case find_peer_config(PeerId) of
         {ok, PeerConfig} ->
             case vpn_peer_sup:start_peer(PeerConfig) of
@@ -244,12 +252,26 @@ start_configured_peer(PeerId) ->
     end.
 
 find_peer_config(PeerId) ->
-    case [PeerConfig || PeerConfig <- configured_peers(),
-                        maps:get(id, PeerConfig) =:= PeerId] of
-        [PeerConfig | _] ->
-            {ok, PeerConfig};
-        [] ->
-            {error, not_found}
+    case whereis(vpn_peer_registry) of
+        undefined ->
+            case [PeerConfig || PeerConfig <- configured_peers(),
+                                maps:get(id, PeerConfig) =:= PeerId] of
+                [PeerConfig | _] -> {ok, PeerConfig};
+                [] -> {error, not_found}
+            end;
+        _Pid ->
+            vpn_peer_registry:config(PeerId)
+    end.
+
+peer_enabled(PeerId) ->
+    case whereis(vpn_peer_registry) of
+        undefined ->
+            lists:member(PeerId, configured_peer_ids());
+        _Pid ->
+            case vpn_peer_registry:get(PeerId) of
+                {ok, #{enabled := Enabled}} -> Enabled;
+                {error, not_found} -> false
+            end
     end.
 
 collect_stop_results([], Acc) ->
@@ -276,7 +298,21 @@ append_result(Key, Value, Acc) ->
     maps:update_with(Key, fun(Values) -> Values ++ [Value] end, [Value], Acc).
 
 configured_peer_ids() ->
-    lists:sort([maps:get(id, PeerConfig) || PeerConfig <- configured_peers()]).
+    case whereis(vpn_peer_registry) of
+        undefined ->
+            lists:sort([maps:get(id, PeerConfig) || PeerConfig <- configured_peers()]);
+        _Pid ->
+            [maps:get(id, Entry) || Entry <- vpn_peer_registry:list()]
+    end.
+
+desired_peer_ids() ->
+    case whereis(vpn_peer_registry) of
+        undefined ->
+            configured_peer_ids();
+        _Pid ->
+            lists:sort([maps:get(id, PeerConfig)
+                        || PeerConfig <- vpn_peer_registry:enabled_configs()])
+    end.
 
 running_peer_ids() ->
     lists:sort([PeerId || {{vpn_peer, PeerId}, Pid, worker, _Modules} <- peer_children(),

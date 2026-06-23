@@ -3,8 +3,7 @@
 VPN Overlay Network for the Zencrypted ecosystem.
 
 This repository currently contains a minimal Erlang/OTP VPN dataplane prototype.
-Certificate-control peers now derive directional dataplane keys with ephemeral ECDH and HKDF-SHA256. Legacy non-certificate peers may still use PSK mode. It intentionally does not
-implement peer/session management, CA services, or key exchange yet.
+Certificate-control peers now derive directional dataplane keys with ephemeral ECDH and HKDF-SHA256. Legacy non-certificate peers may still use PSK mode. A runtime peer registry now supports trusted inventory mutation and explicit reconciliation; persistent provisioning, CA services, and IAS policy synchronization remain future work.
 
 ## Architecture
 
@@ -65,11 +64,35 @@ private-key body is never returned or logged.
 - `vpn_link` - bidirectional TUN/TAP to UDP link.
 - `vpn_udp_sink` - local UDP test sink.
 - `vpn_peer` - public runtime peer abstraction.
-- `vpn_manager` - read-only management API for supervised peers.
+- `vpn_manager` - management API for supervised peers.
+- `vpn_peer_registry` - ETS-backed runtime registry bootstrapped from trusted application configuration.
 - `vpn_trust_store` - development CA certificate trust store.
 - `vpn_ovpn_envelope` - canonical OVPN subset constants and value validators.
 - `vpn_ovpn_parser` - strict OVPN parser and normalized peer-config conversion.
 - `vpn_ovpn_identity` - local OVPN certificate, trust, and key-ownership validation.
+
+## Runtime peer registry
+
+`vpn_peer_registry` is the trusted runtime inventory for provisioned peers. It is
+bootstrapped from `peers` and `ovpn_sessions` in application configuration, so
+existing deployments keep their startup behavior. Public `list/0` and `get/1`
+results contain only safe provisioning metadata and never include PSKs, private
+key paths, or complete runtime configuration.
+
+The first registry stage supports runtime inventory mutation:
+
+```erlang
+vpn_peer_registry:list().
+vpn_peer_registry:get(PeerId).
+vpn_peer_registry:put(PeerConfig).
+vpn_peer_registry:disable(PeerId).
+vpn_peer_registry:enable(PeerId).
+vpn_peer_registry:remove(PeerId).
+```
+
+`vpn_manager:reload_config/0` reconciles supervised peers against the enabled
+registry entries. Live automatic reconciliation and IAS synchronization remain
+separate follow-up stages.
 
 ## Build
 

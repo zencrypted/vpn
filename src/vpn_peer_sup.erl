@@ -47,9 +47,12 @@ peer_child_spec(PeerConfig) ->
 
 
 configured_peers() ->
-    case vpn_session_config:configured_peers() of
-        {ok, Peers} ->
-            Peers;
-        {error, Reason} ->
-            erlang:error(Reason)
+    case whereis(vpn_peer_registry) of
+        undefined ->
+            case vpn_session_config:configured_peers() of
+                {ok, Peers} -> Peers;
+                {error, Reason} -> erlang:error(Reason)
+            end;
+        _Pid ->
+            vpn_peer_registry:enabled_configs()
     end.
