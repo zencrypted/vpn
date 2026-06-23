@@ -233,7 +233,7 @@ init_tun(UdpPid, TunName, TunIp, Mode, RemoteIp, RemoteUdpPort, PeerId, RemotePe
                                  auto_rekey_last_started_at => undefined,
                                  auto_rekey_last_completed_at => undefined,
                                  auto_rekey_last_error => undefined,
-                                 auto_rekey_cooldown_until => 0,
+                                 auto_rekey_cooldown_until => undefined,
                                  tx_seq => 0,
                                  rx_seq => 0,
                                  remote_ip => RemoteIp,
@@ -795,8 +795,10 @@ auto_rekey_info(State) ->
       last_started_at => maps:get(auto_rekey_last_started_at, State, undefined),
       last_completed_at => maps:get(auto_rekey_last_completed_at, State, undefined),
       last_error => maps:get(auto_rekey_last_error, State, undefined),
-      cooldown_remaining_ms => max(0, maps:get(auto_rekey_cooldown_until, State, 0) -
-                                      erlang:monotonic_time(millisecond))}.
+      cooldown_remaining_ms =>
+          vpn_auto_rekey:cooldown_remaining_ms(
+            maps:get(auto_rekey_cooldown_until, State, undefined),
+            erlang:monotonic_time(millisecond))}.
 
 auto_rekey_enabled(State) ->
     maps:get(auto_rekey_after_seconds, State, 0) > 0 orelse
@@ -840,7 +842,8 @@ auto_rekey_reason(State) ->
     NowMs = erlang:monotonic_time(millisecond),
     case {auto_rekey_enabled(State),
           maps:get(auto_rekey_in_progress, State, false),
-          NowMs < maps:get(auto_rekey_cooldown_until, State, 0),
+          vpn_auto_rekey:cooldown_active(
+            maps:get(auto_rekey_cooldown_until, State, undefined), NowMs),
           maps:get(session_lifecycle, State, undefined)} of
         {true, false, false, Lifecycle} when is_map(Lifecycle) ->
             Info = vpn_session_lifecycle:info(Lifecycle),
@@ -862,7 +865,7 @@ mark_auto_rekey_completed(State, CurrentEpoch) when CurrentEpoch > 0 ->
         true ->
             incr_counter(State#{auto_rekey_in_progress := false,
                                 auto_rekey_last_completed_at := erlang:system_time(second),
-                                auto_rekey_cooldown_until := 0},
+                                auto_rekey_cooldown_until := undefined},
                          auto_rekeys_completed);
         false -> State
     end;
@@ -875,7 +878,9 @@ mark_auto_rekey_failed(State, Reason) ->
                                 ?DEFAULT_AUTO_REKEY_FAILURE_COOLDOWN_MS),
             incr_counter(State#{auto_rekey_in_progress := false,
                                 auto_rekey_last_error := iolist_to_binary(io_lib:format("~p", [Reason])),
-                                auto_rekey_cooldown_until := erlang:monotonic_time(millisecond) + Cooldown},
+                                auto_rekey_cooldown_until :=
+                                    vpn_auto_rekey:cooldown_until(
+                                      erlang:monotonic_time(millisecond), Cooldown)},
                          auto_rekeys_failed);
         false -> State
     end.
@@ -964,10 +969,10 @@ send_debug_frames_loop(Count, Count, State) ->
 send_debug_frames_loop(Count, Index,
                        State = #{udp_pid := UdpPid,
                                  remote_ip := RemoteIp,
-                                 remote_udp_port := RemoteUdpPort}) ->
+                                 remote_udp_port := RemoteUdpPort,
+                                 tx_seq := TxSeq}) ->
     Packet = debug_payload(Index),
     Size = byte_size(Packet),
-    #{tx_seq := TxSeq} = State,
     case encode_and_send(Packet, debug, Size, UdpPid, RemoteIp, RemoteUdpPort, #{tx_seq := TxSeq} = State) of
         {noreply, State1 = #{tx_seq := TxSeq2}} when TxSeq2 > TxSeq ->
             send_debug_frames_loop(Count, Index + 1, State1);
