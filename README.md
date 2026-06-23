@@ -1467,3 +1467,15 @@ CurrentEpoch = maps:get(current_epoch, Before),
 The snapshot reports handshake status, current and previous key epochs, previous
 epoch grace time, rekey counters, and packet counters since the latest rekey. It
 never exposes session keys or private key material.
+
+### Debug peer restart probes
+
+When `debug_replay_controls` is enabled, integration tests may force a supervised peer restart without changing provisioning state:
+
+```erlang
+{ok, OldPid} = vpn_manager:debug_peer_pid(client_a),
+{ok, OldPid} = vpn_manager:debug_restart_peer(client_a),
+{ok, NewPid} = vpn_manager:debug_wait_for_peer_restart(client_a, OldPid, 5000).
+```
+
+The supervisor restarts the existing permanent child specification, so the runtime registry entry and provisioning revision are preserved. These APIs expose process identifiers only and never return session keys or private identity material.

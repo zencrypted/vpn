@@ -15,6 +15,7 @@
          rekey/1, debug_frame_history/1, debug_replay_frame/3, debug_send_frames/2,
          debug_send_payload/2, debug_received_payloads/1, debug_clear_received_payloads/1,
          debug_session_state/1, debug_wait_for_epoch/3,
+         debug_peer_pid/1, debug_restart_peer/1, debug_wait_for_peer_restart/3,
          start_peer/1,
          stop_peer/1,
          reload_config/0,
@@ -133,6 +134,27 @@ debug_wait_for_epoch(PeerId, ExpectedEpoch, TimeoutMs)
     Deadline = erlang:monotonic_time(millisecond) + TimeoutMs,
     wait_for_epoch(PeerId, ExpectedEpoch, Deadline).
 
+debug_peer_pid(PeerId) ->
+    case debug_controls_enabled(PeerId) of
+        true -> find_peer(PeerId);
+        false -> {error, debug_replay_controls_disabled};
+        {error, _} = Error -> Error
+    end.
+
+debug_restart_peer(PeerId) ->
+    case debug_peer_pid(PeerId) of
+        {ok, Pid} ->
+            exit(Pid, kill),
+            {ok, Pid};
+        {error, _} = Error ->
+            Error
+    end.
+
+debug_wait_for_peer_restart(PeerId, OldPid, TimeoutMs)
+  when is_pid(OldPid), is_integer(TimeoutMs), TimeoutMs >= 0 ->
+    Deadline = erlang:monotonic_time(millisecond) + TimeoutMs,
+    wait_for_peer_restart(PeerId, OldPid, Deadline).
+
 wait_for_epoch(PeerId, ExpectedEpoch, Deadline) ->
     case debug_session_state(PeerId) of
         {ok, #{current_epoch := ExpectedEpoch} = SessionState} ->
@@ -144,6 +166,23 @@ wait_for_epoch(PeerId, ExpectedEpoch, Deadline) ->
             end;
         {error, _} = Error ->
             Error
+    end.
+
+wait_for_peer_restart(PeerId, OldPid, Deadline) ->
+    case find_peer(PeerId) of
+        {ok, NewPid} when NewPid =/= OldPid ->
+            {ok, NewPid};
+        _ ->
+            case erlang:monotonic_time(millisecond) >= Deadline of
+                true -> {error, {peer_restart_timeout, PeerId, OldPid}};
+                false -> timer:sleep(25), wait_for_peer_restart(PeerId, OldPid, Deadline)
+            end
+    end.
+
+debug_controls_enabled(PeerId) ->
+    case find_peer_config(PeerId) of
+        {ok, PeerConfig} -> maps:get(debug_replay_controls, PeerConfig, false);
+        {error, _} = Error -> Error
     end.
 
 running_peer_status(PeerId) ->

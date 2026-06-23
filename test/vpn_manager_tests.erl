@@ -129,6 +129,26 @@ lifecycle_test_() ->
               ?_assertEqual({error, not_found}, vpn_manager:start_peer(missing_peer))]
      end}.
 
+debug_peer_restart_test_() ->
+    {setup,
+     fun start_peer_sup/0,
+     fun stop_peer_sup/1,
+     fun(_SupPid) ->
+             [?_test(begin
+                          {ok, OldPid} = vpn_manager:debug_peer_pid(peer_a),
+                          ?assert(is_process_alive(OldPid)),
+                          ?assertEqual({ok, OldPid},
+                                       vpn_manager:debug_restart_peer(peer_a)),
+                          {ok, NewPid} =
+                              vpn_manager:debug_wait_for_peer_restart(peer_a, OldPid, 1000),
+                          ?assert(NewPid =/= OldPid),
+                          ?assert(is_process_alive(NewPid)),
+                          ?assertEqual(true, vpn_manager:peer_running(peer_a)),
+                          ?assertEqual({error, not_found},
+                                       vpn_manager:debug_peer_pid(missing_peer))
+                      end)]
+     end}.
+
 reload_config_test_() ->
     {setup,
      fun start_peer_sup/0,
@@ -334,6 +354,7 @@ peer_config(PeerId) ->
       ip => "10.20.20.1",
       remote_peer_id => remote_peer_id(PeerId),
       psk => <<"test-psk-should-not-leak">>,
+      debug_replay_controls => true,
       certificate_path => certificate_path(PeerId),
       private_key_path => private_key_path(PeerId),
       ca_certificate_path => "priv/certs/ca.crt"}.
