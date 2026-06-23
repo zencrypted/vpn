@@ -139,6 +139,109 @@ new_peer_requires_runtime_config_test_() ->
                                                                         enabled => false}}))]
      end}.
 
+static_template_resolver_lifecycle_test_() ->
+    {setup,
+     fun setup_with_runtime/0,
+     fun cleanup_with_runtime/1,
+     fun({_Registry, _Provisioning, _PeerSup, _Reconciler}) ->
+             [?_test(begin
+                          application:set_env(vpn, runtime_config_resolver, disabled),
+                          ?assertEqual({error, runtime_config_required},
+                                       vpn_provisioning:apply(new_peer_command(1, upsert,
+                                                                               #{enabled => true,
+                                                                                 authorized => true}))),
+
+                          application:set_env(vpn, runtime_config_resolver, static_template),
+                          application:set_env(vpn, runtime_config_template, static_template()),
+
+                          Upsert = new_peer_command(1, upsert,
+                                                    #{enabled => true,
+                                                      authorized => true,
+                                                      authorization_mode => policy,
+                                                      authorization_reason => profile_allows_vpn,
+                                                      device_id => <<"ias-device-2">>,
+                                                      certificate_fingerprint => <<"IAS-FP-2">>}),
+                          ?assertMatch({ok, #{operation := upsert}},
+                                       vpn_provisioning:apply(Upsert)),
+                          ?assert(wait_until(fun() ->
+                                                    vpn_manager:peer_running(peer_b)
+                                            end, 50)),
+
+                          {ok, SafeEntry} = vpn_peer_registry:get(peer_b),
+                          ?assertEqual(<<"ias-device-2">>, maps:get(device_id, SafeEntry)),
+                          ?assertEqual(<<"IAS-FP-2">>,
+                                       maps:get(certificate_fingerprint, SafeEntry)),
+                          ?assertEqual(policy, maps:get(authorization_mode, SafeEntry)),
+                          ?assertEqual(true, maps:get(authorized, SafeEntry)),
+                          {ok, InternalConfig} = vpn_peer_registry:config(peer_b),
+                          ?assertEqual(peer_b, maps:get(id, InternalConfig)),
+                          ?assertEqual(vpn_peer_registry_tests,
+                                       maps:get(peer_module, InternalConfig)),
+                          ?assertEqual(true,
+                                       maps:is_key(ovpn_identity, InternalConfig) orelse
+                                       maps:is_key(certificate_path, InternalConfig)),
+                          ?assertEqual(false, maps:is_key(session_key, InternalConfig)),
+                          ?assertEqual(false, maps:is_key(replay_window, InternalConfig)),
+                          ?assertEqual(false, maps:is_key(link_pid, InternalConfig)),
+
+                          ?assertEqual({ok, unchanged}, vpn_provisioning:apply(Upsert)),
+
+                          ?assertMatch({ok, #{operation := disable}},
+                                       vpn_provisioning:apply(new_peer_command(2, disable, #{}))),
+                          ?assert(wait_until(fun() ->
+                                                    vpn_manager:peer_running(peer_b) =:= false
+                                            end, 50)),
+
+                          ?assertMatch({ok, #{operation := enable}},
+                                       vpn_provisioning:apply(new_peer_command(3, enable, #{}))),
+                          ?assert(wait_until(fun() ->
+                                                    vpn_manager:peer_running(peer_b)
+                                            end, 50)),
+
+                          ?assertMatch({ok, #{operation := revoke}},
+                                       vpn_provisioning:apply(new_peer_command(4, revoke,
+                                                                               #{authorization_reason => certificate_revoked}))),
+                          ?assert(wait_until(fun() ->
+                                                    vpn_manager:peer_running(peer_b) =:= false
+                                            end, 50)),
+                          {ok, Revoked} = vpn_peer_registry:get(peer_b),
+                          ?assertEqual(true, maps:get(revoked, Revoked)),
+                          ?assertEqual(false, maps:get(authorized, Revoked)),
+                          ?assertEqual(false, maps:get(enabled, Revoked)),
+                          ?assertEqual(certificate_revoked,
+                                       maps:get(authorization_reason, Revoked)),
+
+                          ?assertEqual({error, revoked},
+                                       vpn_provisioning:apply(new_peer_command(5, enable, #{}))),
+
+                          ?assertEqual({error, revision_conflict},
+                                       vpn_provisioning:apply(new_peer_command(4, disable, #{}))),
+
+                          ?assertEqual({ok, removed},
+                                       vpn_provisioning:apply(new_peer_command(6, remove, #{}))),
+                          ?assertEqual({error, not_found}, vpn_peer_registry:get(peer_b)),
+                          ?assertEqual({error, stale_revision},
+                                       vpn_provisioning:apply(new_peer_command(5, upsert, #{}))),
+
+                          {ok, Existing} = vpn_peer_registry:get(peer_a),
+                          ?assertEqual(peer_a, maps:get(id, Existing))
+                      end)]
+     end}.
+
+invalid_static_template_fails_closed_test_() ->
+    {setup,
+     fun setup/0,
+     fun cleanup/1,
+     fun({_Registry, _Provisioning}) ->
+             application:set_env(vpn, runtime_config_resolver, static_template),
+             application:set_env(vpn, runtime_config_template,
+                                 maps:remove(local_udp_port, static_template())),
+             [?_assertEqual({error, {missing_config_key, local_udp_port}},
+                            vpn_provisioning:apply(new_peer_command(1, upsert,
+                                                                    #{enabled => true,
+                                                                      authorized => true})))]
+     end}.
+
 invalid_command_test_() ->
     {setup,
      fun setup/0,
@@ -160,6 +263,8 @@ command(Revision, Operation, Desired) ->
 setup() ->
     stop(vpn_provisioning),
     stop(vpn_peer_registry),
+    application:unset_env(vpn, runtime_config_resolver),
+    application:unset_env(vpn, runtime_config_template),
     application:set_env(vpn, peers, [peer_config(peer_a)]),
     application:set_env(vpn, ovpn_sessions, []),
     {ok, Registry} = vpn_peer_registry:start_link(),
@@ -169,6 +274,34 @@ setup() ->
 cleanup({Registry, Provisioning}) ->
     shutdown(Provisioning),
     shutdown(Registry),
+    application:unset_env(vpn, runtime_config_resolver),
+    application:unset_env(vpn, runtime_config_template),
+    application:unset_env(vpn, peers),
+    application:unset_env(vpn, ovpn_sessions),
+    ok.
+
+setup_with_runtime() ->
+    stop(vpn_provisioning),
+    stop(vpn_peer_reconciler),
+    stop(vpn_peer_sup),
+    stop(vpn_peer_registry),
+    application:unset_env(vpn, runtime_config_resolver),
+    application:unset_env(vpn, runtime_config_template),
+    application:set_env(vpn, peers, [peer_config(peer_a)]),
+    application:set_env(vpn, ovpn_sessions, []),
+    {ok, Registry} = vpn_peer_registry:start_link(),
+    {ok, PeerSup} = vpn_peer_sup:start_link(),
+    {ok, Reconciler} = vpn_peer_reconciler:start_link(),
+    {ok, Provisioning} = vpn_provisioning:start_link(),
+    {Registry, Provisioning, PeerSup, Reconciler}.
+
+cleanup_with_runtime({Registry, Provisioning, PeerSup, Reconciler}) ->
+    shutdown(Provisioning),
+    shutdown(Reconciler),
+    shutdown(PeerSup),
+    shutdown(Registry),
+    application:unset_env(vpn, runtime_config_resolver),
+    application:unset_env(vpn, runtime_config_template),
     application:unset_env(vpn, peers),
     application:unset_env(vpn, ovpn_sessions),
     ok.
@@ -185,6 +318,34 @@ peer_config(PeerId) ->
       authorization_reason => development_bypass,
       psk => <<"secret">>}.
 
+new_peer_command(Revision, Operation, Desired) ->
+    #{peer_id => peer_b,
+      revision => Revision,
+      operation => Operation,
+      source => ias,
+      desired_state => Desired}.
+
+static_template() ->
+    #{id => ias_template_peer,
+      peer_module => vpn_peer_registry_tests,
+      mode => tun,
+      ifname => <<"tun11">>,
+      ip => "10.20.30.11",
+      local_udp_port => 5561,
+      remote_ip => {127,0,0,1},
+      remote_udp_port => 5560,
+      remote_peer_id => peer_a,
+      authorization_mode => development_bypass,
+      authorized => true,
+      authorization_reason => development_bypass,
+      psk => <<"0123456789abcdef0123456789abcdef">>,
+      certificate_path => "priv/certs/peer_a.crt",
+      private_key_path => "priv/certs/peer_a.key",
+      ca_certificate_path => "priv/certs/ca.crt",
+      session_key => <<"do-not-copy">>,
+      replay_window => #{counter => 1},
+      link_pid => self()}.
+
 stop(Name) ->
     case whereis(Name) of undefined -> ok; Pid -> shutdown(Pid) end.
 
@@ -199,4 +360,12 @@ wait(Pid, N) ->
     case is_process_alive(Pid) of
         false -> ok;
         true -> timer:sleep(10), wait(Pid, N - 1)
+    end.
+
+wait_until(_Fun, 0) ->
+    false;
+wait_until(Fun, Attempts) ->
+    case Fun() of
+        true -> true;
+        false -> timer:sleep(10), wait_until(Fun, Attempts - 1)
     end.

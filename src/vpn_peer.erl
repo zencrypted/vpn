@@ -6,7 +6,7 @@
 -behaviour(gen_server).
 
 -export([start_link/1, stop/1, stats/1, reset_stats/1, rekey/1, debug_frame_history/1, debug_replay_frame/3, debug_send_frames/2,
-         identity/1, identity_info/1, config/1]).
+         identity/1, identity_info/1, config/1, validate_runtime_config/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 start_link(Config) ->
@@ -44,12 +44,15 @@ config(Pid) ->
 
 init(Config) ->
     process_flag(trap_exit, true),
-    case validate_config(Config) of
+    case validate_runtime_config(Config) of
         ok ->
             start_link_with_identity(Config);
         {error, Reason} ->
             {stop, Reason}
     end.
+
+validate_runtime_config(Config) ->
+    validate_config(Config).
 
 handle_call(stats, _From, State = #{id := Id, link_pid := LinkPid}) ->
     LinkStats = vpn_link:stats(LinkPid),

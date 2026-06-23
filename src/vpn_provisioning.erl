@@ -124,7 +124,7 @@ base_config(PeerId, Desired) ->
         {error, not_found} ->
             case maps:get(runtime_config, Desired, undefined) of
                 Runtime when is_map(Runtime) -> {ok, Runtime#{id => PeerId}};
-                _ -> {error, runtime_config_required}
+                _ -> vpn_runtime_config_resolver:resolve(PeerId, Desired)
             end
     end.
 

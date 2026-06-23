@@ -126,6 +126,20 @@ plain `enable` command until a higher-revision `upsert` explicitly sets
 `revoked => false`. Public registry and provisioning history responses never
 contain PSKs or private-key material.
 
+IAS canonical commands intentionally do not own VPN transport internals. When a
+new IAS peer has no stored runtime config, VPN may resolve it locally through
+`runtime_config_resolver`:
+
+- `disabled` keeps the default fail-closed behavior and returns
+  `{error, runtime_config_required}`;
+- `static_template` derives runtime config from trusted VPN application
+  configuration.
+
+`static_template` is for development and integration flows. It may reuse
+explicit configured local key, certificate, or OVPN references, but it does not
+inherit session keys, replay state, ECDH material, PIDs, counters, or other
+ephemeral runtime data from the template.
+
 Use `vpn_provisioning:status/0` for counters and
 `vpn_provisioning:history/1` for bounded per-peer audit history.
 
