@@ -140,6 +140,11 @@ explicit configured local key, certificate, or OVPN references, but it does not
 inherit session keys, replay state, ECDH material, PIDs, counters, or other
 ephemeral runtime data from the template.
 
+The shipped debug template starts resolved IAS peers with the production
+`vpn_peer` runtime module. Its fixed TUN name and UDP port make it suitable for
+one dynamically provisioned debug peer at a time; additional concurrent peers
+require distinct trusted runtime templates.
+
 Use `vpn_provisioning:status/0` for counters and
 `vpn_provisioning:history/1` for bounded per-peer audit history.
 
