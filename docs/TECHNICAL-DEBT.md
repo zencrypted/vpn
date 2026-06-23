@@ -116,10 +116,11 @@ future work.
 ## Replay-window follow-ups
 
 The authenticated dataplane now keeps a 64-packet sliding replay window per key
-epoch and retains the immediately previous receive key for a five-second grace
-period after rekey. The following hardening remains intentionally separate:
+epoch and retains the immediately previous receive key for a configurable
+grace period after rekey (five seconds by default; fifteen seconds in the debug
+profile). The following hardening remains intentionally separate:
 
-- make replay-window size and previous-epoch grace duration policy controlled;
+- make replay-window size policy controlled;
 - persist no replay state across process restarts (a fresh handshake is required);
 - add deterministic integration injection hooks for duplicate and delayed UDP
   packets without exposing them in production APIs;

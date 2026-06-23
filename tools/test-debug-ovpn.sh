@@ -46,4 +46,6 @@ KEY_AFTER=$(sha256sum "$OUT/keys/client_a.key")
 KEY_FORCED=$(sha256sum "$OUT/keys/client_a.key")
 [ "$KEY_FORCED" != "$KEY_AFTER" ]
 
+grep -q 'previous_epoch_grace_ms => 15000' "$REPO_DIR/config/sys.debug.config"
+
 echo "Debug OVPN bootstrap tests passed."

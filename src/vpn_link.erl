@@ -6,7 +6,7 @@
 -behaviour(gen_server).
 
 -define(REPLAY_WINDOW_SIZE, 64).
--define(PREVIOUS_EPOCH_GRACE_MS, 5000).
+-define(DEFAULT_PREVIOUS_EPOCH_GRACE_MS, 5000).
 
 -export([start_link/5, start_link/6, start_link/8, start_link/9, start_link/10,
          stop/1, stats/1, reset_stats/1, rekey/1]).
@@ -142,14 +142,16 @@ handle_info({vpn_udp_packet, UdpPid, Ip, Port, Packet},
     end;
 handle_info({vpn_udp_packet, _OtherUdpPid, _Ip, _Port, _Packet}, State) ->
     {noreply, State};
-handle_info({expire_previous_crypto, Epoch},
-            State = #{previous_crypto := #{key_epoch := Epoch}}) ->
+handle_info({expire_previous_crypto, Epoch, Token},
+            State = #{previous_crypto := #{key_epoch := Epoch},
+                      previous_crypto_timer_token := Token}) ->
     logger:debug("vpn_link expired previous receive key epoch ~p", [Epoch]),
     {noreply, State#{previous_crypto := undefined,
                      previous_replay_window := undefined,
                      previous_crypto_expires_at := undefined,
-                     previous_crypto_timer := undefined}};
-handle_info({expire_previous_crypto, _Epoch}, State) ->
+                     previous_crypto_timer := undefined,
+                     previous_crypto_timer_token := undefined}};
+handle_info({expire_previous_crypto, _Epoch, _Token}, State) ->
     {noreply, State};
 handle_info({'EXIT', TunPid, Reason}, State = #{tun_pid := TunPid}) ->
     {stop, {tun_exit, Reason}, State};
@@ -177,6 +179,11 @@ init_tun(UdpPid, TunName, TunIp, Mode, RemoteIp, RemoteUdpPort, PeerId, RemotePe
                                  previous_replay_window => undefined,
                                  previous_crypto_expires_at => undefined,
                                  previous_crypto_timer => undefined,
+                                 previous_crypto_timer_token => undefined,
+                                 previous_epoch_grace_ms =>
+                                     maps:get(previous_epoch_grace_ms,
+                                              HandshakeOptions,
+                                              ?DEFAULT_PREVIOUS_EPOCH_GRACE_MS),
                                  current_replay_window => vpn_replay_window:new(?REPLAY_WINDOW_SIZE),
                                  crypto_session_id => undefined,
                                  handshake => Handshake,
@@ -342,21 +349,25 @@ install_session_crypto(State, TxKey, RxKey, PeerId, KeyEpoch, SessionId, Lifecyc
     CurrentReplay = maps:get(current_replay_window, State,
                              vpn_replay_window:new(?REPLAY_WINDOW_SIZE)),
     State1 = cancel_previous_crypto_timer(State),
-    {PreviousCrypto, PreviousReplay, ExpiresAt, Timer} =
+    GraceMs = maps:get(previous_epoch_grace_ms, State,
+                       ?DEFAULT_PREVIOUS_EPOCH_GRACE_MS),
+    {PreviousCrypto, PreviousReplay, ExpiresAt, Timer, TimerToken} =
         case CurrentCrypto of
             Crypto when is_map(Crypto) ->
                 Epoch = maps:get(key_epoch, Crypto, 0),
-                Deadline = erlang:monotonic_time(millisecond) + ?PREVIOUS_EPOCH_GRACE_MS,
-                Ref = erlang:send_after(?PREVIOUS_EPOCH_GRACE_MS,
-                                        self(), {expire_previous_crypto, Epoch}),
-                {Crypto, CurrentReplay, Deadline, Ref};
+                Deadline = erlang:monotonic_time(millisecond) + GraceMs,
+                Token = make_ref(),
+                Ref = erlang:send_after(GraceMs, self(),
+                                        {expire_previous_crypto, Epoch, Token}),
+                {Crypto, CurrentReplay, Deadline, Ref, Token};
             _ ->
-                {undefined, undefined, undefined, undefined}
+                {undefined, undefined, undefined, undefined, undefined}
         end,
     State1#{previous_crypto := PreviousCrypto,
             previous_replay_window := PreviousReplay,
             previous_crypto_expires_at := ExpiresAt,
             previous_crypto_timer := Timer,
+            previous_crypto_timer_token := TimerToken,
             current_replay_window := vpn_replay_window:new(?REPLAY_WINDOW_SIZE),
             crypto := vpn_crypto:new_session(TxKey, RxKey, PeerId, KeyEpoch),
             crypto_session_id := SessionId,
@@ -369,7 +380,8 @@ cancel_previous_crypto_timer(State) ->
         undefined -> State;
         Ref ->
             _ = erlang:cancel_timer(Ref),
-            State#{previous_crypto_timer := undefined}
+            State#{previous_crypto_timer := undefined,
+                   previous_crypto_timer_token := undefined}
     end.
 
 replay_info(State) ->
@@ -393,6 +405,8 @@ replay_info(State) ->
       current => Current,
       previous_epoch => PreviousEpoch,
       previous => Previous,
+      previous_epoch_grace_ms => maps:get(previous_epoch_grace_ms, State,
+                                           ?DEFAULT_PREVIOUS_EPOCH_GRACE_MS),
       previous_epoch_expires_in_ms => ExpiresIn}.
 
 crypto_info(#{crypto := undefined}) -> #{key_source => pending_handshake};

@@ -137,7 +137,9 @@ start_link_from_config(Config, IdentityInfo) ->
 handshake_options(Config, IdentityInfo) ->
     Base = #{mode => maps:get(handshake_mode, Config, disabled),
              retry_interval => maps:get(handshake_retry_interval, Config, 1000),
-             max_retries => maps:get(handshake_max_retries, Config, 5)},
+             max_retries => maps:get(handshake_max_retries, Config, 5),
+             previous_epoch_grace_ms =>
+                 maps:get(previous_epoch_grace_ms, Config, 5000)},
     case maps:get(handshake_mode, Config, disabled) of
         certificate_control ->
             Base#{local_certificate_pem => maps:get(certificate_pem, IdentityInfo),
@@ -201,10 +203,19 @@ missing_key(Config, [Key | Rest]) ->
 
 validate_handshake_config(#{handshake_mode := certificate_control} = Config) ->
     case maps:get(handshake_remote_ca_certificate_path, Config, undefined) of
-        Path when is_list(Path); is_binary(Path) -> ok;
-        _ -> {error, {missing_config_key, handshake_remote_ca_certificate_path}}
+        Path when is_list(Path); is_binary(Path) ->
+            validate_previous_epoch_grace(Config);
+        _ ->
+            {error, {missing_config_key, handshake_remote_ca_certificate_path}}
     end;
-validate_handshake_config(_Config) -> ok.
+validate_handshake_config(Config) ->
+    validate_previous_epoch_grace(Config).
+
+validate_previous_epoch_grace(Config) ->
+    case maps:get(previous_epoch_grace_ms, Config, 5000) of
+        GraceMs when is_integer(GraceMs), GraceMs > 0 -> ok;
+        GraceMs -> {error, {invalid_previous_epoch_grace_ms, GraceMs}}
+    end.
 
 validate_mode(tap) ->
     ok;
@@ -237,6 +248,7 @@ runtime_config(Config) ->
                handshake_mode,
                handshake_retry_interval,
                handshake_max_retries,
+               previous_epoch_grace_ms,
                handshake_remote_ca_certificate_path],
               Config).
 

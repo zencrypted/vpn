@@ -169,6 +169,7 @@ replay_view(Replay) when is_map(Replay) ->
       current => replay_window_view(maps:get(current, Replay, undefined)),
       previous_epoch => json_value(maps:get(previous_epoch, Replay, undefined)),
       previous => replay_window_view(maps:get(previous, Replay, undefined)),
+      previous_epoch_grace_ms => maps:get(previous_epoch_grace_ms, Replay, 0),
       previous_epoch_expires_in_ms =>
           json_value(maps:get(previous_epoch_expires_in_ms, Replay, undefined))}.
 

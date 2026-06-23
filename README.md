@@ -1258,8 +1258,10 @@ Authenticated data frames carry a key epoch and monotonic sequence number. Each
 receive epoch has an independent 64-packet sliding replay window: limited UDP
 reordering is accepted, while duplicate and out-of-window frames are rejected.
 After an authenticated rekey, the previous receive key and its replay window are
-kept for five seconds so delayed UDP packets can finish in flight; the previous
-key is then erased from the link state.
+kept for a configurable grace interval so delayed UDP packets can finish in
+flight; the previous key is then erased from the link state. The production
+default is five seconds. The debug profile uses fifteen seconds so the live
+state can be inspected comfortably from the Erlang shell.
 
 Runtime verification:
 
