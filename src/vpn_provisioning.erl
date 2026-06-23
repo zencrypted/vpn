@@ -50,7 +50,7 @@ handle_call({apply, Command}, _From, State0) ->
             {reply, Reply, State2};
         {error, Reason} ->
             Result = {error, Reason},
-            {reply, Result, record_rejected(command_summary(Command), Result, State1)}
+            {reply, Result, record_rejected(Command, Result, State1)}
     end;
 handle_call(_Request, _From, State) ->
     {reply, {error, unsupported_operation}, State}.
@@ -74,7 +74,7 @@ apply_validated(Command = #{peer_id := PeerId, revision := Revision}, State) ->
                     {Result, record_unchanged(Command, Result, State)};
                 _ ->
                     Result = {error, revision_conflict},
-                    {Result, record_rejected(command_summary(Command), Result, State)}
+                    {Result, record_rejected(Command, Result, State)}
             end;
         _ ->
             case execute(Command) of
@@ -85,7 +85,7 @@ apply_validated(Command = #{peer_id := PeerId, revision := Revision}, State) ->
                     {Result, record_applied(Command, Result, State2)};
                 {error, Reason} ->
                     Result = {error, Reason},
-                    {Result, record_rejected(command_summary(Command), Result, State)}
+                    {Result, record_rejected(Command, Result, State)}
             end
     end.
 
@@ -149,9 +149,10 @@ next_config(disable, Base, _Desired) ->
     {ok, Base#{enabled => false}};
 next_config(revoke, Base, Desired) ->
     Public = maps:without([runtime_config], Desired),
+    Reason = maps:get(authorization_reason, Public, revoked),
     {ok, (maps:merge(Base, Public))#{enabled => false,
                                    authorized => false,
-                                   authorization_reason => revoked,
+                                   authorization_reason => Reason,
                                    revoked => true}}.
 
 
@@ -225,9 +226,21 @@ record_stale(Command, Result, State0) ->
             stale_revisions => maps:get(stale_revisions, State1) + 1,
             last_command => command_summary(Command), last_result => Result}.
 
-record_rejected(Summary, Result, State) ->
+record_rejected(Command, Result, State0) ->
+    State = maybe_add_history(Command, Result, State0),
     State#{commands_rejected => maps:get(commands_rejected, State) + 1,
-           last_command => Summary, last_result => Result}.
+           last_command => command_summary(Command), last_result => Result}.
+
+maybe_add_history(Command, Result, State) when is_map(Command) ->
+    case maps:is_key(peer_id, Command) andalso
+         maps:is_key(revision, Command) andalso
+         maps:is_key(operation, Command) andalso
+         maps:is_key(source, Command) of
+        true -> add_history(Command, Result, State);
+        false -> State
+    end;
+maybe_add_history(_Command, _Result, State) ->
+    State.
 
 add_history(Command, Result, State) ->
     PeerId = maps:get(peer_id, Command),

@@ -57,7 +57,13 @@ provisioning_contract_test_() ->
                           ?assertEqual(4, maps:get(commands_rejected, Status)),
                           ?assertEqual(2, maps:get(stale_revisions, Status)),
                           ?assertEqual(1, maps:get(revocations, Status)),
-                          ?assert(length(vpn_provisioning:history(peer_a)) >= 6)
+                          History = vpn_provisioning:history(peer_a),
+                          ?assert(length(History) >= 10),
+                          ?assert(lists:any(
+                                    fun(#{operation := enable, revision := 4,
+                                          result := {error, revoked}}) -> true;
+                                       (_) -> false
+                                    end, History))
                       end)]
      end}.
 
@@ -87,6 +93,29 @@ authorization_metadata_normalization_test_() ->
                           ?assertEqual(false, maps:get(authorized, DeniedEntry)),
                           ?assertEqual(denied_by_policy,
                                        maps:get(authorization_reason, DeniedEntry))
+                      end)]
+     end}.
+
+revoke_reason_and_rejected_history_test_() ->
+    {setup,
+     fun setup/0,
+     fun cleanup/1,
+     fun({_Registry, _Provisioning}) ->
+             [?_test(begin
+                          Revoke = command(1, revoke,
+                                           #{authorization_reason => certificate_revoked}),
+                          ?assertMatch({ok, #{operation := revoke}},
+                                       vpn_provisioning:apply(Revoke)),
+                          {ok, RevokedEntry} = vpn_peer_registry:get(peer_a),
+                          ?assertEqual(certificate_revoked,
+                                       maps:get(authorization_reason, RevokedEntry)),
+
+                          ?assertEqual({error, revoked},
+                                       vpn_provisioning:apply(command(2, enable, #{}))),
+                          [Rejected | _] = vpn_provisioning:history(peer_a),
+                          ?assertEqual(enable, maps:get(operation, Rejected)),
+                          ?assertEqual(2, maps:get(revision, Rejected)),
+                          ?assertEqual({error, revoked}, maps:get(result, Rejected))
                       end)]
      end}.
 
