@@ -158,7 +158,7 @@ validate_command(Command) when is_map(Command) ->
     Operation = maps:get(operation, Command, undefined),
     Source = maps:get(source, Command, undefined),
     Desired = maps:get(desired_state, Command, #{}),
-    case {valid_peer_id(PeerId), is_integer(Revision) andalso Revision >= 1,
+    case {valid_peer_id(PeerId), is_integer(Revision) andalso Revision >= 0,
           lists:member(Operation, [upsert, enable, disable, revoke, remove]),
           valid_source(Source), is_map(Desired)} of
         {true, true, true, true, true} ->

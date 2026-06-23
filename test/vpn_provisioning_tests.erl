@@ -85,6 +85,8 @@ invalid_command_test_() ->
      fun cleanup/1,
      fun({_Registry, _Provisioning}) ->
              [?_assertEqual({error, invalid_command}, vpn_provisioning:apply(#{})),
+              ?_assertEqual({error, invalid_command},
+                            vpn_provisioning:apply(command(-1, disable, #{}))),
               ?_assertEqual({error, invalid_command}, vpn_provisioning:apply(not_a_map))]
      end}.
 
