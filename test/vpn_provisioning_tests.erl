@@ -51,9 +51,11 @@ provisioning_contract_test_() ->
                                        vpn_provisioning:apply(command(5, upsert, #{}))),
 
                           Status = vpn_provisioning:status(),
-                          ?assertEqual(8, maps:get(commands_received, Status)),
+                          ?assertEqual(10, maps:get(commands_received, Status)),
                           ?assertEqual(5, maps:get(commands_applied, Status)),
                           ?assertEqual(1, maps:get(commands_unchanged, Status)),
+                          ?assertEqual(4, maps:get(commands_rejected, Status)),
+                          ?assertEqual(2, maps:get(stale_revisions, Status)),
                           ?assertEqual(1, maps:get(revocations, Status)),
                           ?assert(length(vpn_provisioning:history(peer_a)) >= 6)
                       end)]
