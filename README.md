@@ -3,7 +3,7 @@
 VPN Overlay Network for the Zencrypted ecosystem.
 
 This repository currently contains a minimal Erlang/OTP VPN dataplane prototype.
-Certificate-control peers now derive directional dataplane keys with ephemeral ECDH and HKDF-SHA256. Legacy non-certificate peers may still use PSK mode. A runtime peer registry now supports trusted inventory mutation and explicit reconciliation; persistent provisioning, CA services, and IAS policy synchronization remain future work.
+Certificate-control peers now derive directional dataplane keys with ephemeral ECDH and HKDF-SHA256. Legacy non-certificate peers may still use PSK mode. A runtime peer registry now supports trusted inventory mutation and automatic live reconciliation; persistent provisioning, CA services, and IAS policy synchronization remain future work.
 
 ## Architecture
 

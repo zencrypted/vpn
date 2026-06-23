@@ -88,6 +88,7 @@ handle_call({put, PeerConfig}, _From, State) when is_map(PeerConfig) ->
             DefaultEnabled = existing_enabled(PeerId),
             Entry = entry(PeerConfig, runtime_api, DefaultEnabled),
             true = ets:insert(?TABLE, {PeerId, Entry}),
+            notify_reconciler(#{action => put, peer_id => PeerId}),
             {reply, {ok, safe_entry(Entry)}, State};
         _ ->
             {reply, {error, invalid_peer_config}, State}
@@ -99,6 +100,9 @@ handle_call({set_enabled, PeerId, Enabled}, _From, State) ->
         {ok, Entry} ->
             Updated = Entry#{enabled => Enabled},
             true = ets:insert(?TABLE, {PeerId, Updated}),
+            notify_reconciler(#{action => set_enabled,
+                                peer_id => PeerId,
+                                enabled => Enabled}),
             {reply, {ok, safe_entry(Updated)}, State};
         {error, not_found} = Error ->
             {reply, Error, State}
@@ -107,6 +111,7 @@ handle_call({remove, PeerId}, _From, State) ->
     case lookup(PeerId) of
         {ok, _Entry} ->
             true = ets:delete(?TABLE, PeerId),
+            notify_reconciler(#{action => remove, peer_id => PeerId}),
             {reply, ok, State};
         {error, not_found} = Error ->
             {reply, Error, State}
@@ -172,3 +177,6 @@ compare_entries(#{id := A}, #{id := B}) ->
 
 compare_configs(#{id := A}, #{id := B}) ->
     A =< B.
+
+notify_reconciler(Event) ->
+    vpn_peer_reconciler:notify(Event).

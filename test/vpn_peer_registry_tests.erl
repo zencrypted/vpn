@@ -67,6 +67,51 @@ invalid_put_test_() ->
      end}.
 
 
+automatic_manager_reconcile_test_() ->
+    {setup,
+     fun setup_with_reconciler/0,
+     fun cleanup_with_reconciler/1,
+     fun({_RegistryPid, _PeerSupPid, _ReconcilerPid}) ->
+             [?_test(begin
+                          ?assertEqual([peer_a], vpn_manager:running_peers()),
+
+                          {ok, _} = vpn_peer_registry:put(peer_config(peer_b)),
+                          ?assert(wait_until(fun() ->
+                                                    lists:sort(vpn_manager:running_peers()) =:=
+                                                        [peer_a, peer_b]
+                                            end, 50)),
+
+                          UpdatedPeerB = (peer_config(peer_b))#{ifname => "peer_b_updated"},
+                          {ok, _} = vpn_peer_registry:put(UpdatedPeerB),
+                          ?assert(wait_until(fun() ->
+                                                    case vpn_manager:peer_info(peer_b) of
+                                                        #{config := #{ifname := "peer_b_updated"}} -> true;
+                                                        _ -> false
+                                                    end
+                                            end, 50)),
+
+                          {ok, _} = vpn_peer_registry:disable(peer_a),
+                          ?assert(wait_until(fun() ->
+                                                    vpn_manager:running_peers() =:= [peer_b]
+                                            end, 50)),
+
+                          {ok, _} = vpn_peer_registry:enable(peer_a),
+                          ?assert(wait_until(fun() ->
+                                                    lists:sort(vpn_manager:running_peers()) =:=
+                                                        [peer_a, peer_b]
+                                            end, 50)),
+
+                          ?assertEqual(ok, vpn_peer_registry:remove(peer_b)),
+                          ?assert(wait_until(fun() ->
+                                                    vpn_manager:running_peers() =:= [peer_a]
+                                            end, 50)),
+
+                          Status = vpn_peer_reconciler:status(),
+                          ?assert(maps:get(events_received, Status) >= 4),
+                          ?assertEqual(0, maps:get(failures, Status))
+                      end)]
+     end}.
+
 manager_reconcile_test_() ->
     {setup,
      fun setup_with_peer_sup/0,
@@ -152,6 +197,30 @@ contains_key(Key, Term) when is_list(Term) ->
 contains_key(_Key, _Term) ->
     false.
 
+
+setup_with_reconciler() ->
+    {RegistryPid, PeerSupPid} = setup_with_peer_sup(),
+    stop_registered(vpn_peer_reconciler),
+    {ok, ReconcilerPid} = vpn_peer_reconciler:start_link(),
+    {RegistryPid, PeerSupPid, ReconcilerPid}.
+
+cleanup_with_reconciler({RegistryPid, PeerSupPid, ReconcilerPid}) ->
+    case is_process_alive(ReconcilerPid) of
+        true ->
+            unlink(ReconcilerPid),
+            exit(ReconcilerPid, shutdown),
+            wait_until_stopped(ReconcilerPid, 20);
+        false -> ok
+    end,
+    cleanup_with_peer_sup({RegistryPid, PeerSupPid}).
+
+wait_until(_Fun, 0) ->
+    false;
+wait_until(Fun, Attempts) ->
+    case Fun() of
+        true -> true;
+        false -> timer:sleep(10), wait_until(Fun, Attempts - 1)
+    end.
 
 setup_with_peer_sup() ->
     RegistryPid = setup(),
