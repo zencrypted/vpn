@@ -225,11 +225,16 @@ find_peer(PeerId) ->
     end.
 
 start_configured_peer(PeerId) ->
-    case peer_enabled(PeerId) of
-        false ->
-            {error, disabled};
-        true ->
-            start_enabled_peer(PeerId)
+    case find_peer_config(PeerId) of
+        {error, not_found} ->
+            {error, not_found};
+        {ok, _PeerConfig} ->
+            case peer_enabled(PeerId) of
+                false ->
+                    {error, disabled};
+                true ->
+                    start_enabled_peer(PeerId)
+            end
     end.
 
 start_enabled_peer(PeerId) ->

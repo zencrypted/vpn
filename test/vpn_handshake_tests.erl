@@ -80,7 +80,7 @@ certificate_ack_before_proof_is_deferred_test() ->
     {send, HelloB, B1} = vpn_handshake:begin_handshake(B0),
     {send, ProofB, B2} = vpn_handshake:handle_frame(HelloA, B1),
     {send, ProofA, A2} = vpn_handshake:handle_frame(HelloB, A1),
-    {send, AckToB, A3} = vpn_handshake:handle_frame(ProofB, A2),
+    {send, AckToB, _A3} = vpn_handshake:handle_frame(ProofB, A2),
     {defer, B3} = vpn_handshake:handle_frame(AckToB, B2),
     ?assertEqual(false, vpn_handshake:established(B3)),
     {send_established, _AckToA, B4} = vpn_handshake:handle_frame(ProofA, B3),
