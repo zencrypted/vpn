@@ -228,6 +228,29 @@ static_template_resolver_lifecycle_test_() ->
                       end)]
      end}.
 
+
+certificate_fingerprint_validation_test() ->
+    Actual = <<"ACTUAL-FINGERPRINT">>,
+    Matching = #{certificate_fingerprint => Actual,
+                 ovpn_identity => #{certificate_fingerprint => Actual}},
+    Mismatching = #{certificate_fingerprint => <<"EXPECTED-FINGERPRINT">>,
+                    ovpn_identity => #{certificate_fingerprint => Actual}},
+    Missing = #{id => peer_b},
+    ?assertEqual(ok,
+                 vpn_runtime_config_resolver:validate_certificate_fingerprint(
+                   #{certificate_fingerprint => Actual}, Matching)),
+    ?assertEqual({error, certificate_fingerprint_mismatch},
+                 vpn_runtime_config_resolver:validate_certificate_fingerprint(
+                   #{certificate_fingerprint => <<"EXPECTED-FINGERPRINT">>},
+                   Mismatching)),
+    ?assertEqual({error, certificate_fingerprint_unavailable},
+                 vpn_runtime_config_resolver:validate_certificate_fingerprint(
+                   #{certificate_fingerprint => <<"EXPECTED-FINGERPRINT">>},
+                   Missing)),
+    ?assertEqual(ok,
+                 vpn_runtime_config_resolver:validate_certificate_fingerprint(
+                   #{}, Missing)).
+
 invalid_static_template_fails_closed_test_() ->
     {setup,
      fun setup/0,

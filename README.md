@@ -1421,3 +1421,14 @@ pauses dataplane delivery until certificate authentication completes, then
 installs a fresh epoch-1 session and clears obsolete replay/key state. This
 prevents restart traffic from being misclassified as AEAD failures while
 preserving normal epoch-incrementing rekeys.
+
+### IAS certificate fingerprint binding
+
+When an IAS provisioning command includes `certificate_fingerprint`, the VPN
+runtime resolver compares it with the certificate fingerprint loaded from the
+resolved OVPN identity. A missing or different runtime fingerprint is rejected
+fail-closed with `certificate_fingerprint_unavailable` or
+`certificate_fingerprint_mismatch`; the runtime template cannot silently replace
+the IAS certificate identity. Development tests must therefore provision the
+actual fingerprint of the certificate referenced by the configured OVPN
+artifact.

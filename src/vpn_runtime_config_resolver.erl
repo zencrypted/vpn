@@ -1,6 +1,6 @@
 -module(vpn_runtime_config_resolver).
 
--export([resolve/2, mode/0]).
+-export([resolve/2, mode/0, validate_certificate_fingerprint/2]).
 
 resolve(PeerId, Desired) when is_map(Desired) ->
     case mode() of
@@ -34,7 +34,11 @@ resolve_template(PeerId, Desired, Template) ->
     case maps:is_key(ovpn_path, Candidate) of
         true ->
             case vpn_session_config:from_spec(Candidate) of
-                {ok, #{peer_config := PeerConfig}} -> {ok, PeerConfig};
+                {ok, #{peer_config := PeerConfig}} ->
+                    case validate_certificate_fingerprint(Desired, PeerConfig) of
+                        ok -> {ok, PeerConfig};
+                        {error, _} = Error -> Error
+                    end;
                 {error, Reason} -> {error, Reason}
             end;
         false ->
@@ -45,6 +49,29 @@ validate_direct_runtime(Candidate) ->
     case vpn_peer:validate_runtime_config(Candidate) of
         ok -> {ok, Candidate};
         {error, Reason} -> {error, Reason}
+    end.
+
+validate_certificate_fingerprint(Desired, PeerConfig)
+  when is_map(Desired), is_map(PeerConfig) ->
+    case maps:get(certificate_fingerprint, Desired, undefined) of
+        undefined ->
+            ok;
+        Expected ->
+            case actual_certificate_fingerprint(PeerConfig) of
+                undefined -> {error, certificate_fingerprint_unavailable};
+                Expected -> ok;
+                _Actual -> {error, certificate_fingerprint_mismatch}
+            end
+    end.
+
+actual_certificate_fingerprint(PeerConfig) ->
+    case maps:get(ovpn_identity, PeerConfig, undefined) of
+        Identity when is_map(Identity) ->
+            maps:get(certificate_fingerprint,
+                     Identity,
+                     maps:get(certificate_fingerprint, PeerConfig, undefined));
+        _ ->
+            maps:get(certificate_fingerprint, PeerConfig, undefined)
     end.
 
 template_with_identity(PeerId, Desired, Template) ->
