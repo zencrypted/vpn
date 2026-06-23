@@ -71,7 +71,12 @@ summary_peer(PeerId, PeerStatus, Certificates) ->
       authorization_reason => maps:get(authorization_reason, Config, undefined),
       crypto_failures => maps:get(crypto_failures, LinkStats, 0),
       frames_rejected => maps:get(frames_rejected, LinkStats, 0),
+      replay_drops => maps:get(replay_drops, LinkStats, 0),
+      duplicate_frames => maps:get(duplicate_frames, LinkStats, 0),
+      stale_epoch_drops => maps:get(stale_epoch_drops, LinkStats, 0),
+      previous_epoch_accepted => maps:get(previous_epoch_accepted, LinkStats, 0),
       session => maps:get(session, LinkStats, undefined),
+      replay => maps:get(replay, LinkStats, undefined),
       certificate => compact_certificate(Certificate)}.
 
 certificate_for_peer(PeerId, Certificates) ->
@@ -104,7 +109,12 @@ peer_view(Peer) ->
       authorization_reason => json_value(maps:get(authorization_reason, Peer, undefined)),
       crypto_failures => maps:get(crypto_failures, Peer, 0),
       frames_rejected => maps:get(frames_rejected, Peer, 0),
+      replay_drops => maps:get(replay_drops, Peer, 0),
+      duplicate_frames => maps:get(duplicate_frames, Peer, 0),
+      stale_epoch_drops => maps:get(stale_epoch_drops, Peer, 0),
+      previous_epoch_accepted => maps:get(previous_epoch_accepted, Peer, 0),
       session => session_view(maps:get(session, Peer, undefined)),
+      replay => replay_view(maps:get(replay, Peer, undefined)),
       certificate => certificate_view(maps:get(certificate, Peer, #{}))}.
 
 certificate_view(Certificate) ->
@@ -150,6 +160,22 @@ time_value({generalTime, Value}) ->
     json_value(Value);
 time_value(Value) ->
     json_value(Value).
+
+replay_view(undefined) ->
+    null;
+replay_view(Replay) when is_map(Replay) ->
+    #{window_size => maps:get(window_size, Replay, 0),
+      current_epoch => maps:get(current_epoch, Replay, 0),
+      current => replay_window_view(maps:get(current, Replay, undefined)),
+      previous_epoch => json_value(maps:get(previous_epoch, Replay, undefined)),
+      previous => replay_window_view(maps:get(previous, Replay, undefined)),
+      previous_epoch_expires_in_ms =>
+          json_value(maps:get(previous_epoch_expires_in_ms, Replay, undefined))}.
+
+replay_window_view(undefined) ->
+    null;
+replay_window_view(Window) when is_map(Window) ->
+    maps:with([size, highest, accepted, duplicates, too_old], Window).
 
 session_view(undefined) ->
     null;

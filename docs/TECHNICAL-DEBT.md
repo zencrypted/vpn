@@ -112,3 +112,16 @@ windows, automatic rekey triggers, and session-expiration enforcement remain
 future work.
 
 - Manual authenticated rekey is implemented. Automatic time/packet triggers and bounded previous-epoch retirement remain to be added.
+
+## Replay-window follow-ups
+
+The authenticated dataplane now keeps a 64-packet sliding replay window per key
+epoch and retains the immediately previous receive key for a five-second grace
+period after rekey. The following hardening remains intentionally separate:
+
+- make replay-window size and previous-epoch grace duration policy controlled;
+- persist no replay state across process restarts (a fresh handshake is required);
+- add deterministic integration injection hooks for duplicate and delayed UDP
+  packets without exposing them in production APIs;
+- consider a bounded packet-count condition in addition to the grace timer for
+  retiring the previous epoch.

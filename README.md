@@ -1251,3 +1251,21 @@ vpn_manager:rekey(client_a).
 ```
 
 The rekey performs a fresh certificate-authenticated ephemeral P-384 ECDH exchange, advances the key epoch, resets per-epoch counters, and temporarily retains the previous receive key for delayed UDP packets.
+
+### Replay protection and previous-epoch grace
+
+Authenticated data frames carry a key epoch and monotonic sequence number. Each
+receive epoch has an independent 64-packet sliding replay window: limited UDP
+reordering is accepted, while duplicate and out-of-window frames are rejected.
+After an authenticated rekey, the previous receive key and its replay window are
+kept for five seconds so delayed UDP packets can finish in flight; the previous
+key is then erased from the link state.
+
+Runtime verification:
+
+```erlang
+#{link := Link} = vpn_manager:peer_stats(client_a),
+maps:get(replay, Link),
+maps:with([replay_drops, duplicate_frames, stale_epoch_drops,
+           previous_epoch_accepted], Link).
+```

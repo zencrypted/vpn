@@ -331,3 +331,8 @@ An OVPN-backed peer can run with `handshake_mode => certificate_control`. Its in
 ## Ephemeral traffic keys
 
 For `handshake_mode => certificate_control`, each startup creates a fresh P-384 ECDH key pair. Both ephemeral public keys are included in the certificate-signed transcript. Successful mutual proof derives independent TX/RX ChaCha20-Poly1305 keys with HKDF-SHA256. The private ECDH key, certificate private key, and derived traffic keys are never serialized into OVPN or management output.
+
+## Dataplane replay state
+
+Replay windows and key-epoch rollover are runtime session state. They are not
+OVPN directives and must never be serialized into the portable envelope.

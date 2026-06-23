@@ -5,6 +5,9 @@
 
 -behaviour(gen_server).
 
+-define(REPLAY_WINDOW_SIZE, 64).
+-define(PREVIOUS_EPOCH_GRACE_MS, 5000).
+
 -export([start_link/5, start_link/6, start_link/8, start_link/9, start_link/10,
          stop/1, stats/1, reset_stats/1, rekey/1]).
 -export([validate_frame_peer_id/2]).
@@ -139,6 +142,15 @@ handle_info({vpn_udp_packet, UdpPid, Ip, Port, Packet},
     end;
 handle_info({vpn_udp_packet, _OtherUdpPid, _Ip, _Port, _Packet}, State) ->
     {noreply, State};
+handle_info({expire_previous_crypto, Epoch},
+            State = #{previous_crypto := #{key_epoch := Epoch}}) ->
+    logger:debug("vpn_link expired previous receive key epoch ~p", [Epoch]),
+    {noreply, State#{previous_crypto := undefined,
+                     previous_replay_window := undefined,
+                     previous_crypto_expires_at := undefined,
+                     previous_crypto_timer := undefined}};
+handle_info({expire_previous_crypto, _Epoch}, State) ->
+    {noreply, State};
 handle_info({'EXIT', TunPid, Reason}, State = #{tun_pid := TunPid}) ->
     {stop, {tun_exit, Reason}, State};
 handle_info({'EXIT', UdpPid, Reason}, State = #{udp_pid := UdpPid}) ->
@@ -162,6 +174,10 @@ init_tun(UdpPid, TunName, TunIp, Mode, RemoteIp, RemoteUdpPort, PeerId, RemotePe
                                  remote_peer_id => normalize_peer_id(RemotePeerId),
                                  crypto => initial_crypto(Psk, normalize_peer_id(PeerId), HandshakeOptions),
                                  previous_crypto => undefined,
+                                 previous_replay_window => undefined,
+                                 previous_crypto_expires_at => undefined,
+                                 previous_crypto_timer => undefined,
+                                 current_replay_window => vpn_replay_window:new(?REPLAY_WINDOW_SIZE),
                                  crypto_session_id => undefined,
                                  handshake => Handshake,
                                  handshake_timer => undefined,
@@ -314,16 +330,70 @@ activate_session_crypto(State = #{handshake := Handshake, peer_id := PeerId}) ->
                                          true -> incr_counter(State, rekeys_completed);
                                          false -> State
                                      end,
-                    RekeyedState#{previous_crypto := maps:get(crypto, State, undefined),
-                           crypto := vpn_crypto:new_session(TxKey, RxKey, PeerId, KeyEpoch),
-                           crypto_session_id := SessionId,
-                           session_lifecycle := Lifecycle,
-                           tx_seq := 0,
-                           rx_seq := 0}
+                    install_session_crypto(RekeyedState, TxKey, RxKey, PeerId,
+                                           KeyEpoch, SessionId, Lifecycle)
             end;
         {error, session_keys_not_ready} ->
             State
     end.
+
+install_session_crypto(State, TxKey, RxKey, PeerId, KeyEpoch, SessionId, Lifecycle) ->
+    CurrentCrypto = maps:get(crypto, State, undefined),
+    CurrentReplay = maps:get(current_replay_window, State,
+                             vpn_replay_window:new(?REPLAY_WINDOW_SIZE)),
+    State1 = cancel_previous_crypto_timer(State),
+    {PreviousCrypto, PreviousReplay, ExpiresAt, Timer} =
+        case CurrentCrypto of
+            Crypto when is_map(Crypto) ->
+                Epoch = maps:get(key_epoch, Crypto, 0),
+                Deadline = erlang:monotonic_time(millisecond) + ?PREVIOUS_EPOCH_GRACE_MS,
+                Ref = erlang:send_after(?PREVIOUS_EPOCH_GRACE_MS,
+                                        self(), {expire_previous_crypto, Epoch}),
+                {Crypto, CurrentReplay, Deadline, Ref};
+            _ ->
+                {undefined, undefined, undefined, undefined}
+        end,
+    State1#{previous_crypto := PreviousCrypto,
+            previous_replay_window := PreviousReplay,
+            previous_crypto_expires_at := ExpiresAt,
+            previous_crypto_timer := Timer,
+            current_replay_window := vpn_replay_window:new(?REPLAY_WINDOW_SIZE),
+            crypto := vpn_crypto:new_session(TxKey, RxKey, PeerId, KeyEpoch),
+            crypto_session_id := SessionId,
+            session_lifecycle := Lifecycle,
+            tx_seq := 0,
+            rx_seq := 0}.
+
+cancel_previous_crypto_timer(State) ->
+    case maps:get(previous_crypto_timer, State, undefined) of
+        undefined -> State;
+        Ref ->
+            _ = erlang:cancel_timer(Ref),
+            State#{previous_crypto_timer := undefined}
+    end.
+
+replay_info(State) ->
+    Current = vpn_replay_window:info(
+                maps:get(current_replay_window, State,
+                         vpn_replay_window:new(?REPLAY_WINDOW_SIZE))),
+    Previous = case maps:get(previous_replay_window, State, undefined) of
+                   Window when is_map(Window) -> vpn_replay_window:info(Window);
+                   _ -> undefined
+               end,
+    PreviousEpoch = case maps:get(previous_crypto, State, undefined) of
+                        #{key_epoch := Epoch} -> Epoch;
+                        _ -> undefined
+                    end,
+    ExpiresIn = case maps:get(previous_crypto_expires_at, State, undefined) of
+                    undefined -> undefined;
+                    Deadline -> max(0, Deadline - erlang:monotonic_time(millisecond))
+                end,
+    #{window_size => ?REPLAY_WINDOW_SIZE,
+      current_epoch => current_key_epoch(State),
+      current => Current,
+      previous_epoch => PreviousEpoch,
+      previous => Previous,
+      previous_epoch_expires_in_ms => ExpiresIn}.
 
 crypto_info(#{crypto := undefined}) -> #{key_source => pending_handshake};
 crypto_info(#{crypto := Crypto}) -> vpn_crypto:info(Crypto).
@@ -380,7 +450,7 @@ decode_and_write(Packet, Mode, TunPid, State = #{crypto := Crypto0}) ->
         {ok, DecodedFrame, Crypto1} ->
             State1 = State#{crypto := Crypto1},
             State2 = incr_counter(State1, crypto_decryptions),
-            decode_frame_and_write(DecodedFrame, Mode, TunPid, State2);
+            decode_frame_and_write(DecodedFrame, current, Mode, TunPid, State2);
         {error, _Reason, Crypto1} ->
             decode_with_previous_crypto(Packet, Mode, TunPid, State#{crypto := Crypto1});
         {error, _Reason} ->
@@ -392,7 +462,7 @@ decode_with_previous_crypto(Packet, Mode, TunPid,
     case vpn_crypto:decode(Packet, Previous) of
         {ok, DecodedFrame, Previous1} ->
             State1 = incr_counter(State#{previous_crypto := Previous1}, crypto_decryptions),
-            decode_frame_and_write(DecodedFrame, Mode, TunPid, State1);
+            decode_frame_and_write(DecodedFrame, previous, Mode, TunPid, State1);
         {error, Reason, Previous1} ->
             logger:error("vpn_link failed to decode packet: ~p", [Reason]),
             {noreply, incr_counter(State#{previous_crypto := Previous1}, crypto_failures)};
@@ -404,33 +474,58 @@ decode_with_previous_crypto(_Packet, _Mode, _TunPid, State) ->
     logger:error("vpn_link failed to decode packet: authentication_failed", []),
     {noreply, incr_counter(State, crypto_failures)}.
 
-decode_frame_and_write(DecodedFrame, Mode, TunPid, State) ->
+decode_frame_and_write(DecodedFrame, CryptoSlot, Mode, TunPid, State) ->
     case vpn_frame:decode(DecodedFrame) of
         {ok, #{key_epoch := KeyEpoch, seq := Seq,
                peer_id := PeerId, payload := DecodedPacket}} ->
             logger:debug("vpn_frame rx epoch=~p seq=~p peer_id=~p",
                          [KeyEpoch, Seq, PeerId]),
             validate_and_write(KeyEpoch, PeerId, Seq, DecodedPacket,
-                               Mode, TunPid, State);
+                               CryptoSlot, Mode, TunPid, State);
         {error, Reason} ->
             logger:error("vpn_link failed to decode frame: ~p", [Reason]),
             {noreply, State}
     end.
 
-validate_and_write(KeyEpoch, PeerId, Seq, DecodedPacket, Mode, TunPid, State) ->
-    case {validate_frame_epoch(KeyEpoch, State),
+validate_and_write(KeyEpoch, PeerId, Seq, DecodedPacket, CryptoSlot, Mode, TunPid, State) ->
+    case {validate_frame_epoch(KeyEpoch, CryptoSlot, State),
           validate_frame_peer_id(PeerId, maps:get(remote_peer_id, State))} of
-        {ok, ok} ->
-            Size = byte_size(DecodedPacket),
-            State1 = incr_counter(State#{rx_seq := Seq}, frames_accepted),
-            State2 = record_session_rx(Size, State1),
-            Kind = packet_kind(DecodedPacket, Mode),
-            write_decoded(DecodedPacket, Kind, Size, TunPid, State2);
+        {{ok, EpochKind}, ok} ->
+            case check_replay(EpochKind, Seq, State) of
+                {ok, State1} ->
+                    Size = byte_size(DecodedPacket),
+                    State2 = incr_counter(State1#{rx_seq := Seq}, frames_accepted),
+                    State3 = record_epoch_rx(EpochKind, Size, State2),
+                    State4 = case EpochKind of
+                                 previous -> incr_counter(State3, previous_epoch_accepted);
+                                 current -> State3
+                             end,
+                    Kind = packet_kind(DecodedPacket, Mode),
+                    write_decoded(DecodedPacket, Kind, Size, TunPid, State4);
+                {error, duplicate, State1} ->
+                    logger:warning("vpn_link rejected duplicate frame epoch=~p seq=~p",
+                                   [KeyEpoch, Seq]),
+                    {noreply, incr_counter(
+                                incr_counter(
+                                  incr_counter(State1, duplicate_frames), replay_drops),
+                                frames_rejected)};
+                {error, too_old, State1} ->
+                    logger:warning("vpn_link rejected stale sequence epoch=~p seq=~p",
+                                   [KeyEpoch, Seq]),
+                    {noreply, incr_counter(
+                                incr_counter(State1, replay_drops),
+                                frames_rejected)}
+            end;
         {{error, {key_epoch_mismatch, ExpectedEpoch, ReceivedEpoch}}, _} ->
             logger:warning("vpn_link rejected frame: expected key epoch ~p received ~p",
                            [ExpectedEpoch, ReceivedEpoch]),
-            {noreply, incr_counter(State, frames_rejected)};
-        {ok, {error, {peer_id_mismatch, Expected, Received}}} ->
+            {noreply, incr_counter(
+                        incr_counter(State, stale_epoch_drops), frames_rejected)};
+        {{error, previous_epoch_expired}, _} ->
+            logger:warning("vpn_link rejected expired previous key epoch ~p", [KeyEpoch]),
+            {noreply, incr_counter(
+                        incr_counter(State, stale_epoch_drops), frames_rejected)};
+        {{ok, _}, {error, {peer_id_mismatch, Expected, Received}}} ->
             logger:warning("vpn_link rejected frame: expected ~s received ~s",
                            [Expected, Received]),
             {noreply, incr_counter(State, frames_rejected)}
@@ -459,7 +554,8 @@ stats_map(State = #{tun_pid := TunPid,
                  remote_port => RemoteUdpPort,
                  handshake => vpn_handshake:info(Handshake),
                  crypto => crypto_info(State),
-                 session => session_info(State)},
+                 session => session_info(State),
+                 replay => replay_info(State)},
                maps:with(counter_keys(), State)).
 
 current_key_epoch(#{session_lifecycle := Lifecycle}) when is_map(Lifecycle) ->
@@ -467,15 +563,43 @@ current_key_epoch(#{session_lifecycle := Lifecycle}) when is_map(Lifecycle) ->
 current_key_epoch(_State) ->
     0.
 
-validate_frame_epoch(KeyEpoch, State) ->
+validate_frame_epoch(KeyEpoch, current, State) ->
     Expected = current_key_epoch(State),
-    PreviousEpoch = case maps:get(previous_crypto, State, undefined) of
-                        #{key_epoch := Epoch} -> Epoch;
-                        _ -> undefined
-                    end,
-    case KeyEpoch =:= Expected orelse KeyEpoch =:= PreviousEpoch of
-        true -> ok;
+    case KeyEpoch =:= Expected of
+        true -> {ok, current};
         false -> {error, {key_epoch_mismatch, Expected, KeyEpoch}}
+    end;
+validate_frame_epoch(KeyEpoch, previous, State) ->
+    case maps:get(previous_crypto, State, undefined) of
+        #{key_epoch := KeyEpoch} ->
+            case previous_epoch_active(State) of
+                true -> {ok, previous};
+                false -> {error, previous_epoch_expired}
+            end;
+        _ ->
+            {error, {key_epoch_mismatch, current_key_epoch(State), KeyEpoch}}
+    end.
+
+check_replay(current, Seq, State = #{current_replay_window := Window}) ->
+    case vpn_replay_window:check(Seq, Window) of
+        {ok, Window1} -> {ok, State#{current_replay_window := Window1}};
+        {error, Reason, Window1} ->
+            {error, Reason, State#{current_replay_window := Window1}}
+    end;
+check_replay(previous, Seq, State = #{previous_replay_window := Window}) when is_map(Window) ->
+    case vpn_replay_window:check(Seq, Window) of
+        {ok, Window1} -> {ok, State#{previous_replay_window := Window1}};
+        {error, Reason, Window1} ->
+            {error, Reason, State#{previous_replay_window := Window1}}
+    end.
+
+record_epoch_rx(current, Size, State) -> record_session_rx(Size, State);
+record_epoch_rx(previous, _Size, State) -> State.
+
+previous_epoch_active(State) ->
+    case maps:get(previous_crypto_expires_at, State, undefined) of
+        undefined -> false;
+        Deadline -> erlang:monotonic_time(millisecond) =< Deadline
     end.
 
 record_session_tx(_Size, State = #{session_lifecycle := undefined}) ->
@@ -514,7 +638,11 @@ counter_keys() ->
      handshake_control_rx,
      handshake_failures,
      handshake_blocked_packets,
-     rekeys_completed].
+     rekeys_completed,
+     replay_drops,
+     duplicate_frames,
+     stale_epoch_drops,
+     previous_epoch_accepted].
 
 reset_counter_values(State) ->
     maps:merge(State, zero_counters()).

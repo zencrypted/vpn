@@ -115,6 +115,13 @@ vpn_link_exports_test() ->
     ?assert(erlang:function_exported(vpn_link, reset_stats, 1)),
     ?assert(erlang:function_exported(vpn_link, validate_frame_peer_id, 2)).
 
+vpn_replay_window_exports_test() ->
+    ?assertMatch({module, vpn_replay_window}, code:ensure_loaded(vpn_replay_window)),
+    ?assert(erlang:function_exported(vpn_replay_window, new, 0)),
+    ?assert(erlang:function_exported(vpn_replay_window, new, 1)),
+    ?assert(erlang:function_exported(vpn_replay_window, check, 2)),
+    ?assert(erlang:function_exported(vpn_replay_window, info, 1)).
+
 vpn_crypto_exports_test() ->
     ?assertMatch({module, vpn_crypto}, code:ensure_loaded(vpn_crypto)),
     ?assert(erlang:function_exported(vpn_crypto, new, 2)),
