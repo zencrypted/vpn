@@ -16,7 +16,8 @@
 -export([start_link/5, start_link/6, start_link/8, start_link/9, start_link/10,
          stop/1, stats/1, reset_stats/1, rekey/1,
          debug_frame_history/1, debug_replay_frame/3, debug_send_frames/2,
-         debug_send_payload/2, debug_received_payloads/1,
+         debug_send_payload/2, debug_send_payloads/3,
+         debug_received_payloads/1,
          debug_clear_received_payloads/1, debug_session_state/1]).
 -export([validate_frame_peer_id/2]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
@@ -97,6 +98,9 @@ debug_send_frames(Pid, Count) ->
 debug_send_payload(Pid, Payload) when is_binary(Payload) ->
     gen_server:call(Pid, {debug_send_payload, Payload}, 30000).
 
+debug_send_payloads(Pid, Payloads, SendOrder) ->
+    gen_server:call(Pid, {debug_send_payloads, Payloads, SendOrder}, 30000).
+
 debug_received_payloads(Pid) ->
     gen_server:call(Pid, debug_received_payloads).
 
@@ -141,6 +145,8 @@ handle_call({debug_send_frames, Count}, _From, State) ->
     send_debug_frames(Count, State);
 handle_call({debug_send_payload, Payload}, _From, State) ->
     send_debug_payload(Payload, State);
+handle_call({debug_send_payloads, Payloads, SendOrder}, _From, State) ->
+    send_debug_payloads(Payloads, SendOrder, State);
 handle_call(debug_received_payloads, _From, State) ->
     case maps:get(debug_replay_enabled, State, false) of
         true ->
@@ -1152,6 +1158,117 @@ send_debug_payload(Payload,
     end;
 send_debug_payload(_Payload, State) ->
     {reply, {error, invalid_payload}, State}.
+
+send_debug_payloads(_Payloads, _SendOrder,
+                    State = #{debug_replay_enabled := false}) ->
+    {reply, {error, debug_replay_disabled}, State};
+send_debug_payloads(Payloads, SendOrder, State) ->
+    case validate_debug_payload_batch(Payloads, SendOrder) of
+        ok ->
+            case handshake_established(State) of
+                true ->
+                    KeyEpoch = current_key_epoch(State),
+                    case prepare_debug_payloads(Payloads, 1, [], State) of
+                        {ok, Prepared, State1} ->
+                            case send_prepared_debug_payloads(SendOrder,
+                                                              Prepared,
+                                                              State1) of
+                                {ok, State2} ->
+                                    Frames = [debug_prepared_frame_info(Entry)
+                                              || Entry <- Prepared],
+                                    SentSeqs = [maps:get(seq,
+                                                        lists:nth(Index,
+                                                                  Prepared))
+                                                || Index <- SendOrder],
+                                    {reply,
+                                     {ok, #{sent => length(Prepared),
+                                            key_epoch => KeyEpoch,
+                                            frames => Frames,
+                                            send_order => SentSeqs}},
+                                     State2};
+                                {error, Reason, State2} ->
+                                    {reply, {error, Reason}, State2}
+                            end;
+                        {error, Reason, State1} ->
+                            {reply, {error, Reason}, State1}
+                    end;
+                false ->
+                    {reply, {error, handshake_not_established}, State}
+            end;
+        {error, Reason} ->
+            {reply, {error, Reason}, State}
+    end.
+
+validate_debug_payload_batch(Payloads, SendOrder)
+  when is_list(Payloads), is_list(SendOrder), Payloads =/= [] ->
+    Count = length(Payloads),
+    ValidPayloads = Count =< ?DEBUG_PAYLOAD_HISTORY_LIMIT andalso
+                    lists:all(fun(Payload) ->
+                                      is_binary(Payload) andalso
+                                      byte_size(Payload) > 0
+                              end,
+                              Payloads),
+    ValidOrder = length(SendOrder) =:= Count andalso
+                 lists:sort(SendOrder) =:= lists:seq(1, Count),
+    case {ValidPayloads, ValidOrder} of
+        {true, true} -> ok;
+        {false, _} -> {error, invalid_payload_batch};
+        {_, false} -> {error, invalid_send_order}
+    end;
+validate_debug_payload_batch(_Payloads, _SendOrder) ->
+    {error, invalid_payload_batch}.
+
+prepare_debug_payloads([], _Index, Acc, State) ->
+    {ok, lists:reverse(Acc), State};
+prepare_debug_payloads([Payload | Rest], Index, Acc,
+                       State = #{crypto := Crypto0,
+                                 tx_seq := Seq,
+                                 peer_id := PeerId}) ->
+    KeyEpoch = current_key_epoch(State),
+    Frame = vpn_frame:encode(PeerId, KeyEpoch, Seq, Payload),
+    case vpn_crypto:encode(Frame, Crypto0) of
+        {ok, EncodedPacket, Crypto1} ->
+            Prepared = #{index => Index,
+                         key_epoch => KeyEpoch,
+                         seq => Seq,
+                         plaintext_size => byte_size(Payload),
+                         sha256 => crypto:hash(sha256, Payload),
+                         packet => EncodedPacket},
+            State1 = incr_counter(State#{crypto := Crypto1,
+                                         tx_seq := Seq + 1},
+                                  crypto_encryptions),
+            prepare_debug_payloads(Rest, Index + 1, [Prepared | Acc], State1);
+        {error, Reason, Crypto1} ->
+            {error, Reason,
+             incr_counter(State#{crypto := Crypto1}, crypto_failures)};
+        {error, Reason} ->
+            {error, Reason, incr_counter(State, crypto_failures)}
+    end.
+
+send_prepared_debug_payloads([], _Prepared, State) ->
+    {ok, State};
+send_prepared_debug_payloads([Index | Rest], Prepared,
+                             State = #{udp_pid := UdpPid,
+                                       remote_ip := RemoteIp,
+                                       remote_udp_port := RemoteUdpPort}) ->
+    Entry = lists:nth(Index, Prepared),
+    Packet = maps:get(packet, Entry),
+    Size = maps:get(plaintext_size, Entry),
+    Seq = maps:get(seq, Entry),
+    case vpn_udp:send(UdpPid, RemoteIp, RemoteUdpPort, Packet) of
+        ok ->
+            logger:warning("vpn_link sent reordered debug frame epoch=~p seq=~p",
+                           [maps:get(key_epoch, Entry), Seq]),
+            State1 = incr_counters(State, udp_tx_packets, udp_tx_bytes, Size),
+            State2 = record_session_tx(Size, State1),
+            State3 = remember_debug_frame(Packet, Size, Seq, State2),
+            send_prepared_debug_payloads(Rest, Prepared, State3);
+        {error, Reason} ->
+            {error, {udp_send_failed, Seq, Reason}, State}
+    end.
+
+debug_prepared_frame_info(Entry) ->
+    maps:without([packet], Entry).
 
 remember_debug_received_payload(_Payload, _KeyEpoch, _Seq, _PeerId,
                                 State = #{debug_replay_enabled := false}) ->

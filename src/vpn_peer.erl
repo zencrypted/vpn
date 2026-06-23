@@ -6,7 +6,8 @@
 -behaviour(gen_server).
 
 -export([start_link/1, stop/1, stats/1, reset_stats/1, rekey/1, debug_frame_history/1, debug_replay_frame/3, debug_send_frames/2,
-         debug_send_payload/2, debug_received_payloads/1, debug_clear_received_payloads/1,
+         debug_send_payload/2, debug_send_payloads/3,
+         debug_received_payloads/1, debug_clear_received_payloads/1,
          debug_session_state/1,
          identity/1, identity_info/1, config/1, validate_runtime_config/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
@@ -37,6 +38,9 @@ debug_send_frames(Pid, Count) ->
 
 debug_send_payload(Pid, Payload) when is_binary(Payload) ->
     gen_server:call(Pid, {debug_send_payload, Payload}, 30000).
+
+debug_send_payloads(Pid, Payloads, SendOrder) ->
+    gen_server:call(Pid, {debug_send_payloads, Payloads, SendOrder}, 30000).
 
 debug_received_payloads(Pid) ->
     gen_server:call(Pid, debug_received_payloads).
@@ -84,6 +88,9 @@ handle_call({debug_send_frames, Count}, _From, State = #{link_pid := LinkPid}) -
     {reply, vpn_link:debug_send_frames(LinkPid, Count), State};
 handle_call({debug_send_payload, Payload}, _From, State = #{link_pid := LinkPid}) ->
     {reply, vpn_link:debug_send_payload(LinkPid, Payload), State};
+handle_call({debug_send_payloads, Payloads, SendOrder}, _From,
+            State = #{link_pid := LinkPid}) ->
+    {reply, vpn_link:debug_send_payloads(LinkPid, Payloads, SendOrder), State};
 handle_call(debug_received_payloads, _From, State = #{link_pid := LinkPid}) ->
     {reply, vpn_link:debug_received_payloads(LinkPid), State};
 handle_call(debug_clear_received_payloads, _From, State = #{link_pid := LinkPid}) ->
