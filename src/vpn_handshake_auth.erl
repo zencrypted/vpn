@@ -9,7 +9,7 @@
 
 -include_lib("public_key/include/OTP-PUB-KEY.hrl").
 
--export([certificate_der/1, proof_data/7, sign/2, verify/5]).
+-export([certificate_der/1, proof_data/9, sign/2, verify/5]).
 
 certificate_der(CertificatePem) when is_binary(CertificatePem) ->
     try
@@ -27,14 +27,18 @@ certificate_der(_) ->
 
 proof_data(SenderPeerId, ReceiverPeerId,
            SenderSessionId, ReceiverSessionId,
-           SenderNonce, ReceiverNonce, CertificateDer) ->
+           SenderNonce, ReceiverNonce,
+           SenderEphemeralPublicKey, ReceiverEphemeralPublicKey,
+           CertificateDer) ->
     Sender = peer_id(SenderPeerId),
     Receiver = peer_id(ReceiverPeerId),
     crypto:hash(sha256,
-                [<<"vpn-certificate-proof-v1">>,
+                [<<"vpn-certificate-proof-v2">>,
                  length_prefixed(Sender), length_prefixed(Receiver),
                  SenderSessionId, ReceiverSessionId,
                  SenderNonce, ReceiverNonce,
+                 length_prefixed(SenderEphemeralPublicKey),
+                 length_prefixed(ReceiverEphemeralPublicKey),
                  crypto:hash(sha256, CertificateDer)]).
 
 sign(Data, PrivateKeyPath) when is_binary(Data) ->

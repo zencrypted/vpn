@@ -325,4 +325,9 @@ Rebar3 profile.
 
 ## Certificate-authenticated control plane
 
-An OVPN-backed peer can run with `handshake_mode => certificate_control`. Its inline client certificate and Device-local private key are used to sign a handshake transcript. The remote peer validates that certificate against `handshake_remote_ca_certificate_path`, checks that the certificate common name equals the configured remote peer ID, and verifies the signature before the dataplane is enabled. The private key is never transmitted. The current dataplane encryption still uses the transitional PSK until ephemeral session-key derivation is implemented.
+An OVPN-backed peer can run with `handshake_mode => certificate_control`. Its inline client certificate and Device-local private key are used to sign a handshake transcript. The remote peer validates that certificate against `handshake_remote_ca_certificate_path`, checks that the certificate common name equals the configured remote peer ID, and verifies the signature before the dataplane is enabled. The private key is never transmitted. Certificate-control peers derive directional dataplane keys from an authenticated ephemeral P-384 ECDH exchange and HKDF-SHA256. The OVPN envelope still carries no symmetric traffic secret.
+
+
+## Ephemeral traffic keys
+
+For `handshake_mode => certificate_control`, each startup creates a fresh P-384 ECDH key pair. Both ephemeral public keys are included in the certificate-signed transcript. Successful mutual proof derives independent TX/RX ChaCha20-Poly1305 keys with HKDF-SHA256. The private ECDH key, certificate private key, and derived traffic keys are never serialized into OVPN or management output.

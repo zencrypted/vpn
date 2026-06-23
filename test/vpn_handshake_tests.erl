@@ -31,8 +31,17 @@ mutual_certificate_proof_establishes_both_sides_test() ->
     {established, B4} = vpn_handshake:handle_frame(AckToB, B3),
     ?assert(vpn_handshake:established(A4)),
     ?assert(vpn_handshake:established(B4)),
-    ?assertEqual(true, maps:get(remote_authenticated, vpn_handshake:info(A4))),
-    ?assertEqual(true, maps:get(remote_authenticated, vpn_handshake:info(B4))).
+    InfoA = vpn_handshake:info(A4),
+    InfoB = vpn_handshake:info(B4),
+    ?assertEqual(true, maps:get(remote_authenticated, InfoA)),
+    ?assertEqual(true, maps:get(remote_authenticated, InfoB)),
+    ?assertEqual(true, maps:get(session_keys_ready, InfoA)),
+    ?assertEqual(true, maps:get(session_keys_ready, InfoB)),
+    ?assertEqual(ephemeral_ecdh_hkdf_sha256, maps:get(key_source, InfoA)),
+    {ok, KeysA} = vpn_handshake:session_keys(A4),
+    {ok, KeysB} = vpn_handshake:session_keys(B4),
+    ?assertEqual(maps:get(tx_key, KeysA), maps:get(rx_key, KeysB)),
+    ?assertEqual(maps:get(rx_key, KeysA), maps:get(tx_key, KeysB)).
 
 certificate_ack_before_proof_is_deferred_test() ->
     A0 = vpn_handshake:new(peer_a, peer_b, certificate_options("peer_a")),

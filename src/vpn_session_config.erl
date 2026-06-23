@@ -85,7 +85,11 @@ build_session(Runtime0, Identity, OvpnConfig) ->
            peer_config => PeerConfig}}.
 
 validate_runtime(Runtime) ->
-    Required = [id, ifname, ip, local_udp_port, remote_peer_id, psk],
+    Common = [id, ifname, ip, local_udp_port, remote_peer_id],
+    Required = case maps:get(handshake_mode, Runtime, disabled) of
+                   certificate_control -> Common;
+                   _ -> Common ++ [psk]
+               end,
     case missing_key(Runtime, Required) of
         none ->
             case validate_runtime_values(Runtime) of
@@ -100,21 +104,27 @@ validate_runtime_values(Runtime = #{id := Id,
                           ifname := IfName,
                           ip := Ip,
                           local_udp_port := Port,
-                          remote_peer_id := RemotePeerId,
-                          psk := Psk})
+                          remote_peer_id := RemotePeerId})
   when (is_atom(Id) orelse is_binary(Id)),
        (is_binary(IfName) orelse is_list(IfName)),
        is_list(Ip),
        is_integer(Port), Port > 0, Port =< 65535,
-       (is_atom(RemotePeerId) orelse is_binary(RemotePeerId)),
-       is_binary(Psk), byte_size(Psk) >= 16 ->
-    case maps:get(authorization_mode, Runtime, policy) of
-        development_bypass -> ok;
-        policy -> ok;
-        _ -> {error, invalid_authorization_mode}
+       (is_atom(RemotePeerId) orelse is_binary(RemotePeerId)) ->
+    case validate_key_source(Runtime) of
+        ok ->
+            case maps:get(authorization_mode, Runtime, policy) of
+                development_bypass -> ok;
+                policy -> ok;
+                _ -> {error, invalid_authorization_mode}
+            end;
+        {error, _} = Error -> Error
     end;
 validate_runtime_values(_Runtime) ->
     {error, invalid_runtime_values}.
+
+validate_key_source(#{handshake_mode := certificate_control}) -> ok;
+validate_key_source(#{psk := Psk}) when is_binary(Psk), byte_size(Psk) >= 16 -> ok;
+validate_key_source(_) -> {error, invalid_psk}.
 
 validate_authorization(Runtime) ->
     case authorization(Runtime) of

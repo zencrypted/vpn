@@ -100,4 +100,4 @@ replay-safe session identifiers, rekeying and production authorization binding.
 
 ## Certificate handshake follow-up
 
-The control plane now proves mutual possession of configured certificate private keys and validates each remote certificate against an explicit trust anchor. The dataplane still uses the temporary PSK after authentication. Ephemeral ECDH, HKDF-derived directional keys, replay windows, rekeying, certificate revocation, and removal of the PSK remain follow-up work.
+The control plane now proves mutual possession of configured certificate private keys, validates each remote certificate against an explicit trust anchor, and derives directional traffic keys with ephemeral P-384 ECDH plus HKDF-SHA256. Remaining work includes replay windows, periodic rekeying, key erasure hardening, certificate revocation, production authorization binding, and removal of the legacy PSK compatibility path.

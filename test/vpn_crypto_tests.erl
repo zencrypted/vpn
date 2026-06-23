@@ -56,3 +56,13 @@ same_peer_id_and_seq_produce_same_nonce_test() ->
     {ok, <<Nonce2:12/binary, _/binary>>, _} =
         vpn_crypto:encode(Frame2, vpn_crypto:new(?KEY_A, <<"peer_a">>)),
     ?assertEqual(Nonce1, Nonce2).
+
+session_directional_keys_roundtrip_test() ->
+    Frame = vpn_frame:encode(peer_a, 9, <<"session-payload">>),
+    TxKey = <<16#AA:256>>, RxKey = <<16#BB:256>>,
+    Sender = vpn_crypto:new_session(TxKey, RxKey, peer_a),
+    Receiver = vpn_crypto:new_session(RxKey, TxKey, peer_b),
+    {ok, Encrypted, Sender1} = vpn_crypto:encode(Frame, Sender),
+    ?assertEqual({ok, Frame, Receiver}, vpn_crypto:decode(Encrypted, Receiver)),
+    ?assertEqual(#{key_source => ephemeral_ecdh_hkdf_sha256},
+                 vpn_crypto:info(Sender1)).

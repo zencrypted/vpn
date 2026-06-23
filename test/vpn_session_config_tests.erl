@@ -51,6 +51,17 @@ missing_runtime_value_is_rejected_before_identity_loading_test() ->
                  vpn_session_config:load("missing.ovpn",
                                          maps:remove(psk, runtime_config()))).
 
+certificate_control_runtime_does_not_require_psk_test() ->
+    with_session_fixture(
+      fun(OvpnPath, _Root) ->
+          Runtime = (maps:remove(psk, runtime_config()))#{
+                      handshake_mode => certificate_control},
+          {ok, Session} = vpn_session_config:load(OvpnPath, Runtime),
+          PeerConfig = maps:get(peer_config, Session),
+          ?assertNot(maps:is_key(psk, PeerConfig)),
+          ?assertEqual(certificate_control, maps:get(handshake_mode, PeerConfig))
+      end).
+
 configured_sessions_are_combined_with_legacy_peers_test() ->
     with_session_fixture(
       fun(OvpnPath, _Root) ->

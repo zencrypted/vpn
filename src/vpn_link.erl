@@ -154,7 +154,7 @@ init_tun(UdpPid, TunName, TunIp, Mode, RemoteIp, RemoteUdpPort, PeerId, RemotePe
                                  mode => Mode,
                                  peer_id => normalize_peer_id(PeerId),
                                  remote_peer_id => normalize_peer_id(RemotePeerId),
-                                 crypto => vpn_crypto:new(Psk, normalize_peer_id(PeerId)),
+                                 crypto => initial_crypto(Psk, normalize_peer_id(PeerId), HandshakeOptions),
                                  handshake => Handshake,
                                  handshake_timer => undefined,
                                  tx_seq => 0,
@@ -173,7 +173,7 @@ init_tun(UdpPid, TunName, TunIp, Mode, RemoteIp, RemoteUdpPort, PeerId, RemotePe
 start_handshake(State = #{handshake := Handshake}) ->
     case vpn_handshake:begin_handshake(Handshake) of
         {established, Handshake1} ->
-            {noreply, State#{handshake := Handshake1}};
+            {noreply, activate_session_crypto(State#{handshake := Handshake1})};
         {send, Packet, Handshake1} ->
             send_handshake(Packet, State#{handshake := Handshake1})
     end.
@@ -181,7 +181,8 @@ start_handshake(State = #{handshake := Handshake}) ->
 retry_handshake(State = #{handshake := Handshake}) ->
     case vpn_handshake:retry(Handshake) of
         {established, Handshake1} ->
-            {noreply, State#{handshake := Handshake1, handshake_timer := undefined}};
+            {noreply, activate_session_crypto(
+                        State#{handshake := Handshake1, handshake_timer := undefined})};
         {send, Packet, Handshake1} ->
             send_handshake(Packet, State#{handshake := Handshake1, handshake_timer := undefined});
         {failed, Reason, Handshake1} ->
@@ -205,7 +206,10 @@ handle_handshake_packet(Packet, State = #{handshake := Handshake}) ->
             cancel_handshake_timer(State1),
             logger:info("vpn_link handshake established with ~s",
                         [maps:get(remote_peer_id, State1)]),
-            {noreply, State1#{handshake := Handshake1, handshake_timer := undefined}};
+            EstablishedState = activate_session_crypto(
+                                 State1#{handshake := Handshake1,
+                                         handshake_timer := undefined}),
+            {noreply, EstablishedState};
         {reject, Reason, Handshake1} ->
             logger:warning("vpn_link rejected handshake frame: ~p", [Reason]),
             {noreply, incr_counter(State1#{handshake := Handshake1}, handshake_failures)}
@@ -220,7 +224,8 @@ send_established_handshake(Packet, State = #{udp_pid := UdpPid,
         ok ->
             cancel_handshake_timer(State),
             logger:info("vpn_link handshake established with ~s", [RemotePeerId]),
-            {noreply, incr_counter(State#{handshake_timer := undefined}, handshake_control_tx)};
+            EstablishedState = activate_session_crypto(State#{handshake_timer := undefined}),
+            {noreply, incr_counter(EstablishedState, handshake_control_tx)};
         {error, Reason} ->
             logger:error("vpn_link failed to send final handshake frame: ~p", [Reason]),
             {noreply, incr_counter(State, handshake_failures)}
@@ -258,6 +263,22 @@ cancel_handshake_timer(State) ->
 
 handshake_established(#{handshake := Handshake}) ->
     vpn_handshake:established(Handshake).
+
+initial_crypto(_Psk, _PeerId, #{mode := certificate_control}) ->
+    undefined;
+initial_crypto(Psk, PeerId, _HandshakeOptions) ->
+    vpn_crypto:new(Psk, PeerId).
+
+activate_session_crypto(State = #{handshake := Handshake, peer_id := PeerId}) ->
+    case vpn_handshake:session_keys(Handshake) of
+        {ok, #{tx_key := TxKey, rx_key := RxKey}} ->
+            State#{crypto := vpn_crypto:new_session(TxKey, RxKey, PeerId)};
+        {error, session_keys_not_ready} ->
+            State
+    end.
+
+crypto_info(#{crypto := undefined}) -> #{key_source => pending_handshake};
+crypto_info(#{crypto := Crypto}) -> vpn_crypto:info(Crypto).
 
 stop_worker(undefined, _StopFun) ->
     ok;
@@ -362,7 +383,8 @@ stats_map(State = #{tun_pid := TunPid,
                  udp_pid => UdpPid,
                  remote_ip => RemoteIp,
                  remote_port => RemoteUdpPort,
-                 handshake => vpn_handshake:info(Handshake)},
+                 handshake => vpn_handshake:info(Handshake),
+                 crypto => crypto_info(State)},
                maps:with(counter_keys(), State)).
 
 zero_counters() ->

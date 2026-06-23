@@ -3,7 +3,7 @@
 VPN Overlay Network for the Zencrypted ecosystem.
 
 This repository currently contains a minimal Erlang/OTP VPN dataplane prototype.
-It currently uses a temporary PSK encrypted dataplane. It intentionally does not
+Certificate-control peers now derive directional dataplane keys with ephemeral ECDH and HKDF-SHA256. Legacy non-certificate peers may still use PSK mode. It intentionally does not
 implement peer/session management, CA services, or key exchange yet.
 
 ## Architecture
@@ -1205,4 +1205,19 @@ vpn_manager:peer_stats(client_a).
 vpn_manager:peer_stats(peer_b).
 ```
 
-The handshake map should report `status => established`, `remote_authenticated => true`, and a `remote_certificate_fingerprint`. The PSK remains transitional dataplane keying and is removed in the next ECDH/HKDF stage.
+The handshake map should report `status => established`, `remote_authenticated => true`, `session_keys_ready => true`, `key_source => ephemeral_ecdh_hkdf_sha256`, and a `remote_certificate_fingerprint`. Certificate-control peers no longer require `psk`: the authenticated ephemeral ECDH exchange is expanded with HKDF-SHA256 into distinct TX and RX keys before the dataplane opens.
+
+
+### Ephemeral ECDH session keys
+
+Handshake version 3 carries a fresh P-384 ephemeral public key in each certificate hello. The certificate proof transcript binds both ephemeral public keys, peer IDs, session IDs, nonces, and the sender certificate fingerprint. After mutual proof succeeds, each peer computes ECDH and applies HKDF-SHA256 to derive two directional ChaCha20-Poly1305 keys. The lower lexical peer ID uses the first derived key for TX and the second for RX; the other peer uses the reverse mapping.
+
+The debug profile therefore contains no `psk` values. Inspect the active key source without exposing key bytes:
+
+```erlang
+#{link := Link} = vpn_manager:peer_stats(client_a),
+maps:get(crypto, Link),
+maps:get(handshake, Link).
+```
+
+Expected fields include `#{key_source => ephemeral_ecdh_hkdf_sha256}` and `session_keys_ready => true`. Legacy disabled/development-control peers retain the PSK path for compatibility. Rekeying and replay windows remain separate follow-up work.

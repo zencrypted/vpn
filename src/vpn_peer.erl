@@ -103,7 +103,7 @@ start_link_from_config(Config, IdentityInfo) ->
     RemoteIp = maps:get(remote_ip, Config),
     RemoteUdpPort = maps:get(remote_udp_port, Config),
     RemotePeerId = maps:get(remote_peer_id, Config),
-    Psk = maps:get(psk, Config),
+    Psk = maps:get(psk, Config, undefined),
     HandshakeOptions = handshake_options(Config, IdentityInfo),
     Identity = identity_from_config(Config),
     case vpn_link:start_link(IfName,
@@ -163,9 +163,12 @@ missing_key(Config) ->
               local_udp_port,
               remote_ip,
               remote_udp_port,
-              remote_peer_id,
-              psk],
-    case missing_key(Config, Common) of
+              remote_peer_id],
+    Required = case maps:get(handshake_mode, Config, disabled) of
+                   certificate_control -> Common;
+                   _ -> Common ++ [psk]
+               end,
+    case missing_key(Config, Required) of
         none -> missing_identity_key(Config);
         Missing -> Missing
     end.

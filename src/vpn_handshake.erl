@@ -9,7 +9,7 @@
 -module(vpn_handshake).
 
 -export([new/3, begin_handshake/1, handle_frame/2, retry/1,
-         established/1, status/1, info/1]).
+         established/1, status/1, info/1, session_keys/1]).
 
 -define(ID_SIZE, 16).
 
@@ -25,6 +25,7 @@ new(LocalPeerId, RemotePeerId, Options) when is_map(Options) ->
              remote_nonce => undefined,
              remote_authenticated => false,
              remote_certificate_fingerprint => undefined,
+             session_keys => undefined,
              pending_ack => undefined,
              retries => 0,
              max_retries => maps:get(max_retries, Options, 5),
@@ -58,22 +59,33 @@ established(_) -> false.
 status(State) -> maps:get(status, State).
 
 info(State) ->
-    maps:with([mode, status, retries, max_retries, retry_interval,
-               session_id, remote_session_id, remote_authenticated,
-               remote_certificate_fingerprint], State).
+    Info0 = maps:with([mode, status, retries, max_retries, retry_interval,
+                       session_id, remote_session_id, remote_authenticated,
+                       remote_certificate_fingerprint], State),
+    Info0#{session_keys_ready => is_map(maps:get(session_keys, State, undefined)),
+           key_source => key_source(State)}.
 
-handle_hello(#{peer_id := PeerId, session_id := RemoteSession, nonce := RemoteNonce}, State) ->
+session_keys(#{session_keys := Keys}) when is_map(Keys) -> {ok, Keys};
+session_keys(_State) -> {error, session_keys_not_ready}.
+
+handle_hello(#{peer_id := PeerId, session_id := RemoteSession, nonce := RemoteNonce} = Frame, State) ->
     case validate_peer(PeerId, State) of
         ok ->
             State1 = State#{remote_session_id := RemoteSession,
                             remote_nonce := RemoteNonce},
             case maps:get(mode, State1) of
                 certificate_control ->
-                    case proof(State1) of
-                        {ok, Proof} ->
-                            {send, Proof, State1#{status := preserve_established(State1,
-                                                                               waiting_proof_ack)}};
-                        {error, Reason} -> {reject, {error, Reason}, State1#{status := failed}}
+                    case maps:get(ephemeral_public_key, Frame, undefined) of
+                        RemoteEphemeral when is_binary(RemoteEphemeral), byte_size(RemoteEphemeral) > 0 ->
+                            State2 = State1#{remote_ephemeral_public_key := RemoteEphemeral},
+                            case proof(State2) of
+                                {ok, Proof} ->
+                                    {send, Proof, State2#{status := preserve_established(State2,
+                                                                                       waiting_proof_ack)}};
+                                {error, Reason} -> {reject, {error, Reason}, State2#{status := failed}}
+                            end;
+                        _ ->
+                            {reject, {error, missing_ephemeral_public_key}, State1#{status := failed}}
                     end;
                 _ ->
                     {send, ack(State1), State1}
@@ -86,18 +98,24 @@ handle_proof(#{peer_id := PeerId,
                session_id := RemoteSession,
                ack_for := AckFor,
                nonce := RemoteNonce,
+               ephemeral_public_key := RemoteEphemeralPublicKey,
                certificate_der := CertificateDer,
                signature := Signature},
              State = #{mode := certificate_control}) ->
     case {validate_peer(PeerId, State), AckFor =:= maps:get(session_id, State)} of
         {ok, true} ->
             State1 = State#{remote_session_id := RemoteSession,
-                            remote_nonce := RemoteNonce},
+                            remote_nonce := RemoteNonce,
+                            remote_ephemeral_public_key := RemoteEphemeralPublicKey},
             case verify_remote_proof(CertificateDer, Signature, State1) of
                 {ok, Fingerprint} ->
-                    Authenticated = State1#{remote_authenticated := true,
-                                            remote_certificate_fingerprint := Fingerprint},
-                    complete_proof(Authenticated);
+                    Authenticated0 = State1#{remote_authenticated := true,
+                                             remote_certificate_fingerprint := Fingerprint},
+                    case derive_session_keys(Authenticated0) of
+                        {ok, Authenticated} -> complete_proof(Authenticated);
+                        {error, Reason2} ->
+                            {reject, {error, Reason2}, Authenticated0#{status := failed}}
+                    end;
                 {error, Reason} ->
                     {reject, {error, Reason}, State1#{status := failed}}
             end;
@@ -141,6 +159,7 @@ proof(State) ->
                    maps:get(session_id, State),
                    maps:get(remote_session_id, State),
                    maps:get(nonce, State),
+                   maps:get(local_ephemeral_public_key, State),
                    CertificateDer,
                    Signature)};
         {error, Reason} -> {error, {certificate_proof_sign_failed, Reason}}
@@ -161,14 +180,25 @@ proof_data(State, CertificateDer) ->
     vpn_handshake_auth:proof_data(
       maps:get(local_peer_id, State), maps:get(remote_peer_id, State),
       maps:get(session_id, State), maps:get(remote_session_id, State),
-      maps:get(nonce, State), maps:get(remote_nonce, State), CertificateDer).
+      maps:get(nonce, State), maps:get(remote_nonce, State),
+      maps:get(local_ephemeral_public_key, State),
+      maps:get(remote_ephemeral_public_key, State),
+      CertificateDer).
 
 remote_proof_data(State, CertificateDer) ->
     vpn_handshake_auth:proof_data(
       maps:get(remote_peer_id, State), maps:get(local_peer_id, State),
       maps:get(remote_session_id, State), maps:get(session_id, State),
-      maps:get(remote_nonce, State), maps:get(nonce, State), CertificateDer).
+      maps:get(remote_nonce, State), maps:get(nonce, State),
+      maps:get(remote_ephemeral_public_key, State),
+      maps:get(local_ephemeral_public_key, State),
+      CertificateDer).
 
+hello(State = #{mode := certificate_control}) ->
+    vpn_handshake_frame:encode_hello(maps:get(local_peer_id, State),
+                                     maps:get(session_id, State),
+                                     maps:get(nonce, State),
+                                     maps:get(local_ephemeral_public_key, State));
 hello(State) ->
     vpn_handshake_frame:encode_hello(maps:get(local_peer_id, State),
                                      maps:get(session_id, State),
@@ -202,9 +232,13 @@ authentication_options(certificate_control, Options) ->
         none ->
             case vpn_handshake_auth:certificate_der(maps:get(local_certificate_pem, Options)) of
                 {ok, Der} ->
+                    {EphemeralPublicKey, EphemeralPrivateKey} = vpn_session_kdf:generate_key_pair(),
                     #{local_certificate_der => Der,
                       local_private_key_path => maps:get(local_private_key_path, Options),
-                      remote_ca_certificate_path => maps:get(remote_ca_certificate_path, Options)};
+                      remote_ca_certificate_path => maps:get(remote_ca_certificate_path, Options),
+                      local_ephemeral_public_key => EphemeralPublicKey,
+                      local_ephemeral_private_key => EphemeralPrivateKey,
+                      remote_ephemeral_public_key => undefined};
                 {error, Reason} -> erlang:error({invalid_handshake_certificate, Reason})
             end;
         {missing, Key} -> erlang:error({missing_handshake_option, Key})
@@ -223,6 +257,22 @@ validate_peer(PeerId, State) ->
         true -> ok;
         false -> {error, handshake_peer_id_mismatch}
     end.
+
+derive_session_keys(State) ->
+    case vpn_session_kdf:derive(
+           maps:get(local_peer_id, State), maps:get(remote_peer_id, State),
+           maps:get(session_id, State), maps:get(remote_session_id, State),
+           maps:get(nonce, State), maps:get(remote_nonce, State),
+           maps:get(local_ephemeral_private_key, State),
+           maps:get(local_ephemeral_public_key, State),
+           maps:get(remote_ephemeral_public_key, State)) of
+        {ok, Keys} -> {ok, State#{session_keys := Keys}};
+        {error, Reason} -> {error, Reason}
+    end.
+
+key_source(#{session_keys := #{key_source := Source}}) -> Source;
+key_source(#{mode := certificate_control}) -> pending_ephemeral_ecdh;
+key_source(_) -> psk.
 
 normalize_peer_id(PeerId) when is_atom(PeerId) -> atom_to_binary(PeerId, utf8);
 normalize_peer_id(PeerId) when is_binary(PeerId) -> PeerId.
