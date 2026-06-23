@@ -1253,6 +1253,7 @@ vpn_manager:rekey(client_a).
 The rekey performs a fresh certificate-authenticated ephemeral P-384 ECDH exchange, advances the key epoch, resets per-epoch counters, and temporarily retains the previous receive key for delayed UDP packets.
 
 ### Replay protection and previous-epoch grace
+Dataplane packets carry an authenticated cleartext epoch/sequence header so stale epochs are rejected before AEAD decryption; the header itself is bound as AEAD associated data.
 
 Authenticated data frames carry a key epoch and monotonic sequence number. Each
 receive epoch has an independent 64-packet sliding replay window: limited UDP

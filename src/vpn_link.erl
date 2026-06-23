@@ -480,34 +480,77 @@ send_encoded(EncodedPacket, Kind, Size, Seq, UdpPid, RemoteIp, RemoteUdpPort, St
             {noreply, State}
     end.
 
-decode_and_write(Packet, Mode, TunPid, State = #{crypto := Crypto0}) ->
+decode_and_write(Packet, Mode, TunPid, State) ->
+    case vpn_crypto:packet_context(Packet) of
+        {ok, #{key_epoch := KeyEpoch}} ->
+            decode_epoch_packet(Packet, KeyEpoch, Mode, TunPid, State);
+        legacy ->
+            decode_legacy_packet(Packet, Mode, TunPid, State);
+        {error, Reason} ->
+            logger:error("vpn_link failed to inspect encrypted packet: ~p", [Reason]),
+            {noreply, incr_counter(State, crypto_failures)}
+    end.
+
+decode_epoch_packet(Packet, KeyEpoch, Mode, TunPid, State) ->
+    case crypto_for_epoch(KeyEpoch, State) of
+        {ok, current, Crypto} ->
+            decode_with_crypto(Packet, current, crypto, Crypto, Mode, TunPid, State);
+        {ok, previous, Crypto} ->
+            decode_with_crypto(Packet, previous, previous_crypto, Crypto, Mode, TunPid, State);
+        {error, stale_epoch} ->
+            logger:warning("vpn_link rejected stale key epoch ~p before decrypt", [KeyEpoch]),
+            {noreply, incr_counter(
+                        incr_counter(State, stale_epoch_drops), frames_rejected)}
+    end.
+
+decode_with_crypto(Packet, CryptoSlot, StateKey, Crypto0, Mode, TunPid, State) ->
+    case vpn_crypto:decode(Packet, Crypto0) of
+        {ok, DecodedFrame, Crypto1} ->
+            State1 = incr_counter(State#{StateKey := Crypto1}, crypto_decryptions),
+            decode_frame_and_write(DecodedFrame, CryptoSlot, Mode, TunPid, State1);
+        {error, Reason, Crypto1} ->
+            logger:error("vpn_link failed to decode packet: ~p", [Reason]),
+            {noreply, incr_counter(State#{StateKey := Crypto1}, crypto_failures)};
+        {error, Reason} ->
+            logger:error("vpn_link failed to decode packet: ~p", [Reason]),
+            {noreply, incr_counter(State, crypto_failures)}
+    end.
+
+decode_legacy_packet(Packet, Mode, TunPid, State = #{crypto := Crypto0}) ->
     case vpn_crypto:decode(Packet, Crypto0) of
         {ok, DecodedFrame, Crypto1} ->
             State1 = State#{crypto := Crypto1},
             State2 = incr_counter(State1, crypto_decryptions),
             decode_frame_and_write(DecodedFrame, current, Mode, TunPid, State2);
         {error, _Reason, Crypto1} ->
-            decode_with_previous_crypto(Packet, Mode, TunPid, State#{crypto := Crypto1});
+            decode_legacy_with_previous(Packet, Mode, TunPid, State#{crypto := Crypto1});
         {error, _Reason} ->
-            decode_with_previous_crypto(Packet, Mode, TunPid, State)
+            decode_legacy_with_previous(Packet, Mode, TunPid, State)
     end.
 
-decode_with_previous_crypto(Packet, Mode, TunPid,
+decode_legacy_with_previous(Packet, Mode, TunPid,
                             State = #{previous_crypto := Previous}) when is_map(Previous) ->
-    case vpn_crypto:decode(Packet, Previous) of
-        {ok, DecodedFrame, Previous1} ->
-            State1 = incr_counter(State#{previous_crypto := Previous1}, crypto_decryptions),
-            decode_frame_and_write(DecodedFrame, previous, Mode, TunPid, State1);
-        {error, Reason, Previous1} ->
-            logger:error("vpn_link failed to decode packet: ~p", [Reason]),
-            {noreply, incr_counter(State#{previous_crypto := Previous1}, crypto_failures)};
-        {error, Reason} ->
-            logger:error("vpn_link failed to decode packet: ~p", [Reason]),
-            {noreply, incr_counter(State, crypto_failures)}
-    end;
-decode_with_previous_crypto(_Packet, _Mode, _TunPid, State) ->
+    decode_with_crypto(Packet, previous, previous_crypto, Previous, Mode, TunPid, State);
+decode_legacy_with_previous(_Packet, _Mode, _TunPid, State) ->
     logger:error("vpn_link failed to decode packet: authentication_failed", []),
     {noreply, incr_counter(State, crypto_failures)}.
+
+crypto_for_epoch(KeyEpoch, State) ->
+    CurrentEpoch = current_key_epoch(State),
+    case KeyEpoch =:= CurrentEpoch of
+        true ->
+            {ok, current, maps:get(crypto, State)};
+        false ->
+            case maps:get(previous_crypto, State, undefined) of
+                #{key_epoch := KeyEpoch} = Previous ->
+                    case previous_epoch_active(State) of
+                        true -> {ok, previous, Previous};
+                        false -> {error, stale_epoch}
+                    end;
+                _ ->
+                    {error, stale_epoch}
+            end
+    end.
 
 decode_frame_and_write(DecodedFrame, CryptoSlot, Mode, TunPid, State) ->
     case vpn_frame:decode(DecodedFrame) of
