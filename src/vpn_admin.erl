@@ -174,7 +174,8 @@ auto_rekey_view(undefined) ->
     null;
 auto_rekey_view(AutoRekey) when is_map(AutoRekey) ->
     maps:with([enabled, after_seconds, after_packets, check_interval_ms,
-               failure_cooldown_ms, in_progress, last_reason,
+               failure_cooldown_ms, jitter_ms, pending, pending_reason,
+               pending_remaining_ms, in_progress, last_reason,
                last_started_at, last_completed_at, last_error,
                cooldown_remaining_ms],
               AutoRekey).

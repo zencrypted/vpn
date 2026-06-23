@@ -165,7 +165,9 @@ handshake_options(Config, IdentityInfo) ->
              auto_rekey_check_interval_ms =>
                  maps:get(auto_rekey_check_interval_ms, Config, 1000),
              auto_rekey_failure_cooldown_ms =>
-                 maps:get(auto_rekey_failure_cooldown_ms, Config, 5000)},
+                 maps:get(auto_rekey_failure_cooldown_ms, Config, 5000),
+             auto_rekey_jitter_ms =>
+                 maps:get(auto_rekey_jitter_ms, Config, 0)},
     case maps:get(handshake_mode, Config, disabled) of
         certificate_control ->
             Base#{local_certificate_pem => maps:get(certificate_pem, IdentityInfo),
@@ -278,9 +280,17 @@ validate_positive_auto_rekey_value(Key, Value, Config)
             validate_positive_auto_rekey_value(auto_rekey_failure_cooldown_ms,
                                                maps:get(auto_rekey_failure_cooldown_ms, Config, 5000),
                                                Config);
-        auto_rekey_failure_cooldown_ms -> ok
+        auto_rekey_failure_cooldown_ms ->
+            validate_nonnegative_auto_rekey_value(auto_rekey_jitter_ms,
+                                                  maps:get(auto_rekey_jitter_ms, Config, 0))
     end;
 validate_positive_auto_rekey_value(Key, Value, _Config) ->
+    {error, {invalid_auto_rekey_value, Key, Value}}.
+
+validate_nonnegative_auto_rekey_value(_Key, Value)
+  when is_integer(Value), Value >= 0 ->
+    ok;
+validate_nonnegative_auto_rekey_value(Key, Value) ->
     {error, {invalid_auto_rekey_value, Key, Value}}.
 
 validate_mode(tap) ->
@@ -319,6 +329,7 @@ runtime_config(Config) ->
                auto_rekey_after_packets,
                auto_rekey_check_interval_ms,
                auto_rekey_failure_cooldown_ms,
+               auto_rekey_jitter_ms,
                handshake_remote_ca_certificate_path],
               Config).
 

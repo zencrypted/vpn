@@ -10,6 +10,7 @@
 -define(DEBUG_FRAME_HISTORY_LIMIT, 256).
 -define(DEFAULT_AUTO_REKEY_CHECK_INTERVAL_MS, 1000).
 -define(DEFAULT_AUTO_REKEY_FAILURE_COOLDOWN_MS, 5000).
+-define(DEFAULT_AUTO_REKEY_JITTER_MS, 0).
 
 -export([start_link/5, start_link/6, start_link/8, start_link/9, start_link/10,
          stop/1, stats/1, reset_stats/1, rekey/1,
@@ -133,6 +134,15 @@ handle_info(handshake_start, State) ->
     start_handshake(State);
 handle_info(auto_rekey_check, State) ->
     {noreply, schedule_auto_rekey_check(maybe_auto_rekey(State))};
+handle_info({auto_rekey_start, Token},
+            State = #{auto_rekey_pending_token := Token}) ->
+    State1 = State#{auto_rekey_pending := false,
+                    auto_rekey_pending_token := undefined,
+                    auto_rekey_pending_reason := undefined,
+                    auto_rekey_pending_deadline_ms := undefined},
+    {noreply, schedule_auto_rekey_check(maybe_auto_rekey_now(State1))};
+handle_info({auto_rekey_start, _StaleToken}, State) ->
+    {noreply, State};
 handle_info(handshake_retry, State) ->
     retry_handshake(State);
 handle_info({vpn_tun_packet, TunPid, Packet},
@@ -227,7 +237,12 @@ init_tun(UdpPid, TunName, TunIp, Mode, RemoteIp, RemoteUdpPort, PeerId, RemotePe
                                  auto_rekey_after_packets => maps:get(auto_rekey_after_packets, HandshakeOptions, 0),
                                  auto_rekey_check_interval_ms => maps:get(auto_rekey_check_interval_ms, HandshakeOptions, ?DEFAULT_AUTO_REKEY_CHECK_INTERVAL_MS),
                                  auto_rekey_failure_cooldown_ms => maps:get(auto_rekey_failure_cooldown_ms, HandshakeOptions, ?DEFAULT_AUTO_REKEY_FAILURE_COOLDOWN_MS),
+                                 auto_rekey_jitter_ms => maps:get(auto_rekey_jitter_ms, HandshakeOptions, ?DEFAULT_AUTO_REKEY_JITTER_MS),
                                  auto_rekey_timer => undefined,
+                                 auto_rekey_pending => false,
+                                 auto_rekey_pending_token => undefined,
+                                 auto_rekey_pending_reason => undefined,
+                                 auto_rekey_pending_deadline_ms => undefined,
                                  auto_rekey_in_progress => false,
                                  auto_rekey_last_reason => undefined,
                                  auto_rekey_last_started_at => undefined,
@@ -790,6 +805,10 @@ auto_rekey_info(State) ->
                                     ?DEFAULT_AUTO_REKEY_CHECK_INTERVAL_MS),
       failure_cooldown_ms => maps:get(auto_rekey_failure_cooldown_ms, State,
                                       ?DEFAULT_AUTO_REKEY_FAILURE_COOLDOWN_MS),
+      jitter_ms => maps:get(auto_rekey_jitter_ms, State, ?DEFAULT_AUTO_REKEY_JITTER_MS),
+      pending => maps:get(auto_rekey_pending, State, false),
+      pending_reason => maps:get(auto_rekey_pending_reason, State, undefined),
+      pending_remaining_ms => auto_rekey_pending_remaining_ms(State),
       in_progress => maps:get(auto_rekey_in_progress, State, false),
       last_reason => maps:get(auto_rekey_last_reason, State, undefined),
       last_started_at => maps:get(auto_rekey_last_started_at, State, undefined),
@@ -822,26 +841,51 @@ maybe_auto_rekey(State0) ->
     State = State0#{auto_rekey_timer := undefined},
     case auto_rekey_reason(State) of
         none -> State;
-        Reason ->
-            case begin_rekey(State) of
-                {ok, NextEpoch, State1} ->
-                    logger:info("vpn_link automatic rekey started reason=~p next_epoch=~p",
-                                [Reason, NextEpoch]),
-                    incr_counter(State1#{auto_rekey_in_progress := true,
-                                        auto_rekey_last_reason := Reason,
-                                        auto_rekey_last_started_at := erlang:system_time(second),
-                                        auto_rekey_last_error := undefined},
-                                 auto_rekeys_started);
-                {error, rekey_in_progress, State1} -> State1;
-                {error, Reason2, State1} ->
-                    mark_auto_rekey_failed(State1#{auto_rekey_in_progress := true}, Reason2)
-            end
+        Reason -> schedule_or_start_auto_rekey(Reason, State)
+    end.
+
+schedule_or_start_auto_rekey(Reason, State) ->
+    JitterMs = maps:get(auto_rekey_jitter_ms, State, ?DEFAULT_AUTO_REKEY_JITTER_MS),
+    case vpn_auto_rekey:jitter_delay(JitterMs) of
+        0 -> start_auto_rekey(Reason, State);
+        DelayMs ->
+            Token = make_ref(),
+            _ = erlang:send_after(DelayMs, self(), {auto_rekey_start, Token}),
+            logger:info("vpn_link automatic rekey scheduled reason=~p delay_ms=~p",
+                        [Reason, DelayMs]),
+            State#{auto_rekey_pending := true,
+                   auto_rekey_pending_token := Token,
+                   auto_rekey_pending_reason := Reason,
+                   auto_rekey_pending_deadline_ms :=
+                       erlang:monotonic_time(millisecond) + DelayMs}
+    end.
+
+maybe_auto_rekey_now(State) ->
+    case auto_rekey_reason(State) of
+        none -> State;
+        Reason -> start_auto_rekey(Reason, State)
+    end.
+
+start_auto_rekey(Reason, State) ->
+    case begin_rekey(State) of
+        {ok, NextEpoch, State1} ->
+            logger:info("vpn_link automatic rekey started reason=~p next_epoch=~p",
+                        [Reason, NextEpoch]),
+            incr_counter(State1#{auto_rekey_in_progress := true,
+                                auto_rekey_last_reason := Reason,
+                                auto_rekey_last_started_at := erlang:system_time(second),
+                                auto_rekey_last_error := undefined},
+                         auto_rekeys_started);
+        {error, rekey_in_progress, State1} -> State1;
+        {error, Reason2, State1} ->
+            mark_auto_rekey_failed(State1#{auto_rekey_in_progress := true}, Reason2)
     end.
 
 auto_rekey_reason(State) ->
     NowMs = erlang:monotonic_time(millisecond),
     case {auto_rekey_enabled(State),
-          maps:get(auto_rekey_in_progress, State, false),
+          maps:get(auto_rekey_in_progress, State, false) orelse
+              maps:get(auto_rekey_pending, State, false),
           vpn_auto_rekey:cooldown_active(
             maps:get(auto_rekey_cooldown_until, State, undefined), NowMs),
           maps:get(session_lifecycle, State, undefined)} of
@@ -883,6 +927,13 @@ mark_auto_rekey_failed(State, Reason) ->
                                       erlang:monotonic_time(millisecond), Cooldown)},
                          auto_rekeys_failed);
         false -> State
+    end.
+
+auto_rekey_pending_remaining_ms(State) ->
+    case maps:get(auto_rekey_pending_deadline_ms, State, undefined) of
+        undefined -> 0;
+        Deadline when is_integer(Deadline) ->
+            max(0, Deadline - erlang:monotonic_time(millisecond))
     end.
 
 debug_replay_info(State) ->

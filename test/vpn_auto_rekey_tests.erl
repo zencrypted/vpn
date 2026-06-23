@@ -19,3 +19,11 @@ active_cooldown_is_reported_test() ->
     ?assertEqual(3000, vpn_auto_rekey:cooldown_remaining_ms(Until, Now)),
     ?assertNot(vpn_auto_rekey:cooldown_active(Until, Until)),
     ?assertEqual(0, vpn_auto_rekey:cooldown_remaining_ms(Until, Until + 1)).
+
+
+jitter_disabled_test() ->
+    ?assertEqual(0, vpn_auto_rekey:jitter_delay(0)).
+
+jitter_range_test() ->
+    Values = [vpn_auto_rekey:jitter_delay(25) || _ <- lists:seq(1, 100)],
+    ?assert(lists:all(fun(Value) -> Value >= 0 andalso Value =< 25 end, Values)).

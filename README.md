@@ -1324,3 +1324,14 @@ The feature is disabled unless at least one threshold is positive:
 The first reached threshold starts one rekey operation. Concurrent automatic attempts are
 suppressed, failures enter a cooldown, and runtime/admin statistics expose the trigger,
 progress, and completion counters. Production defaults keep automatic rekey disabled.
+
+
+### Automatic rekey jitter
+
+Automatic rekey checks may add a bounded random delay before initiating a new authenticated exchange:
+
+```erlang
+#{auto_rekey_jitter_ms => 1000}
+```
+
+A value of `0` preserves immediate triggering. While the delay is pending, repeated checks do not schedule duplicate rekeys. Runtime statistics expose `pending`, `pending_reason`, and `pending_remaining_ms`. If another exchange refreshes the key epoch before the delay expires, the pending trigger is re-evaluated and safely abandoned.
