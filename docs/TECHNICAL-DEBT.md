@@ -135,3 +135,10 @@ profile). The following hardening remains intentionally separate:
 ## Debug replay controls
 
 The encrypted-frame history and replay API are intentionally debug-only. Production configurations must keep `debug_replay_controls` disabled. The retained history is bounded to 256 ciphertext frames and exposes only metadata through the read API. A future hardening pass should compile these controls out of release builds or protect them behind a dedicated development feature flag.
+
+## Revisioned provisioning contract
+
+The runtime now accepts serialized, monotonic provisioning commands through
+`vpn_provisioning`. Delivery is idempotent by revision and payload, stale
+commands are rejected, and remove operations retain an in-memory tombstone.
+Durable persistence and authenticated transport from IAS remain follow-up work.

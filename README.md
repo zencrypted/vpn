@@ -66,6 +66,7 @@ private-key body is never returned or logged.
 - `vpn_peer` - public runtime peer abstraction.
 - `vpn_manager` - management API for supervised peers.
 - `vpn_peer_registry` - ETS-backed runtime registry bootstrapped from trusted application configuration.
+- `vpn_provisioning` - revisioned, idempotent IAS-to-VPN desired-state command contract.
 - `vpn_trust_store` - development CA certificate trust store.
 - `vpn_ovpn_envelope` - canonical OVPN subset constants and value validators.
 - `vpn_ovpn_parser` - strict OVPN parser and normalized peer-config conversion.
@@ -93,6 +94,40 @@ vpn_peer_registry:remove(PeerId).
 `vpn_manager:reload_config/0` reconciles supervised peers against the enabled
 registry entries. Live automatic reconciliation and IAS synchronization remain
 separate follow-up stages.
+
+## Revisioned provisioning commands
+
+`vpn_provisioning:apply/1` accepts monotonic per-peer commands from a trusted
+provisioning source. Repeated delivery of the same revision and payload is
+idempotent, lower revisions are rejected as stale, and conflicting payloads at
+the same revision are rejected. Supported operations are `upsert`, `enable`,
+`disable`, `revoke`, and `remove`.
+
+```erlang
+vpn_provisioning:apply(#{
+    peer_id => client_a,
+    revision => 3,
+    operation => upsert,
+    source => ias,
+    desired_state => #{
+        enabled => true,
+        device_id => <<"device-123">>,
+        authorization_mode => policy,
+        authorized => true,
+        certificate_fingerprint => <<"ABCD...">>
+    }
+}).
+```
+
+A new peer must include `runtime_config` inside `desired_state`; updates to an
+existing peer merge trusted desired-state metadata into its internal runtime
+configuration. `revoke` disables the peer, clears authorization, and prevents a
+plain `enable` command until a higher-revision `upsert` explicitly sets
+`revoked => false`. Public registry and provisioning history responses never
+contain PSKs or private-key material.
+
+Use `vpn_provisioning:status/0` for counters and
+`vpn_provisioning:history/1` for bounded per-peer audit history.
 
 ## Build
 

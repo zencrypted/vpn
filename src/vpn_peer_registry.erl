@@ -159,7 +159,13 @@ entry(PeerConfig, Source, DefaultEnabled) ->
                                           Identity,
                                           maps:get(certificate_fingerprint,
                                                    PeerConfig,
-                                                   undefined))}.
+                                                   undefined)),
+      revision => maps:get(revision, PeerConfig, 0),
+      revoked => maps:get(revoked, PeerConfig, false),
+      last_provisioning_operation => maps:get(last_provisioning_operation,
+                                              PeerConfig,
+                                              undefined),
+      updated_at => maps:get(updated_at, PeerConfig, undefined)}.
 
 safe_entry(Entry) ->
     maps:with([id,
@@ -169,7 +175,11 @@ safe_entry(Entry) ->
                authorization_mode,
                authorized,
                authorization_reason,
-               certificate_fingerprint],
+               certificate_fingerprint,
+               revision,
+               revoked,
+               last_provisioning_operation,
+               updated_at],
               Entry).
 
 compare_entries(#{id := A}, #{id := B}) ->
