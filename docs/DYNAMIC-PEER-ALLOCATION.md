@@ -387,10 +387,16 @@ Restored allocations are reconstructed into the slot index and checked against
 the current allocator configuration; malformed, duplicated, or incompatible
 state stops allocator startup instead of silently reallocating resources.
 
-Durable state contains only allocation metadata. It never contains private-key
-bodies, session keys, replay windows, ECDH material, or packet state. Provisioning
-revisions, revoke/remove/decommission tombstones, registry reconstruction, and
-runtime restart recovery remain later Stage 8A work described in
+Stage 8A.3 adds a separate provisioning section to the same projection. Accepted
+client-peer revisions, deterministic command digests, safe desired-state fields,
+revoked lifecycle state, and remove tombstones now survive restart. Commands use
+a durable `pending` barrier followed by an `applied` commit, so matching retry can
+finish an interrupted idempotent operation while newer revisions stay blocked.
+
+Durable state never contains private-key bodies or paths, PSKs, session keys,
+replay windows, ECDH material, raw runtime configuration, or packet state.
+Registry reconstruction, peer-process restart recovery, and an atomic
+cross-section decommission barrier remain later Stage 8A work described in
 `TECHNICAL-DEBT.md`.
 
 ## Current non-goals after the single-RPC bootstrap and Stage 7
@@ -399,6 +405,7 @@ The completed dynamic allocation, IAS cutover, synchronized lifecycle, and
 explicit decommission stages do not:
 
 - restore registry entries or peer processes after a VPN application or node restart;
-- persist provisioning revisions or revoke/remove/decommission tombstones;
+- reconstruct registry entries or peer processes from durable provisioning state;
+- persist an atomic allocator-plus-provisioning decommission barrier;
 - automatically erase retained development identities unless explicitly asked;
 - accept allocator resource choices from IAS, trusted defaults, or an OVPN file.

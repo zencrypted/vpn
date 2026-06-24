@@ -43,7 +43,7 @@ explicit reload operation remains available as a recovery/full-reconcile path.
 
 `vpn_provisioning` accepts monotonic, idempotent provisioning commands for
 `upsert`, `enable`, `disable`, `revoke`, and `remove`. Stale revisions and
-revision conflicts are rejected, remove operations retain in-memory tombstones,
+revision conflicts are rejected, remove operations retain durable tombstones,
 and revoke prevents ordinary re-enable until a newer identity reissue arrives.
 Accepted, unchanged, stale, conflicting, and revoked commands are represented in
 bounded per-peer audit history. Authorization metadata is normalized when policy
@@ -64,11 +64,12 @@ allocator slot, and optionally removes the local development identity bundle.
 Stale revisions remain blocked by the live provisioning head, and allocation
 release prevents resolver-based reconstruction of the old peer IDs.
 
-Allocator assignments now survive allocator and projection restarts through the
-Stage 8A.2 durable projection. The remaining work is provisioning durability and
-runtime recovery: revision heads, revoke/remove/decommission tombstones, registry
-reconstruction, and recovery order must survive process and node restarts without
-persisting private or session material. See
+Allocator assignments and revisioned provisioning barriers now survive process
+and projection restarts through the Stage 8A durable projection. The remaining
+work is runtime recovery and atomic decommission state: registry reconstruction,
+peer restart order, and allocator-plus-provisioning decommission barriers must
+survive process and node restarts without persisting private or session material.
+See
 [`DYNAMIC-PEER-ALLOCATION.md`](DYNAMIC-PEER-ALLOCATION.md).
 
 ## Completed — TD-018 single-RPC revisioned dynamic bootstrap
@@ -84,12 +85,13 @@ two-step APIs remain temporarily available for IAS migration compatibility.
 
 ## In progress — Durable provisioning and allocation projection
 
-The allocator is now backed by the durable VPN projection, while the provisioning
-registry and command ledger remain in-memory runtime projections. A process or
-node restart restores active Device allocations, release barriers, and the
-monotonic generation barrier, but it still does not retain IAS-applied
-revisions, provisioning tombstones, revocations, registry entries, or
-provisioning history.
+The allocator and revisioned provisioning ledger are now backed by the durable VPN
+projection, while the peer registry and runtime process set remain in-memory
+projections. A process or node restart restores active Device allocations,
+release barriers, the monotonic generation barrier, accepted revisions, command
+digests, revocations, and remove tombstones. It still does not reconstruct
+registry entries or peer processes, and bounded provisioning history remains
+volatile operational telemetry.
 
 Stage 8A.1 now provides the separate durable foundation: a replaceable
 `vpn_projection_store` behaviour, a KVS/Mnesia synchronous compare-and-set backend, one
@@ -102,9 +104,15 @@ Stage 8A.2 connects allocator initialization, reserve, and release mutations to
 the projection. One stable allocator instance ID, `next_generation`, active
 Device allocations, and per-Device release barriers are restored before the
 allocator becomes ready. Mutations are published only after synchronous commit,
-and malformed or configuration-
-incompatible allocator state fails startup closed. Provisioning remains the next
-reviewable durability boundary.
+and malformed or configuration-incompatible allocator state fails startup closed.
+
+Stage 8A.3 adds a versioned provisioning section. A new revision is committed as
+a durable pending barrier before its idempotent runtime action and finalized as
+applied only after success. Matching re-delivery resumes a pending action; newer
+revisions are rejected until recovery completes. Applied revision/digest heads,
+revoked lifecycle state, safe desired-state metadata, and remove tombstones are
+validated and restored fail-closed. Runtime configuration, PSKs, private-key
+references, session material, and replay state are not written to the ledger.
 
 The target ownership model is:
 
@@ -116,30 +124,26 @@ identity and policy state -> revisioned desired state
                               -> reconciled processes
 ```
 
-The next stage should add the durable provisioning ledger with these constraints:
+The durable provisioning ledger now provides these guarantees:
 
-- persist the last accepted revision and canonical command identity per peer;
-- persist remove tombstones and revoked state so stale commands cannot resurrect
-  a peer after restart;
-- persist only the desired-state fields required to reconstruct runtime entries;
-- never persist session keys, replay windows, ephemeral ECDH material, PSKs, or
-  private-key contents;
-- private-key references may be stored only as trusted local references already
-  subject to import-root policy;
-- use a versioned on-disk format with explicit migration handling;
-- write atomically through a temporary file, flush, and rename, or use another
-  storage mechanism with equivalent crash-consistency guarantees;
-- fail closed on corrupt or unsupported state instead of silently discarding
-  revocations or revision barriers;
-- treat IAS replay/snapshot delivery as the recovery authority when local state
-  is absent or rejected;
-- define audit retention separately from the minimal revision/tombstone state.
+- the last accepted revision and canonical command digest are stored per peer;
+- remove tombstones and revoked state survive restart;
+- only a conservative safe desired-state projection is retained;
+- pending/applied phases close the crash window around runtime mutation;
+- corrupt, unsupported, or structurally invalid ledger state fails startup closed;
+- session keys, replay windows, ephemeral ECDH material, PSKs, private-key
+  references, and raw runtime configuration are excluded;
+- audit retention remains separate from the minimal revision/tombstone state.
+
+The next stage must reconstruct registry/runtime state only after this ledger and
+the allocator projection have both passed validation, with IAS replay remaining
+the authority when local desired state is absent.
 
 The storage boundary is now fixed while the backend remains replaceable. The
 first backend uses `zencrypted/kvs` with local Mnesia `disc_copies` and an
 explicit transaction rather than the KVS default dirty context. Allocator state
-is now connected. Subsequent patches must connect provisioning heads/tombstones,
-and finally reconstruct registry/runtime state only after projection validation.
+and provisioning heads/tombstones are now connected. The next patch must
+reconstruct registry/runtime state only after projection validation.
 
 ## TD-005 — Device-lock authorization
 

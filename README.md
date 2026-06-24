@@ -3,7 +3,7 @@
 VPN Overlay Network for the Zencrypted ecosystem.
 
 This repository currently contains a minimal Erlang/OTP VPN dataplane prototype.
-Certificate-control peers now derive directional dataplane keys with ephemeral ECDH and HKDF-SHA256. Legacy non-certificate peers may still use PSK mode. A runtime peer registry now supports trusted inventory mutation and automatic live reconciliation; persistent provisioning, CA services, and IAS policy synchronization remain future work.
+Certificate-control peers now derive directional dataplane keys with ephemeral ECDH and HKDF-SHA256. Legacy non-certificate peers may still use PSK mode. A runtime peer registry supports trusted inventory mutation and automatic live reconciliation, while allocator reservations and provisioning revision barriers are durable through KVS/Mnesia. Registry/runtime reconstruction, CA services, and IAS policy synchronization remain future work.
 
 ## Architecture
 
@@ -103,10 +103,18 @@ barrier until that Device is allocated again. Restored allocations are checked
 against the current transport configuration; incompatible or malformed state
 fails allocator startup instead of silently reallocating resources.
 
-Provisioning heads, revocations, remove tombstones, registry entries, and runtime
-processes are still volatile until the following Stage 8A patches. The projection
-continues to reject known secret-bearing fields such as PSKs, private-key paths,
-session keys, ECDH private material, and replay windows.
+Stage 8A.3 stores each accepted provisioning head in the same durable projection.
+Every new revision is first committed as a `pending` barrier, then the idempotent
+registry/runtime action runs, and a second commit marks the head `applied`. If the
+runtime action or final commit fails, re-delivery of the same revision and digest
+resumes the pending command; newer revisions remain blocked until recovery
+completes. Applied revision digests, safe desired-state metadata, revoked state,
+and remove tombstones therefore survive provisioning-process and VPN-node
+restart. The ledger excludes `runtime_config` and all known secret-bearing fields.
+
+Registry entries and runtime processes are not reconstructed from this ledger yet;
+that is the following Stage 8A recovery patch. Provisioning history and counters
+remain bounded, volatile operational telemetry rather than durable audit storage.
 
 ## Runtime peer registry
 

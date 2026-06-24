@@ -139,6 +139,37 @@ new_peer_requires_runtime_config_test_() ->
                                                                         enabled => false}}))]
      end}.
 
+runtime_secret_material_is_not_persisted_test_() ->
+    {setup,
+     fun setup/0,
+     fun cleanup/1,
+     fun({_Registry, _Provisioning}) ->
+             [?_test(begin
+                          Command = new_peer_command(
+                                      1,
+                                      upsert,
+                                      #{runtime_config => peer_config(peer_b),
+                                        device_id => <<"safe-device">>,
+                                        enabled => false,
+                                        authorized => true}),
+                          ?assertMatch({ok, #{operation := upsert}},
+                                       vpn_provisioning:apply(Command)),
+                          {ok, _Version,
+                           #{provisioning :=
+                                 #{entries := Entries}}} = vpn_projection:get(),
+                          Durable = maps:get(peer_b, Entries),
+                          Desired = maps:get(desired_state, Durable),
+                          ?assertEqual(false,
+                                       maps:is_key(runtime_config, Desired)),
+                          ?assertEqual(false, maps:is_key(psk, Desired)),
+                          ?assertEqual(false,
+                                       maps:is_key(private_key_path, Desired)),
+                          ?assertEqual(<<"safe-device">>,
+                                       maps:get(device_id, Desired))
+                      end)]
+     end}.
+
+
 static_template_resolver_lifecycle_test_() ->
     {setup,
      fun setup_with_runtime/0,
@@ -228,6 +259,161 @@ static_template_resolver_lifecycle_test_() ->
 
                           {ok, Existing} = vpn_peer_registry:get(peer_a),
                           ?assertEqual(peer_a, maps:get(id, Existing))
+                      end)]
+     end}.
+
+
+durable_ledger_survives_provisioning_restart_test_() ->
+    {setup,
+     fun setup/0,
+     fun cleanup/1,
+     fun({_Registry, Provisioning}) ->
+             [?_test(begin
+                          Upsert = command(1, upsert,
+                                           #{device_id => <<"durable-device">>,
+                                             enabled => true,
+                                             authorized => true}),
+                          ?assertMatch({ok, #{operation := upsert}},
+                                       vpn_provisioning:apply(Upsert)),
+                          stop_pid_normal(Provisioning),
+                          stop(vpn_projection),
+                          {ok, _RestartedProjection1} =
+                              vpn_projection:start_link(
+                                vpn_projection_test_store),
+                          {ok, Restarted1} = vpn_provisioning:start_link(),
+
+                          ?assertEqual({ok, unchanged},
+                                       vpn_provisioning:apply(Upsert)),
+                          ?assertEqual({error, stale_revision},
+                                       vpn_provisioning:apply(
+                                         command(0, disable, #{}))),
+                          ?assertEqual({error, revision_conflict},
+                                       vpn_provisioning:apply(
+                                         command(1, disable, #{}))),
+
+                          Revoke = command(2, revoke,
+                                           #{authorization_reason =>
+                                                 certificate_revoked}),
+                          ?assertMatch({ok, #{operation := revoke}},
+                                       vpn_provisioning:apply(Revoke)),
+                          stop_pid_normal(Restarted1),
+                          {ok, Restarted2} = vpn_provisioning:start_link(),
+                          ?assertEqual({error, revoked},
+                                       vpn_provisioning:apply(
+                                         command(3, enable, #{}))),
+
+                          Reissue = command(3, upsert,
+                                            #{revoked => false,
+                                              enabled => true,
+                                              authorized => true}),
+                          ?assertMatch({ok, #{operation := upsert}},
+                                       vpn_provisioning:apply(Reissue)),
+                          ?assertEqual({ok, removed},
+                                       vpn_provisioning:apply(
+                                         command(4, remove, #{}))),
+                          stop_pid_normal(Restarted2),
+                          stop(vpn_projection),
+                          {ok, _RestartedProjection2} =
+                              vpn_projection:start_link(
+                                vpn_projection_test_store),
+                          {ok, _Restarted3} = vpn_provisioning:start_link(),
+                          ?assertEqual({error, stale_revision},
+                                       vpn_provisioning:apply(Reissue)),
+
+                          {ok, _ProjectionVersion,
+                           #{provisioning :=
+                                 #{schema_version := 1,
+                                   entries := Entries}}} = vpn_projection:get(),
+                          Entry = maps:get(peer_a, Entries),
+                          ?assertEqual(4, maps:get(revision, Entry)),
+                          ?assertEqual(applied, maps:get(phase, Entry)),
+                          ?assertEqual(removed,
+                                       maps:get(lifecycle_state, Entry)),
+                          ?assertEqual(false,
+                                       maps:is_key(runtime_config,
+                                                   maps:get(desired_state,
+                                                            Entry))),
+                          Status = vpn_provisioning:status(),
+                          ?assertEqual(durable,
+                                       maps:get(persistence, Status)),
+                          ?assertEqual(0,
+                                       maps:get(pending_commands, Status))
+                      end)]
+     end}.
+
+projection_commit_failure_does_not_publish_runtime_change_test_() ->
+    {setup,
+     fun setup/0,
+     fun cleanup/1,
+     fun({_Registry, _Provisioning}) ->
+             [?_test(begin
+                          ok = vpn_projection_test_store:fail_next_commit(
+                                 simulated_projection_failure),
+                          ?assertMatch(
+                             {error,
+                              {provisioning_ledger_commit_failed, _}},
+                             vpn_provisioning:apply(
+                               command(1, disable, #{}))),
+                          {ok, Entry} = vpn_peer_registry:get(peer_a),
+                          ?assertEqual(true, maps:get(enabled, Entry)),
+                          Status = vpn_provisioning:status(),
+                          ?assertEqual(0,
+                                       maps:get(pending_commands, Status))
+                      end)]
+     end}.
+
+pending_command_is_resumed_after_finalize_failure_test_() ->
+    {setup,
+     fun setup/0,
+     fun cleanup/1,
+     fun({_Registry, Provisioning}) ->
+             [?_test(begin
+                          Disable = command(1, disable, #{}),
+                          ok = vpn_projection_test_store:fail_after_commits(
+                                 1,
+                                 simulated_finalize_failure),
+                          ?assertMatch(
+                             {error,
+                              {provisioning_ledger_finalize_failed, _}},
+                             vpn_provisioning:apply(Disable)),
+                          {ok, Disabled} = vpn_peer_registry:get(peer_a),
+                          ?assertEqual(false, maps:get(enabled, Disabled)),
+                          ?assertEqual(1,
+                                       maps:get(pending_commands,
+                                                vpn_provisioning:status())),
+
+                          stop_pid_normal(Provisioning),
+                          {ok, _Restarted} = vpn_provisioning:start_link(),
+                          ?assertMatch({ok, #{operation := disable}},
+                                       vpn_provisioning:apply(Disable)),
+                          ?assertEqual({ok, unchanged},
+                                       vpn_provisioning:apply(Disable)),
+                          ?assertEqual(0,
+                                       maps:get(pending_commands,
+                                                vpn_provisioning:status()))
+                      end)]
+     end}.
+
+
+unsupported_provisioning_schema_fails_closed_test_() ->
+    {setup,
+     fun setup/0,
+     fun cleanup/1,
+     fun({_Registry, Provisioning}) ->
+             [?_test(begin
+                          {ok, _Version, _Projection} =
+                              vpn_projection:update(
+                                provisioning,
+                                fun(_Current) ->
+                                        #{schema_version => 99,
+                                          entries => #{}}
+                                end),
+                          stop_pid_normal(Provisioning),
+                          Expected =
+                              {provisioning_projection_restore_failed,
+                               {unsupported_provisioning_schema_version, 99}},
+                          ?assertEqual({error, Expected},
+                                       start_provisioning_fail_closed(Expected))
                       end)]
      end}.
 
@@ -330,18 +516,24 @@ command(Revision, Operation, Desired) ->
 setup() ->
     stop(vpn_provisioning),
     stop(vpn_peer_registry),
+    stop(vpn_projection),
+    ok = vpn_projection_test_store:reset(),
     application:unset_env(vpn, runtime_config_resolver),
     application:unset_env(vpn, runtime_config_template),
     application:unset_env(vpn, runtime_config_templates),
     application:set_env(vpn, peers, [peer_config(peer_a)]),
     application:set_env(vpn, ovpn_sessions, []),
+    {ok, _Projection} =
+        vpn_projection:start_link(vpn_projection_test_store),
     {ok, Registry} = vpn_peer_registry:start_link(),
     {ok, Provisioning} = vpn_provisioning:start_link(),
     {Registry, Provisioning}.
 
-cleanup({Registry, Provisioning}) ->
-    shutdown(Provisioning),
-    shutdown(Registry),
+cleanup({_Registry, _Provisioning}) ->
+    stop(vpn_provisioning),
+    stop(vpn_peer_registry),
+    stop(vpn_projection),
+    ok = vpn_projection_test_store:reset(),
     application:unset_env(vpn, runtime_config_resolver),
     application:unset_env(vpn, runtime_config_template),
     application:unset_env(vpn, runtime_config_templates),
@@ -354,22 +546,28 @@ setup_with_runtime() ->
     stop(vpn_peer_reconciler),
     stop(vpn_peer_sup),
     stop(vpn_peer_registry),
+    stop(vpn_projection),
+    ok = vpn_projection_test_store:reset(),
     application:unset_env(vpn, runtime_config_resolver),
     application:unset_env(vpn, runtime_config_template),
     application:unset_env(vpn, runtime_config_templates),
     application:set_env(vpn, peers, [peer_config(peer_a)]),
     application:set_env(vpn, ovpn_sessions, []),
+    {ok, _Projection} =
+        vpn_projection:start_link(vpn_projection_test_store),
     {ok, Registry} = vpn_peer_registry:start_link(),
     {ok, PeerSup} = vpn_peer_sup:start_link(),
     {ok, Reconciler} = vpn_peer_reconciler:start_link(),
     {ok, Provisioning} = vpn_provisioning:start_link(),
     {Registry, Provisioning, PeerSup, Reconciler}.
 
-cleanup_with_runtime({Registry, Provisioning, PeerSup, Reconciler}) ->
-    shutdown(Provisioning),
-    shutdown(Reconciler),
-    shutdown(PeerSup),
-    shutdown(Registry),
+cleanup_with_runtime({_Registry, _Provisioning, _PeerSup, _Reconciler}) ->
+    stop(vpn_provisioning),
+    stop(vpn_peer_reconciler),
+    stop(vpn_peer_sup),
+    stop(vpn_peer_registry),
+    stop(vpn_projection),
+    ok = vpn_projection_test_store:reset(),
     application:unset_env(vpn, runtime_config_resolver),
     application:unset_env(vpn, runtime_config_template),
     application:unset_env(vpn, runtime_config_templates),
@@ -417,12 +615,32 @@ static_template() ->
       replay_window => #{counter => 1},
       link_pid => self()}.
 
-stop(Name) ->
-    case whereis(Name) of undefined -> ok; Pid -> shutdown(Pid) end.
 
-shutdown(Pid) ->
+start_provisioning_fail_closed(ExpectedReason) ->
+    PreviousTrapExit = process_flag(trap_exit, true),
+    try
+        Result = vpn_provisioning:start_link(),
+        receive
+            {'EXIT', _Pid, ExpectedReason} -> ok
+        after 100 ->
+            ok
+        end,
+        Result
+    after
+        process_flag(trap_exit, PreviousTrapExit)
+    end.
+
+stop(Name) ->
+    case whereis(Name) of
+        undefined -> ok;
+        Pid -> stop_pid_normal(Pid)
+    end.
+
+stop_pid_normal(Pid) ->
     case is_process_alive(Pid) of
-        true -> unlink(Pid), exit(Pid, shutdown), wait(Pid, 30);
+        true ->
+            ok = gen_server:stop(Pid, normal, 5000),
+            wait(Pid, 30);
         false -> ok
     end.
 

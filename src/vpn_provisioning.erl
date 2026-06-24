@@ -2,8 +2,9 @@
 %% @doc Revisioned IAS-to-VPN provisioning command contract.
 %%
 %% Commands are serialized by this process. Revisions are monotonic per peer,
-%% duplicate delivery is idempotent, and removed peers retain an in-memory
-%% tombstone so delayed commands cannot resurrect stale desired state.
+%% duplicate delivery is idempotent, and accepted heads are stored in the
+%% durable VPN projection so revoke/remove barriers survive process and node
+%% restart. Runtime registry reconstruction remains a later Stage 8A boundary.
 %%%-------------------------------------------------------------------
 -module(vpn_provisioning).
 -behaviour(gen_server).
@@ -24,8 +25,9 @@ apply(Command) ->
 %%
 %% The Device identifier is bound into the command digest. The dynamic pair is
 %% materialized, written with its final revision metadata, and established
-%% before the provisioning head is committed. Ordinary apply/1 remains
-%% available for static peers and compatibility with the former two-step flow.
+%% between a durable pending barrier and the final applied head. Ordinary
+%% apply/1 remains available for static peers and compatibility with the former
+%% two-step flow.
 apply_dynamic(DeviceId, Command) ->
     gen_server:call(?SERVER, {apply_dynamic, DeviceId, Command}, infinity).
 
@@ -36,19 +38,24 @@ history(PeerId) ->
     gen_server:call(?SERVER, {history, PeerId}).
 
 init([]) ->
-    {ok, #{heads => bootstrap_heads(),
-           history => #{},
-           commands_received => 0,
-           commands_applied => 0,
-           commands_unchanged => 0,
-           commands_rejected => 0,
-           stale_revisions => 0,
-           revocations => 0,
-           last_command => undefined,
-           last_result => undefined}}.
+    case restore_heads() of
+        {ok, Heads} ->
+            {ok, #{heads => Heads,
+                   history => #{},
+                   commands_received => 0,
+                   commands_applied => 0,
+                   commands_unchanged => 0,
+                   commands_rejected => 0,
+                   stale_revisions => 0,
+                   revocations => 0,
+                   last_command => undefined,
+                   last_result => undefined}};
+        {error, Reason} ->
+            {stop, {provisioning_projection_restore_failed, Reason}}
+    end.
 
 handle_call(status, _From, State) ->
-    {reply, maps:without([heads, history], State), State};
+    {reply, provisioning_status(State), State};
 handle_call({history, PeerId}, _From, State) ->
     {reply, maps:get(PeerId, maps:get(history, State), []), State};
 handle_call({apply, Command}, _From, State0) ->
@@ -81,18 +88,15 @@ increment_received(State) ->
     State#{commands_received => maps:get(commands_received, State) + 1}.
 
 apply_validated(Command, State) ->
-    apply_validated(Command, State, fun execute/1).
+    apply_validated(Command, State, fun prepare_command/1).
 
 apply_dynamic_validated(Command, State) ->
-    apply_validated(Command, State, fun execute_dynamic/1).
+    apply_validated(Command, State, fun prepare_dynamic_command/1).
 
 apply_validated(Command = #{peer_id := PeerId, revision := Revision}, State,
-                Executor) ->
+                Preparer) ->
     Heads = maps:get(heads, State),
-    Head = maps:get(PeerId,
-                    Heads,
-                    #{revision => current_registry_revision(PeerId),
-                      digest => undefined}),
+    Head = maps:get(PeerId, Heads, bootstrap_head(PeerId)),
     CurrentRevision = maps:get(revision, Head),
     Digest = command_digest(Command),
     case Revision of
@@ -100,33 +104,100 @@ apply_validated(Command = #{peer_id := PeerId, revision := Revision}, State,
             Result = {error, stale_revision},
             {Result, record_stale(Command, Result, State)};
         R when R =:= CurrentRevision ->
-            case maps:get(digest, Head, undefined) of
-                Digest ->
-                    Result = {ok, unchanged},
-                    {Result, record_unchanged(Command, Result, State)};
-                _ ->
-                    Result = {error, revision_conflict},
-                    {Result, record_rejected(Command, Result, State)}
-            end;
+            apply_current_revision(Command, Digest, Head, State, Preparer);
         _ ->
-            case Executor(Command) of
-                {ok, Outcome} ->
-                    NewHead = #{revision => Revision, digest => Digest},
-                    State2 = State#{heads => Heads#{PeerId => NewHead}},
-                    Result = {ok, Outcome},
-                    {Result, record_applied(Command, Result, State2)};
+            case validate_transition(Command, Head) of
+                ok -> prepare_new_revision(Command, Digest, Head, State, Preparer);
                 {error, Reason} ->
                     Result = {error, Reason},
                     {Result, record_rejected(Command, Result, State)}
             end
     end.
 
-execute_dynamic(#{dynamic_device_id := DeviceId,
-                  operation := upsert,
-                  peer_id := PeerId,
-                  revision := Revision,
-                  source := Source,
-                  desired_state := Desired}) ->
+apply_current_revision(Command, Digest, Head, State, Preparer) ->
+    case {maps:get(digest, Head, undefined),
+          maps:get(phase, Head, applied)} of
+        {Digest, applied} ->
+            Result = {ok, unchanged},
+            {Result, record_unchanged(Command, Result, State)};
+        {Digest, pending} ->
+            resume_pending(Command, Digest, Head, State, Preparer);
+        {_OtherDigest, _Phase} ->
+            Result = {error, revision_conflict},
+            {Result, record_rejected(Command, Result, State)}
+    end.
+
+prepare_new_revision(Command, Digest, Head, State, Preparer) ->
+    case Preparer(Command) of
+        {ok, Plan} ->
+            case persist_command_phase(Command,
+                                       Digest,
+                                       pending,
+                                       Head,
+                                       State) of
+                {ok, PendingState} ->
+                    execute_and_finalize(Command,
+                                         Digest,
+                                         Plan,
+                                         PendingState);
+                {error, Reason} ->
+                    Result = {error, Reason},
+                    {Result, record_rejected(Command, Result, State)}
+            end;
+        {error, Reason} ->
+            Result = {error, Reason},
+            {Result, record_rejected(Command, Result, State)}
+    end.
+
+resume_pending(Command, Digest, _Head, State, Preparer) ->
+    case Preparer(Command) of
+        {ok, Plan} ->
+            execute_and_finalize(Command, Digest, Plan, State);
+        {error, Reason} ->
+            Result = {error, Reason},
+            {Result, record_rejected(Command, Result, State)}
+    end.
+
+execute_and_finalize(Command, Digest, Plan, State) ->
+    PeerId = maps:get(peer_id, Command),
+    PendingHead = maps:get(PeerId, maps:get(heads, State)),
+    case execute_plan(Plan) of
+        {ok, Outcome} ->
+            case persist_command_phase(Command,
+                                       Digest,
+                                       applied,
+                                       PendingHead,
+                                       State) of
+                {ok, AppliedState} ->
+                    Result = {ok, Outcome},
+                    {Result, record_applied(Command, Result, AppliedState)};
+                {error, Reason} ->
+                    Result = {error,
+                              {provisioning_ledger_finalize_failed, Reason}},
+                    {Result, record_rejected(Command, Result, State)}
+            end;
+        {error, Reason} ->
+            %% The durable pending head intentionally remains. Re-delivery of
+            %% the same revision/digest retries the idempotent runtime action;
+            %% newer revisions are blocked until that recovery completes.
+            Result = {error, Reason},
+            {Result, record_rejected(Command, Result, State)}
+    end.
+
+validate_transition(#{operation := enable},
+                    #{lifecycle_state := revoked}) ->
+    {error, revoked};
+validate_transition(_Command, #{phase := pending}) ->
+    {error, provisioning_recovery_required};
+validate_transition(_Command, _Head) ->
+    ok.
+
+prepare_dynamic_command(#{dynamic_device_id := DeviceId,
+                          operation := upsert,
+                          peer_id := PeerId,
+                          revision := Revision,
+                          source := Source,
+                          desired_state := Desired}) ->
     case vpn_peer_allocator:lookup(DeviceId) of
         {ok, Allocation} ->
             ExpectedPeerId = maps:get(client_peer_id, Allocation),
@@ -135,13 +206,7 @@ execute_dynamic(#{dynamic_device_id := DeviceId,
                     Metadata = #{revision => Revision,
                                  source => Source,
                                  operation => upsert},
-                    case vpn_dynamic_pair:provision(DeviceId, Desired, Metadata) of
-                        {ok, PairStatus} ->
-                            {ok, #{operation => upsert,
-                                   pair => PairStatus}};
-                        {error, _} = Error ->
-                            Error
-                    end;
+                    {ok, {dynamic_upsert, DeviceId, Desired, Metadata}};
                 false ->
                     {error, {dynamic_pair_client_peer_mismatch,
                              ExpectedPeerId,
@@ -153,15 +218,12 @@ execute_dynamic(#{dynamic_device_id := DeviceId,
             Error
     end.
 
-execute(#{operation := remove, peer_id := PeerId}) ->
-    case vpn_peer_registry:remove(PeerId) of
-        ok -> {ok, removed};
-        {error, not_found} -> {ok, removed}
-    end;
-execute(Command = #{operation := Operation,
-                    peer_id := PeerId,
-                    revision := Revision,
-                    source := Source}) ->
+prepare_command(#{operation := remove, peer_id := PeerId}) ->
+    {ok, {remove, PeerId}};
+prepare_command(Command = #{operation := Operation,
+                            peer_id := PeerId,
+                            revision := Revision,
+                            source := Source}) ->
     Desired = maps:get(desired_state, Command, #{}),
     case base_config(PeerId, Desired) of
         {ok, BaseConfig} ->
@@ -173,11 +235,26 @@ execute(Command = #{operation := Operation,
                                   provisioning_source => Source,
                                   last_provisioning_operation => Operation,
                                   updated_at => Now},
-                    persist_next_config(Operation, PeerId, BaseConfig, Next);
-                Error -> Error
+                    {ok, {config, Operation, PeerId, BaseConfig, Next}};
+                {error, _} = Error -> Error
             end;
-        Error -> Error
+        {error, _} = Error -> Error
     end.
+
+execute_plan({dynamic_upsert, DeviceId, Desired, Metadata}) ->
+    case vpn_dynamic_pair:provision(DeviceId, Desired, Metadata) of
+        {ok, PairStatus} ->
+            {ok, #{operation => upsert, pair => PairStatus}};
+        {error, _} = Error ->
+            Error
+    end;
+execute_plan({remove, PeerId}) ->
+    case vpn_peer_registry:remove(PeerId) of
+        ok -> {ok, removed};
+        {error, not_found} -> {ok, removed}
+    end;
+execute_plan({config, Operation, PeerId, BaseConfig, Next}) ->
+    persist_next_config(Operation, PeerId, BaseConfig, Next).
 
 base_config(PeerId, Desired) ->
     case vpn_peer_registry:config(PeerId) of
@@ -408,19 +485,256 @@ validate_command(Command) when is_map(Command) ->
 validate_command(_) ->
     {error, invalid_command}.
 
-valid_peer_id(Value) -> is_atom(Value) orelse is_binary(Value).
-valid_source(Value) -> is_atom(Value) orelse is_binary(Value).
+valid_peer_id(Value) when is_atom(Value) -> Value =/= undefined;
+valid_peer_id(Value) when is_binary(Value) -> byte_size(Value) > 0;
+valid_peer_id(_Value) -> false.
 
-current_registry_revision(PeerId) ->
-    case vpn_peer_registry:get(PeerId) of
-        {ok, Entry} -> maps:get(revision, Entry, 0);
-        {error, not_found} -> 0
+valid_source(Value) when is_atom(Value) -> Value =/= undefined;
+valid_source(Value) when is_binary(Value) -> byte_size(Value) > 0;
+valid_source(_Value) -> false.
+
+restore_heads() ->
+    case vpn_projection:get() of
+        {ok, _ProjectionVersion, #{provisioning := Section}} ->
+            case normalize_provisioning_section(Section) of
+                {ok, Entries} ->
+                    DurableHeads = maps:map(
+                                     fun(_PeerId, Entry) ->
+                                             Entry#{durable => true}
+                                     end,
+                                     Entries),
+                    {ok, maps:merge(bootstrap_heads(), DurableHeads)};
+                {error, _} = Error -> Error
+            end;
+        {ok, _ProjectionVersion, _Projection} ->
+            {error, invalid_projection_payload};
+        {error, Reason} ->
+            {error, {projection_unavailable, Reason}};
+        Other ->
+            {error, {invalid_projection_result, Other}}
     end.
 
 bootstrap_heads() ->
-    maps:from_list([{maps:get(id, Entry),
-                     #{revision => maps:get(revision, Entry, 0), digest => undefined}}
-                    || Entry <- vpn_peer_registry:list()]).
+    maps:from_list(
+      [{maps:get(id, Entry), bootstrap_head_from_entry(Entry)}
+       || Entry <- vpn_peer_registry:list()]).
+
+bootstrap_head(PeerId) ->
+    case vpn_peer_registry:get(PeerId) of
+        {ok, Entry} -> bootstrap_head_from_entry(Entry);
+        {error, not_found} ->
+            #{revision => 0,
+              digest => undefined,
+              phase => applied,
+              operation => bootstrap,
+              source => bootstrap_sys_config,
+              lifecycle_state => active,
+              desired_state => #{},
+              updated_at => 0,
+              durable => false}
+    end.
+
+bootstrap_head_from_entry(Entry) ->
+    Base = #{revision => maps:get(revision, Entry, 0),
+             digest => undefined,
+             phase => applied,
+             operation => bootstrap,
+             source => maps:get(provisioning_source,
+                                Entry,
+                                bootstrap_sys_config),
+             lifecycle_state => lifecycle_from_safe_entry(Entry),
+             desired_state => durable_desired_state(Entry),
+             updated_at => maps:get(updated_at, Entry, 0),
+             durable => false},
+    case {maps:get(allocation_role, Entry, undefined),
+          maps:get(device_id, Entry, undefined)} of
+        {client, DeviceId} when is_binary(DeviceId), byte_size(DeviceId) > 0 ->
+            Base#{dynamic_device_id => DeviceId};
+        _ ->
+            Base
+    end.
+
+lifecycle_from_safe_entry(#{revoked := true}) -> revoked;
+lifecycle_from_safe_entry(#{enabled := false}) -> disabled;
+lifecycle_from_safe_entry(_) -> active.
+
+normalize_provisioning_section(Section) when map_size(Section) =:= 0 ->
+    {ok, #{}};
+normalize_provisioning_section(#{schema_version := 1,
+                                 entries := Entries} = Section)
+  when is_map(Entries), map_size(Section) =:= 2 ->
+    validate_provisioning_entries(maps:to_list(Entries), #{});
+normalize_provisioning_section(#{schema_version := Version}) ->
+    {error, {unsupported_provisioning_schema_version, Version}};
+normalize_provisioning_section(_Section) ->
+    {error, invalid_provisioning_projection}.
+
+validate_provisioning_entries([], Acc) ->
+    {ok, Acc};
+validate_provisioning_entries([{PeerId, Entry} | Rest], Acc) ->
+    case valid_peer_id(PeerId) andalso valid_provisioning_entry(Entry) of
+        true -> validate_provisioning_entries(Rest, Acc#{PeerId => Entry});
+        false -> {error, {invalid_provisioning_entry, PeerId}}
+    end.
+
+valid_provisioning_entry(Entry) when is_map(Entry) ->
+    Allowed = [revision,
+               digest,
+               phase,
+               operation,
+               source,
+               lifecycle_state,
+               desired_state,
+               dynamic_device_id,
+               updated_at],
+    Unknown = maps:keys(maps:without(Allowed, Entry)),
+    Revision = maps:get(revision, Entry, undefined),
+    Digest = maps:get(digest, Entry, undefined),
+    Phase = maps:get(phase, Entry, undefined),
+    Operation = maps:get(operation, Entry, undefined),
+    Source = maps:get(source, Entry, undefined),
+    Lifecycle = maps:get(lifecycle_state, Entry, undefined),
+    Desired = maps:get(desired_state, Entry, undefined),
+    UpdatedAt = maps:get(updated_at, Entry, undefined),
+    DynamicDeviceId = maps:get(dynamic_device_id, Entry, undefined),
+    Unknown =:= [] andalso
+    is_integer(Revision) andalso Revision >= 0 andalso
+    is_binary(Digest) andalso byte_size(Digest) =:= 32 andalso
+    lists:member(Phase, [pending, applied]) andalso
+    lists:member(Operation, [upsert, enable, disable, revoke, remove]) andalso
+    valid_source(Source) andalso
+    lists:member(Lifecycle, [active, disabled, revoked, removed]) andalso
+    is_map(Desired) andalso
+    is_integer(UpdatedAt) andalso UpdatedAt >= 0 andalso
+    (DynamicDeviceId =:= undefined orelse
+     (is_binary(DynamicDeviceId) andalso byte_size(DynamicDeviceId) > 0));
+valid_provisioning_entry(_Entry) ->
+    false.
+
+persist_command_phase(Command, Digest, Phase, PreviousHead, State) ->
+    PeerId = maps:get(peer_id, Command),
+    Entry = ledger_entry(Command, Digest, Phase, PreviousHead),
+    Expected = persistent_head(PreviousHead),
+    Update = fun(Section0) ->
+                     case normalize_provisioning_section(Section0) of
+                         {ok, Entries0} ->
+                             case maps:get(PeerId, Entries0, undefined) of
+                                 Expected ->
+                                     {ok, #{schema_version => 1,
+                                            entries => Entries0#{PeerId => Entry}}};
+                                 _ ->
+                                     {error, provisioning_projection_conflict}
+                             end;
+                         {error, _} = Error -> Error
+                     end
+             end,
+    case vpn_projection:update(provisioning, Update) of
+        {ok, _Version, _Projection} ->
+            {ok, put_head(PeerId, Entry#{durable => true}, State)};
+        {ok, unchanged, _Version, _Projection} ->
+            {ok, put_head(PeerId, Entry#{durable => true}, State)};
+        {error, Reason} ->
+            {error, {provisioning_ledger_commit_failed, Reason}};
+        Other ->
+            {error, {invalid_provisioning_ledger_result, Other}}
+    end.
+
+persistent_head(#{durable := true} = Head) ->
+    maps:remove(durable, Head);
+persistent_head(_Head) ->
+    undefined.
+
+put_head(PeerId, Head, State) ->
+    Heads = maps:get(heads, State),
+    State#{heads => Heads#{PeerId => Head}}.
+
+ledger_entry(#{revision := Revision}, Digest, applied,
+             #{revision := Revision,
+               digest := Digest,
+               phase := pending} = Pending) ->
+    (maps:remove(durable, Pending))#{phase => applied,
+                                     updated_at => erlang:system_time(millisecond)};
+ledger_entry(Command, Digest, pending, PreviousHead) ->
+    Operation = maps:get(operation, Command),
+    PreviousDesired = maps:get(desired_state, PreviousHead, #{}),
+    SafeDesired = durable_desired_state(maps:get(desired_state, Command, #{})),
+    ProjectedDesired = project_desired_state(Operation,
+                                             PreviousDesired,
+                                             SafeDesired),
+    Base = #{revision => maps:get(revision, Command),
+             digest => Digest,
+             phase => pending,
+             operation => Operation,
+             source => maps:get(source, Command),
+             lifecycle_state => lifecycle_state(Operation, ProjectedDesired),
+             desired_state => ProjectedDesired,
+             updated_at => erlang:system_time(millisecond)},
+    DynamicDeviceId = maps:get(dynamic_device_id,
+                               Command,
+                               maps:get(dynamic_device_id,
+                                        PreviousHead,
+                                        undefined)),
+    case DynamicDeviceId of
+        undefined -> Base;
+        DeviceId -> Base#{dynamic_device_id => DeviceId}
+    end.
+
+project_desired_state(upsert, Previous, Desired) ->
+    Merged0 = maps:merge(Previous, Desired),
+    Revoked = case maps:find(revoked, Desired) of
+                  {ok, Value} -> Value;
+                  error -> maps:get(revoked, Previous, false)
+              end,
+    normalize_authorization_metadata(Merged0#{revoked => Revoked}, Desired);
+project_desired_state(enable, Previous, _Desired) ->
+    Previous#{enabled => true};
+project_desired_state(disable, Previous, _Desired) ->
+    Previous#{enabled => false};
+project_desired_state(revoke, Previous, Desired) ->
+    Reason = maps:get(authorization_reason, Desired, revoked),
+    (maps:merge(Previous, Desired))#{enabled => false,
+                                     authorized => false,
+                                     authorization_reason => Reason,
+                                     revoked => true};
+project_desired_state(remove, Previous, _Desired) ->
+    Previous#{enabled => false}.
+
+lifecycle_state(remove, _Desired) -> removed;
+lifecycle_state(revoke, _Desired) -> revoked;
+lifecycle_state(enable, _Desired) -> active;
+lifecycle_state(disable, _Desired) -> disabled;
+lifecycle_state(upsert, #{revoked := true}) -> revoked;
+lifecycle_state(upsert, #{enabled := false}) -> disabled;
+lifecycle_state(upsert, _Desired) -> active.
+
+durable_desired_state(Desired) when is_map(Desired) ->
+    maps:with([device_id,
+               profile_id,
+               authorization_mode,
+               authorized,
+               authorization_reason,
+               certificate_fingerprint,
+               enabled,
+               revoked,
+               allocation_id,
+               allocator_instance_id,
+               allocation_slot,
+               allocation_generation,
+               allocation_role,
+               remote_peer_id],
+              Desired);
+durable_desired_state(_Desired) ->
+    #{}.
+
+provisioning_status(State) ->
+    Heads = maps:get(heads, State),
+    DurableHeads = length([ok || {_PeerId, Head} <- maps:to_list(Heads),
+                                  maps:get(durable, Head, false)]),
+    Pending = length([ok || {_PeerId, Head} <- maps:to_list(Heads),
+                             maps:get(phase, Head, applied) =:= pending]),
+    (maps:without([heads, history], State))#{persistence => durable,
+                                             durable_heads => DurableHeads,
+                                             pending_commands => Pending}.
 
 command_digest(Command) ->
     Canonical = maps:remove(dynamic_device_id, Command),

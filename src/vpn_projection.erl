@@ -2,7 +2,8 @@
 %% @doc Serialized durable projection boundary.
 %%
 %% Stage 8A.1 established the versioned, checksummed and replaceable backend
-%% contract. Stage 8A.2 connects the allocator section while provisioning remains
+%% contract. Stage 8A.2 connects the allocator section and Stage 8A.3 connects
+%% the revisioned provisioning ledger. Registry/runtime reconstruction remains
 %% a later durability boundary.
 %%%-------------------------------------------------------------------
 -module(vpn_projection).
