@@ -81,15 +81,21 @@ required process replacement and both handshakes establish. Failures restore pre
 identity material created by the failed operation. The old
 two-step APIs remain temporarily available for IAS migration compatibility.
 
-## Deferred — Durable provisioning and allocation projection
+## In progress — Durable provisioning and allocation projection
 
-The VPN provisioning registry is currently an in-memory runtime projection. A
-process or node restart rebuilds bootstrap entries from trusted application
-configuration but does not retain IAS-applied revisions, tombstones,
-revocations, or provisioning history. The command format and single-RPC
-delivery boundary are now stable enough for the next stage; durability remains
-deferred so the persistent format can be introduced as a separate, reviewable
-recovery change.
+The VPN provisioning registry and allocator remain in-memory runtime projections.
+A process or node restart rebuilds bootstrap entries from trusted application
+configuration but does not yet retain IAS-applied revisions, tombstones,
+revocations, allocations, or provisioning history.
+
+Stage 8A.1 now provides the separate durable foundation: a replaceable
+`vpn_projection_store` behaviour, a KVS/Mnesia synchronous compare-and-set backend, one
+versioned and checksummed projection record, fail-closed schema/checksum
+validation, and a serialized `vpn_projection` process started before allocator
+and provisioning workers. Known secret-bearing fields are rejected before
+commit. No allocator or provisioning mutation is connected to this store yet,
+so current runtime behavior intentionally remains volatile until the following
+reviewable patches.
 
 The target ownership model is:
 
@@ -120,10 +126,11 @@ The next stage should add a minimal durable projection with these constraints:
   is absent or rejected;
 - define audit retention separately from the minimal revision/tombstone state.
 
-The implementation choice remains open. A small versioned term snapshot is the
-current preferred starting point because the state is bounded and operationally
-transparent, but DETS or another embedded store may be selected if concurrent
-updates, compaction, or migration requirements justify it.
+The storage boundary is now fixed while the backend remains replaceable. The
+first backend uses `zencrypted/kvs` with local Mnesia `disc_copies` and an
+explicit transaction rather than the KVS default dirty context. Subsequent
+patches must connect allocator state first, then provisioning heads/tombstones,
+and finally reconstruct registry/runtime state only after projection validation.
 
 ## TD-005 — Device-lock authorization
 

@@ -20,6 +20,12 @@ init([]) ->
         period => 5
     },
     ChildSpecs = [
+        #{id => vpn_projection,
+          start => {vpn_projection, start_link, []},
+          restart => permanent,
+          shutdown => 5000,
+          type => worker,
+          modules => [vpn_projection]},
         #{id => vpn_peer_allocator,
           start => {vpn_peer_allocator, start_link, []},
           restart => permanent,

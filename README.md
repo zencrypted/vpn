@@ -67,12 +67,37 @@ private-key body is never returned or logged.
 - `vpn_manager` - management API for supervised peers.
 - `vpn_peer_registry` - ETS-backed runtime registry bootstrapped from trusted application configuration.
 - `vpn_peer_allocator` - VPN-owned volatile reservations for dynamic client/gateway peer resources.
+- `vpn_kvs` - KVS/Mnesia schema registration and fail-closed startup boundary.
+- `vpn_projection` - serialized versioned projection process and backend-neutral API.
+- `vpn_projection_store` - replaceable durable projection backend contract.
+- `vpn_projection_store_kvs` - compare-and-set KVS/Mnesia implementation.
 - `vpn_dynamic_identity_factory` - development-only dynamic client OVPN and gateway certificate materialization.
 - `vpn_provisioning` - revisioned, idempotent IAS-to-VPN desired-state command contract.
 - `vpn_trust_store` - development CA certificate trust store.
 - `vpn_ovpn_envelope` - canonical OVPN subset constants and value validators.
 - `vpn_ovpn_parser` - strict OVPN parser and normalized peer-config conversion.
 - `vpn_ovpn_identity` - local OVPN certificate, trust, and key-ownership validation.
+
+## Durable projection foundation
+
+Stage 8A.1 introduces a backend-neutral durable projection boundary backed by
+KVS/Mnesia. `vpn_projection` serializes updates to one versioned record, while
+`vpn_projection_store_kvs` performs an explicit compare-and-set synchronous Mnesia
+transaction. The record carries separate `allocator` and `provisioning` maps, a
+schema version, a monotonic projection version, and a SHA-256 checksum. Corrupt
+or unsupported records fail application startup instead of silently discarding
+revision or revocation barriers.
+
+The configured Mnesia directory is `local/mnesia`, which remains outside Git.
+RocksDB is not downloaded because the existing KVS rebar override removes its
+dependency and application declaration. The storage backend remains replaceable
+through the `vpn_projection_store` behaviour.
+
+This foundation does **not** yet make allocator reservations, provisioning heads,
+or tombstones durable. Those processes remain unchanged and volatile until the
+next Stage 8A patches explicitly route their mutations through `vpn_projection`.
+The projection rejects known secret-bearing fields such as PSKs, private-key
+paths, session keys, ECDH private material, and replay windows.
 
 ## Runtime peer registry
 

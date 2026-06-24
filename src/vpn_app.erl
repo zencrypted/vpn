@@ -14,7 +14,12 @@ start(_StartType, _StartArgs) ->
         _ ->
             ok
     end,
-    vpn_sup:start_link().
+    case vpn_kvs:ensure_started() of
+        ok ->
+            vpn_sup:start_link();
+        {error, Reason} ->
+            {error, {vpn_kvs_start_failed, Reason}}
+    end.
 
 stop(_State) ->
     ok.

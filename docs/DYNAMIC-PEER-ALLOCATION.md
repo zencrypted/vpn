@@ -361,13 +361,19 @@ Durable tombstones across restart remain Stage 8.
 
 ### Stage 8 — durable allocation projection
 
-The current allocator is deliberately volatile. A VPN restart loses all
+Stage 8A.1 completes the storage foundation only. VPN now owns a versioned,
+checksummed KVS/Mnesia projection record behind the replaceable
+`vpn_projection_store` behaviour. The projection process starts before the
+allocator and rejects corrupt, unsupported, or secret-bearing payloads
+fail-closed.
+
+The allocator itself is still deliberately volatile. A VPN restart loses all
 reservations, and allocation order may change. A fresh random allocator
 namespace prevents old on-disk identity bundles from colliding with newly
 reserved allocation IDs, but it does not restore Device-to-slot ownership or
-make old bundles active again. Before dynamic allocation is used
-outside the local development milestone, persist Device-to-resource assignments
-atomically and restore them before provisioning reconciliation starts.
+make old bundles active again. The next Stage 8A patch must route allocator
+reserve/release mutations through the durable projection and restore them before
+provisioning reconciliation starts.
 
 Durable state must contain only allocation metadata. It must never contain
 private-key bodies, session keys, replay windows, ECDH material, or packet state.
