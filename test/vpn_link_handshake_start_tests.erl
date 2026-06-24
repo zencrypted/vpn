@@ -59,7 +59,7 @@ link_stops_and_releases_udp_port_when_owner_is_killed_test_() ->
                                           RemotePort,
                                           owner_peer,
                                           remote_peer,
-                                          <<"owner-exit-psk">>,
+                                          <<"0123456789abcdef0123456789abcdef">>,
                                           #{mode => disabled}),
                                Parent ! {owner_link_result, self(), Result},
                                receive stop -> ok end
