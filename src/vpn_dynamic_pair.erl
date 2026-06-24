@@ -8,7 +8,7 @@
 %%%-------------------------------------------------------------------
 -module(vpn_dynamic_pair).
 
--export([ensure/2, status/1]).
+-export([ensure/2, status/1, await_established/1, await_stopped/1]).
 
 ensure(DeviceId, Desired)
   when is_binary(DeviceId), byte_size(DeviceId) > 0, is_map(Desired) ->
@@ -32,6 +32,31 @@ status(DeviceId) when is_binary(DeviceId), byte_size(DeviceId) > 0 ->
     end;
 status(_DeviceId) ->
     {error, invalid_device_id}.
+
+await_established(DeviceId) when is_binary(DeviceId), byte_size(DeviceId) > 0 ->
+    await_pair_state(DeviceId, established);
+await_established(_DeviceId) ->
+    {error, invalid_device_id}.
+
+await_stopped(DeviceId) when is_binary(DeviceId), byte_size(DeviceId) > 0 ->
+    await_pair_state(DeviceId, stopped);
+await_stopped(_DeviceId) ->
+    {error, invalid_device_id}.
+
+await_pair_state(DeviceId, State) ->
+    case vpn_peer_allocator:lookup(DeviceId) of
+        {ok, Allocation} ->
+            case reconcile_options() of
+                {ok, Options} ->
+                    ClientId = maps:get(client_peer_id, Allocation),
+                    GatewayId = maps:get(gateway_peer_id, Allocation),
+                    wait_for_pair_state(ClientId, GatewayId, State, Options);
+                {error, _} = Error ->
+                    Error
+            end;
+        {error, _} = Error ->
+            Error
+    end.
 
 ensure_allocated_pair(Allocation, Desired) ->
     case ensure_identity(Allocation) of
@@ -155,34 +180,60 @@ rollback_registry(PeerIds, Previous) ->
     _ = vpn_peer_reconciler:reconcile_now(),
     ok.
 
-wait_for_established(ClientId, GatewayId,
-                     #{establish_timeout_ms := TimeoutMs,
-                       poll_interval_ms := PollMs}) ->
-    Deadline = erlang:monotonic_time(millisecond) + TimeoutMs,
-    wait_for_established(ClientId, GatewayId, Deadline, PollMs).
+wait_for_established(ClientId, GatewayId, Options) ->
+    wait_for_pair_state(ClientId, GatewayId, established, Options).
 
-wait_for_established(ClientId, GatewayId, Deadline, PollMs) ->
+wait_for_pair_state(ClientId, GatewayId, State,
+                    #{establish_timeout_ms := TimeoutMs,
+                      poll_interval_ms := PollMs}) ->
+    Deadline = erlang:monotonic_time(millisecond) + TimeoutMs,
+    wait_for_pair_state(ClientId, GatewayId, State, Deadline, PollMs).
+
+wait_for_pair_state(ClientId, GatewayId, established, Deadline, PollMs) ->
     case pair_established(ClientId, GatewayId) of
         true ->
             ok;
         false ->
-            case erlang:monotonic_time(millisecond) >= Deadline of
-                true ->
-                    {error,
-                     {dynamic_pair_establishment_timeout,
-                      #{client => runtime_peer_status(ClientId),
-                        gateway => runtime_peer_status(GatewayId)}}};
-                false ->
-                    timer:sleep(PollMs),
-                    wait_for_established(ClientId, GatewayId, Deadline, PollMs)
-            end
+            wait_or_timeout(ClientId, GatewayId, established, Deadline, PollMs)
+    end;
+wait_for_pair_state(ClientId, GatewayId, stopped, Deadline, PollMs) ->
+    case pair_stopped(ClientId, GatewayId) of
+        true ->
+            ok;
+        false ->
+            wait_or_timeout(ClientId, GatewayId, stopped, Deadline, PollMs)
     end.
+
+wait_or_timeout(ClientId, GatewayId, State, Deadline, PollMs) ->
+    case erlang:monotonic_time(millisecond) >= Deadline of
+        true ->
+            pair_state_timeout(ClientId, GatewayId, State);
+        false ->
+            timer:sleep(PollMs),
+            wait_for_pair_state(ClientId, GatewayId, State, Deadline, PollMs)
+    end.
+
+pair_state_timeout(ClientId, GatewayId, established) ->
+    {error,
+     {dynamic_pair_establishment_timeout,
+      #{client => runtime_peer_status(ClientId),
+        gateway => runtime_peer_status(GatewayId)}}};
+pair_state_timeout(ClientId, GatewayId, stopped) ->
+    {error,
+     {dynamic_pair_stop_timeout,
+      #{client => runtime_peer_status(ClientId),
+        gateway => runtime_peer_status(GatewayId)}}}.
+
 
 pair_established(ClientId, GatewayId) ->
     maps:get(handshake_status, runtime_peer_status(ClientId), undefined) =:=
         established andalso
     maps:get(handshake_status, runtime_peer_status(GatewayId), undefined) =:=
         established.
+
+pair_stopped(ClientId, GatewayId) ->
+    maps:get(running, runtime_peer_status(ClientId), false) =:= false andalso
+    maps:get(running, runtime_peer_status(GatewayId), false) =:= false.
 
 pair_status(Allocation) ->
     ClientId = maps:get(client_peer_id, Allocation),

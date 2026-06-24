@@ -33,9 +33,11 @@ Registry mutations are reconciled automatically by `vpn_peer_reconciler`, so
 manual `vpn_manager:reload_config/0` call. Registry writes classify revision
 bookkeeping fields as non-restart metadata, preserving an established process
 when IAS only advances revision/source/operation timestamps. Any other desired
-runtime change remains restart-reconciled, while enable/disable still controls
-process presence. The explicit reload operation remains available as a
-recovery/full-reconcile path.
+runtime change remains restart-reconciled. Static peers retain ordinary
+single-peer enable/disable behavior, while dynamic client lifecycle operations
+control the whole client/gateway pair in gateway-first order. Pair enable waits
+for both handshakes and rolls back to disabled if establishment fails. The
+explicit reload operation remains available as a recovery/full-reconcile path.
 
 ## Completed — Revisioned provisioning contract
 

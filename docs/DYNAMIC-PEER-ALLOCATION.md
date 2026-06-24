@@ -235,12 +235,15 @@ established unchanged pair does not restart it. A following IAS revisioned
 `upsert` that changes only revision bookkeeping metadata updates the registry
 in place and preserves both peer PIDs and the established handshake; runtime,
 identity, authorization, or transport changes still trigger reconciliation.
-A revisioned `revoke` applied to a dynamic client is pair-aware: the registry
-updates the dedicated gateway and revoked client in one batch, reconciles the
-gateway first, and stops both processes. The gateway is quiesced with
-`enabled => false` but is not itself marked revoked, so an explicit higher-level
-reissue can reconcile the reserved pair again without leaving an orphaned
-handshake timer active after client revocation.
+Revisioned lifecycle operations on a dynamic client are pair-aware. `disable`
+updates the dedicated gateway and client in one registry batch, reconciles the
+gateway first, and returns only after both processes are stopped. `enable`
+re-enables the gateway first, then the client, and returns only after both
+certificate-control handshakes report `established`. If enable cannot establish
+the pair, both sides are rolled back to `enabled => false`. `revoke` uses the
+same gateway-first quiesce path, but only the client is marked revoked; the
+gateway remains authorized and unrevoked so an explicit higher-level reissue
+can reuse the reserved identity without leaving an orphaned handshake timer.
 
 The wait policy is VPN-owned and configurable:
 
@@ -255,18 +258,22 @@ Public pair status and administration summaries expose allocation ownership,
 runtime state, and handshake state without exposing OVPN identity internals,
 private-key paths, PEM bodies, or session secrets.
 
-### Stage 6 — IAS dynamic cutover and end-to-end tests
+### Stage 6 — IAS dynamic cutover and end-to-end tests (completed)
 
-IAS provisioning still delivers the supported two-slot demo to `client_a` and
-`client_b`. The next cutover will use the reserved dynamic client peer ID and
-call the VPN pair API. Tests must then prove:
+IAS now reserves a dynamic pair before certificate preparation, delivers
+provisioning to the allocated client peer, reconciles the VPN-owned pair, and
+records safe allocation metadata in the Wizard and Device views. The integration
+suite proves that an arbitrary Device can obtain a client/gateway pair without a
+`sys.config` slot, both handshakes establish, lifecycle revisions apply to the
+dynamic client, and revoke quiesces both sides without exposing key or session
+material. The original `client_a`/`client_b` topology remains only as a bounded
+low-level debug fixture and compatibility fallback.
 
-- a third arbitrary Device requires no `sys.config` edit;
-- repeated allocation and pair reconciliation for one Device are idempotent;
-- different Devices never share peer IDs, interfaces, addresses, or ports;
-- release/reallocation cannot bypass revision or revocation barriers;
-- allocator exhaustion fails closed;
-- no dynamic atoms or secret material enter allocation state or public status.
+Still outstanding before production use:
+
+- release/reallocation must not bypass revision or revocation barriers;
+- allocator exhaustion must remain fail-closed across the IAS workflow;
+- durable allocation recovery must replace the volatile reservation process.
 
 ### Stage 7 — durable allocation projection
 

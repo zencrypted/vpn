@@ -152,6 +152,30 @@ next_config(revoke, Base, Desired) ->
                                    authorization_reason => Reason,
                                    revoked => true}}.
 
+persist_next_config(disable, PeerId, BaseConfig, Next) ->
+    case dynamic_gateway_config(PeerId, BaseConfig) of
+        {ok, GatewayConfig} ->
+            persist_dynamic_pair_disable(PeerId, GatewayConfig, Next);
+        not_dynamic_client ->
+            put_single_config(disable, Next);
+        {error, Reason} ->
+            logger:warning(
+              "Dynamic client disable could not quiesce companion gateway: ~p",
+              [Reason]),
+            put_single_config(disable, Next)
+    end;
+persist_next_config(enable, PeerId, BaseConfig, Next) ->
+    case dynamic_gateway_config(PeerId, BaseConfig) of
+        {ok, GatewayConfig} ->
+            persist_dynamic_pair_enable(PeerId,
+                                        BaseConfig,
+                                        GatewayConfig,
+                                        Next);
+        not_dynamic_client ->
+            put_single_config(enable, Next);
+        {error, Reason} ->
+            {error, Reason}
+    end;
 persist_next_config(revoke, PeerId, BaseConfig, Next) ->
     case dynamic_gateway_config(PeerId, BaseConfig) of
         {ok, GatewayConfig} ->
@@ -177,6 +201,59 @@ persist_next_config(revoke, PeerId, BaseConfig, Next) ->
     end;
 persist_next_config(Operation, _PeerId, _BaseConfig, Next) ->
     put_single_config(Operation, Next).
+
+persist_dynamic_pair_disable(PeerId, GatewayConfig, Next) ->
+    DeviceId = maps:get(device_id, Next),
+    QuiescedGateway = GatewayConfig#{enabled => false},
+    case vpn_peer_registry:put_many([QuiescedGateway, Next]) of
+        {ok, SafeEntries} ->
+            case vpn_dynamic_pair:await_stopped(DeviceId) of
+                ok ->
+                    pair_operation_result(disable, PeerId, SafeEntries);
+                {error, _} = Error ->
+                    Error
+            end;
+        {error, Reason} ->
+            {error, Reason}
+    end.
+
+persist_dynamic_pair_enable(PeerId, BaseConfig, GatewayConfig, Next) ->
+    DeviceId = maps:get(device_id, Next),
+    EnabledGateway = GatewayConfig#{enabled => true},
+    case vpn_peer_registry:put_many([EnabledGateway, Next]) of
+        {ok, SafeEntries} ->
+            case vpn_dynamic_pair:await_established(DeviceId) of
+                ok ->
+                    pair_operation_result(enable, PeerId, SafeEntries);
+                {error, _} = Error ->
+                    rollback_failed_pair_enable(DeviceId,
+                                                BaseConfig,
+                                                GatewayConfig),
+                    Error
+            end;
+        {error, Reason} ->
+            {error, Reason}
+    end.
+
+rollback_failed_pair_enable(DeviceId, BaseConfig, GatewayConfig) ->
+    DisabledClient = BaseConfig#{enabled => false},
+    DisabledGateway = GatewayConfig#{enabled => false},
+    case vpn_peer_registry:put_many([DisabledGateway, DisabledClient]) of
+        {ok, _} ->
+            _ = vpn_dynamic_pair:await_stopped(DeviceId),
+            ok;
+        {error, Reason} ->
+            logger:error("Dynamic pair enable rollback failed: ~p", [Reason]),
+            ok
+    end.
+
+pair_operation_result(Operation, PeerId, SafeEntries) ->
+    case safe_peer_entry(PeerId, SafeEntries) of
+        {ok, Safe} ->
+            {ok, #{operation => Operation, peer => Safe}};
+        {error, _} = Error ->
+            Error
+    end.
 
 put_single_config(Operation, Next) ->
     case vpn_peer_registry:put(Next) of

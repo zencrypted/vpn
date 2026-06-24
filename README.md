@@ -168,11 +168,14 @@ an unchanged established pair do not restart it. Revision bookkeeping updates
 (`revision`, `provisioning_source`, `last_provisioning_operation`, and
 `updated_at`) are also applied to the registry without restarting an already
 running peer. Transport, identity, handshake, authorization, enabled, or other
-runtime configuration changes still reconcile the process. A revisioned revoke
-of a dynamic client also quiesces its dedicated gateway in the same registry
-batch, stopping the gateway before the client so no orphaned handshake retry is
-left active. The gateway is disabled but not marked revoked. A failed startup or
-timeout restores the previous registry projection.
+runtime configuration changes still reconcile the process. Revisioned `disable` and `enable` operations on a dynamic client are also
+pair-aware. Disable quiesces the gateway before the client and returns only after
+both processes are stopped. Enable starts the gateway before the client and
+returns only after both certificate-control handshakes are `established`; a
+failed enable rolls the pair back to the disabled state. A revisioned revoke
+uses the same gateway-first quiesce path, but only the client is marked revoked.
+This prevents orphaned handshake retries while preserving the gateway identity
+for an explicit higher-level reissue.
 
 Use `vpn_provisioning:status/0` for counters and
 `vpn_provisioning:history/1` for bounded per-peer audit history.

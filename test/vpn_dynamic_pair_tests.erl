@@ -165,6 +165,163 @@ pair_aware_revoke_quiesces_gateway_test_() ->
                       end)]
      end}.
 
+pair_aware_disable_and_enable_controls_both_peers_test_() ->
+    {setup,
+     fun setup/0,
+     fun cleanup/1,
+     fun(Context) ->
+             [?_test(begin
+                          DeviceId = <<"device-pair-lifecycle">>,
+                          {ok, Allocation} = vpn_peer_allocator:ensure(DeviceId),
+                          ok = install_identity_bundle(Allocation, Context),
+                          {ok, _} = vpn_dynamic_pair:ensure(DeviceId,
+                                                            desired(DeviceId)),
+                          ClientId = maps:get(client_peer_id, Allocation),
+                          GatewayId = maps:get(gateway_peer_id, Allocation),
+
+                          Disable = #{peer_id => ClientId,
+                                      revision => 1,
+                                      operation => disable,
+                                      source => ias,
+                                      desired_state => #{}},
+                          ?assertMatch({ok, #{operation := disable}},
+                                       vpn_provisioning:apply(Disable)),
+                          ?assertEqual(false,
+                                       vpn_manager:peer_running(GatewayId)),
+                          ?assertEqual(false,
+                                       vpn_manager:peer_running(ClientId)),
+                          {ok, DisabledClient} =
+                              vpn_peer_registry:get(ClientId),
+                          {ok, DisabledGateway} =
+                              vpn_peer_registry:get(GatewayId),
+                          ?assertEqual(false,
+                                       maps:get(enabled, DisabledClient)),
+                          ?assertEqual(false,
+                                       maps:get(enabled, DisabledGateway)),
+                          ?assertEqual(true,
+                                       maps:get(authorized, DisabledClient)),
+                          ?assertEqual(true,
+                                       maps:get(authorized, DisabledGateway)),
+                          ?assertEqual(false,
+                                       maps:get(revoked, DisabledClient)),
+                          ?assertEqual(false,
+                                       maps:get(revoked, DisabledGateway)),
+
+                          Enable = #{peer_id => ClientId,
+                                     revision => 2,
+                                     operation => enable,
+                                     source => ias,
+                                     desired_state => #{}},
+                          ?assertMatch({ok, #{operation := enable}},
+                                       vpn_provisioning:apply(Enable)),
+                          ?assert(vpn_manager:peer_running(GatewayId)),
+                          ?assert(vpn_manager:peer_running(ClientId)),
+                          {ok, EnabledClient} =
+                              vpn_peer_registry:get(ClientId),
+                          {ok, EnabledGateway} =
+                              vpn_peer_registry:get(GatewayId),
+                          ?assertEqual(true, maps:get(enabled, EnabledClient)),
+                          ?assertEqual(true, maps:get(enabled, EnabledGateway)),
+                          {ok, Status} = vpn_dynamic_pair:status(DeviceId),
+                          ?assertMatch(#{client := #{running := true,
+                                                    handshake_status := established},
+                                         gateway := #{running := true,
+                                                     handshake_status := established}},
+                                       Status)
+                      end)]
+     end}.
+
+pair_aware_enable_failure_rolls_back_both_peers_test_() ->
+    {setup,
+     fun setup/0,
+     fun cleanup/1,
+     fun(Context) ->
+             [?_test(begin
+                          DeviceId = <<"device-pair-enable-rollback">>,
+                          {ok, Allocation} = vpn_peer_allocator:ensure(DeviceId),
+                          ok = install_identity_bundle(Allocation, Context),
+                          {ok, _} = vpn_dynamic_pair:ensure(DeviceId,
+                                                            desired(DeviceId)),
+                          ClientId = maps:get(client_peer_id, Allocation),
+                          GatewayId = maps:get(gateway_peer_id, Allocation),
+                          Disable = #{peer_id => ClientId,
+                                      revision => 1,
+                                      operation => disable,
+                                      source => ias,
+                                      desired_state => #{}},
+                          ?assertMatch({ok, #{operation := disable}},
+                                       vpn_provisioning:apply(Disable)),
+
+                          application:set_env(vpn,
+                                              dynamic_pair_test_fail_role,
+                                              client),
+                          Enable = #{peer_id => ClientId,
+                                     revision => 2,
+                                     operation => enable,
+                                     source => ias,
+                                     desired_state => #{}},
+                          ?assertMatch(
+                             {error,
+                              {dynamic_pair_establishment_timeout, _}},
+                             vpn_provisioning:apply(Enable)),
+                          application:unset_env(vpn,
+                                                dynamic_pair_test_fail_role),
+
+                          ?assertEqual(false,
+                                       vpn_manager:peer_running(GatewayId)),
+                          ?assertEqual(false,
+                                       vpn_manager:peer_running(ClientId)),
+                          {ok, ClientEntry} = vpn_peer_registry:get(ClientId),
+                          {ok, GatewayEntry} = vpn_peer_registry:get(GatewayId),
+                          ?assertEqual(false, maps:get(enabled, ClientEntry)),
+                          ?assertEqual(false, maps:get(enabled, GatewayEntry)),
+                          ?assertEqual(1, maps:get(revision, ClientEntry)),
+                          ?assertEqual(false, maps:get(revoked, ClientEntry)),
+                          ?assertEqual(false, maps:get(revoked, GatewayEntry))
+                      end)]
+     end}.
+
+pair_aware_enable_fails_closed_without_gateway_test_() ->
+    {setup,
+     fun setup/0,
+     fun cleanup/1,
+     fun(Context) ->
+             [?_test(begin
+                          DeviceId = <<"device-pair-missing-gateway">>,
+                          {ok, Allocation} = vpn_peer_allocator:ensure(DeviceId),
+                          ok = install_identity_bundle(Allocation, Context),
+                          {ok, _} = vpn_dynamic_pair:ensure(DeviceId,
+                                                            desired(DeviceId)),
+                          ClientId = maps:get(client_peer_id, Allocation),
+                          GatewayId = maps:get(gateway_peer_id, Allocation),
+                          Disable = #{peer_id => ClientId,
+                                      revision => 1,
+                                      operation => disable,
+                                      source => ias,
+                                      desired_state => #{}},
+                          ?assertMatch({ok, #{operation := disable}},
+                                       vpn_provisioning:apply(Disable)),
+                          ok = vpn_peer_registry:remove(GatewayId),
+
+                          Enable = #{peer_id => ClientId,
+                                     revision => 2,
+                                     operation => enable,
+                                     source => ias,
+                                     desired_state => #{}},
+                          ?assertEqual(
+                             {error,
+                              {dynamic_pair_gateway_not_found, GatewayId}},
+                             vpn_provisioning:apply(Enable)),
+                          ?assertEqual(false,
+                                       vpn_manager:peer_running(ClientId)),
+                          {ok, ClientEntry} = vpn_peer_registry:get(ClientId),
+                          ?assertEqual(false, maps:get(enabled, ClientEntry)),
+                          ?assertEqual(1, maps:get(revision, ClientEntry)),
+                          ?assertEqual({error, not_found},
+                                       vpn_peer_registry:get(GatewayId))
+                      end)]
+     end}.
+
 registry_collision_is_rejected_test_() ->
     {setup,
      fun setup/0,
