@@ -282,11 +282,38 @@ low-level debug fixture and compatibility fallback.
 
 Still outstanding before production use:
 
-- release/reallocation must not bypass revision or revocation barriers;
 - allocator exhaustion must remain fail-closed across the IAS workflow;
+- revision and decommission tombstones must survive process/node restart;
 - durable allocation recovery must replace the volatile reservation process.
 
-### Stage 7 — durable allocation projection
+### Stage 7 — dynamic pair decommission (completed)
+
+`vpn_dynamic_pair:decommission/1,2` is the explicit resource-removal boundary.
+It is intentionally separate from disable and revoke:
+
+```erlang
+vpn_dynamic_pair:decommission(DeviceId).
+vpn_dynamic_pair:decommission(DeviceId, #{remove_identity => true}).
+```
+
+The pair must already be quiesced: both runtime processes are stopped and both
+registry entries are disabled. Active pairs fail closed. Decommission validates
+Device/allocation/role ownership, removes the gateway and client registry entries
+as one batch, releases the allocator slot, and optionally erases the development
+identity bundle. The public result contains only safe allocation identifiers and
+cleanup state; it never contains PEM, OVPN internals, private-key paths, or
+session material.
+
+A reserved allocation that has never reached runtime may also be decommissioned.
+Partial registry ownership fails closed rather than deleting an ambiguous
+orphan. The in-memory provisioning head for the old client peer remains a stale
+revision barrier, and newer resolver-based commands cannot recreate the old peer
+IDs after allocator release. If optional identity erasure fails, registry and
+allocation cleanup remain completed and the error returns a safe decommission
+summary so the identity bundle can be retried explicitly by allocation ID.
+Durable tombstones across restart remain Stage 8.
+
+### Stage 8 — durable allocation projection
 
 The current allocator is deliberately volatile. A VPN restart loses all
 reservations, and allocation order may change. A fresh random allocator
@@ -301,13 +328,12 @@ private-key bodies, session keys, replay windows, ECDH material, or packet state
 Release, tombstone, and migration semantics must be coordinated with the durable
 provisioning projection described in `TECHNICAL-DEBT.md`.
 
-## Current non-goals after Stage 5
+## Current non-goals after Stage 7
 
-The completed allocator, resolver, identity, IAS reservation, and VPN pair
-reconciliation stages do not:
+The completed dynamic allocation, IAS cutover, synchronized lifecycle, and
+explicit decommission stages do not:
 
-- replace `client_a/client_b` in the existing IAS delivery path;
 - survive a VPN application or node restart;
-- persist revisions, tombstones, or Device-to-slot ownership;
-- release allocation and identity state automatically after lifecycle removal;
+- persist revisions, decommission tombstones, or Device-to-slot ownership;
+- automatically erase retained development identities unless explicitly asked;
 - accept allocator resource choices from IAS, trusted defaults, or an OVPN file.

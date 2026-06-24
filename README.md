@@ -392,16 +392,15 @@ vpn_admin:summary().
 
 This is intentionally a bounded demo pool, not a general dynamic allocator.
 
-The first five dynamic-allocation stages now span VPN allocation, runtime
-resolution, development identities, IAS reservation, and VPN pair
-reconciliation. `vpn_dynamic_pair:ensure/2` can materialize and start a reserved
-client/gateway pair without editing trusted peer configuration. IAS still uses
-the bounded `client_a/client_b` delivery path until the final cutover.
-Reservations and identity manifests remain volatile/local development state.
-Each allocator process uses a fresh random namespace in allocation and peer IDs,
-preventing a restarted node from reusing a persistent identity bundle that
-belongs to an earlier Device. The ownership model and staged integration plan
-are documented in
+The dynamic-allocation flow now spans VPN allocation, runtime resolution,
+development identities, IAS reservation and delivery, pair reconciliation,
+pair-aware enable/disable/revoke, and explicit decommission. Normal IAS
+provisioning can create and operate a reserved binary client/gateway pair without
+editing trusted peer configuration. Reservations remain volatile and identity
+manifests remain local development state. Each allocator process uses a fresh
+random namespace in allocation and peer IDs, preventing a restarted node from
+reusing a persistent identity bundle that belongs to an earlier Device. The
+ownership model and staged integration plan are documented in
 [`docs/DYNAMIC-PEER-ALLOCATION.md`](docs/DYNAMIC-PEER-ALLOCATION.md).
 
 ## Materialize a dynamic development identity bundle
@@ -462,6 +461,29 @@ The result contains only allocation ownership, safe registry metadata, running
 state, and handshake state. Administration summaries also expose
 `allocation_id`, allocator instance, slot, generation, role, and Device ID for
 dynamic peers.
+
+## Decommission a dynamic pair
+
+Disable or revoke the pair first, then remove its runtime projection and release
+the allocator slot:
+
+```erlang
+vpn_dynamic_pair:decommission(DeviceId).
+```
+
+Development identity removal is explicit:
+
+```erlang
+vpn_dynamic_pair:decommission(DeviceId, #{remove_identity => true}).
+```
+
+Decommission fails closed while either peer is running or either registry entry
+is still enabled. It removes both registry entries as one batch, releases the
+VPN-owned allocation, and returns only safe ownership metadata. The default
+retains the local identity bundle for audit/debug use; `remove_identity => true`
+erases it through the configured identity factory. Existing provisioning heads
+continue to reject stale revisions, while a newer command cannot reconstruct the
+old peer IDs after the allocation has been released.
 
 ## Demo Guide
 
@@ -627,15 +649,15 @@ Allocator-backed runtime pair resolution operational
 Development dynamic identity factory operational
 IAS dynamic allocation reservation operational
 Dynamic client/gateway registry reconciliation operational
+Dynamic pair lifecycle synchronization operational
+Dynamic pair decommission and allocation release operational
 ```
 
-The current two-user topology is a bounded development milestone. It proves
-that two distinct IAS Users and Devices can be provisioned into separate trusted
-VPN slots and exchange encrypted payloads concurrently. Dynamic reservation,
-runtime-pair resolution, development identity materialization, IAS reservation,
-and VPN-side pair startup now work. The remaining cutover is to route normal IAS
-provisioning through the reserved dynamic client peer and then add arbitrary
-third-Device end-to-end coverage. Durable assignments remain future work.
+The original two-user topology remains a bounded low-level development fixture.
+Normal IAS provisioning now uses VPN-owned dynamic reservations, identity
+materialization, pair startup, synchronized lifecycle actions, and explicit
+decommission/release. Durable Device-to-allocation recovery across VPN restarts
+remains future work.
 See [`docs/DYNAMIC-PEER-ALLOCATION.md`](docs/DYNAMIC-PEER-ALLOCATION.md) and
 [`docs/TECHNICAL-DEBT.md`](docs/TECHNICAL-DEBT.md). Production Device-lock
 enforcement and a real 2FA provider also remain future work.

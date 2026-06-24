@@ -1,14 +1,21 @@
 %%%-------------------------------------------------------------------
-%% @doc Materializes one reserved dynamic client/gateway pair into runtime.
+%% @doc Owns runtime reconciliation and decommission for one dynamic pair.
 %%
 %% Reservation remains explicit and VPN-owned. This module consumes an active
 %% allocation, ensures its development identity bundle, resolves both runtime
 %% configurations, writes them to the registry as one batch, and waits until
-%% both certificate-control handshakes are established.
+%% both certificate-control handshakes are established. A separate fail-closed
+%% decommission operation removes only a quiesced pair and releases its
+%% allocator/optional development identity resources.
 %%%-------------------------------------------------------------------
 -module(vpn_dynamic_pair).
 
--export([ensure/2, status/1, await_established/1, await_stopped/1]).
+-export([ensure/2,
+         status/1,
+         await_established/1,
+         await_stopped/1,
+         decommission/1,
+         decommission/2]).
 
 ensure(DeviceId, Desired)
   when is_binary(DeviceId), byte_size(DeviceId) > 0, is_map(Desired) ->
@@ -42,6 +49,33 @@ await_stopped(DeviceId) when is_binary(DeviceId), byte_size(DeviceId) > 0 ->
     await_pair_state(DeviceId, stopped);
 await_stopped(_DeviceId) ->
     {error, invalid_device_id}.
+
+%% @doc Permanently remove a quiesced dynamic pair and release its allocation.
+%%
+%% Decommission is intentionally separate from disable and revoke. Both runtime
+%% peers must already be stopped and their registry entries must be disabled.
+%% Development identity removal is optional and defaults to false so audit and
+%% incident investigation can retain the local bundle explicitly.
+-spec decommission(binary()) -> {ok, map()} | {error, term()}.
+decommission(DeviceId) ->
+    decommission(DeviceId, #{}).
+
+-spec decommission(binary(), map()) -> {ok, map()} | {error, term()}.
+decommission(DeviceId, Options0)
+  when is_binary(DeviceId), byte_size(DeviceId) > 0, is_map(Options0) ->
+    case normalize_decommission_options(Options0) of
+        {ok, Options} ->
+            case vpn_peer_allocator:lookup(DeviceId) of
+                {ok, Allocation} ->
+                    decommission_allocation(Allocation, Options);
+                {error, _} = Error ->
+                    Error
+            end;
+        {error, _} = Error ->
+            Error
+    end;
+decommission(_DeviceId, _Options) ->
+    {error, invalid_dynamic_pair_decommission_request}.
 
 await_pair_state(DeviceId, State) ->
     case vpn_peer_allocator:lookup(DeviceId) of
@@ -272,6 +306,149 @@ runtime_peer_status(PeerId) ->
     catch
         exit:_ ->
             #{running => false, handshake_status => undefined}
+    end.
+
+decommission_allocation(Allocation, Options) ->
+    case decommission_registry_snapshot(Allocation) of
+        {ok, RegistryConfigs} ->
+            case decommissionable(Allocation, RegistryConfigs) of
+                ok ->
+                    remove_pair_and_release(Allocation, RegistryConfigs, Options);
+                {error, _} = Error ->
+                    Error
+            end;
+        {error, _} = Error ->
+            Error
+    end.
+
+decommission_registry_snapshot(Allocation) ->
+    ClientId = maps:get(client_peer_id, Allocation),
+    GatewayId = maps:get(gateway_peer_id, Allocation),
+    Client = vpn_peer_registry:config(ClientId),
+    Gateway = vpn_peer_registry:config(GatewayId),
+    case {Client, Gateway} of
+        {{error, not_found}, {error, not_found}} ->
+            {ok, []};
+        {{ok, ClientConfig}, {ok, GatewayConfig}} ->
+            case owned_registry_config(Allocation, client, ClientConfig) andalso
+                 owned_registry_config(Allocation, gateway, GatewayConfig) of
+                true -> {ok, [GatewayConfig, ClientConfig]};
+                false -> {error, dynamic_pair_registry_ownership_mismatch}
+            end;
+        {{error, not_found}, {ok, _}} ->
+            {error, {dynamic_pair_registry_incomplete, client}};
+        {{ok, _}, {error, not_found}} ->
+            {error, {dynamic_pair_registry_incomplete, gateway}}
+    end.
+
+owned_registry_config(Allocation, Role, Config) ->
+    PeerKey = case Role of
+                  client -> client_peer_id;
+                  gateway -> gateway_peer_id
+              end,
+    maps:get(id, Config, undefined) =:= maps:get(PeerKey, Allocation) andalso
+    maps:get(device_id, Config, undefined) =:= maps:get(device_id, Allocation) andalso
+    maps:get(allocation_id, Config, undefined) =:=
+        maps:get(allocation_id, Allocation) andalso
+    maps:get(allocation_role, Config, undefined) =:= Role.
+
+decommissionable(Allocation, []) ->
+    ClientId = maps:get(client_peer_id, Allocation),
+    GatewayId = maps:get(gateway_peer_id, Allocation),
+    case pair_stopped(ClientId, GatewayId) of
+        true -> ok;
+        false -> {error, {dynamic_pair_not_quiesced, pair_status(Allocation)}}
+    end;
+decommissionable(Allocation, [GatewayConfig, ClientConfig]) ->
+    ClientDisabled = maps:get(enabled, ClientConfig, true) =:= false,
+    GatewayDisabled = maps:get(enabled, GatewayConfig, true) =:= false,
+    ClientId = maps:get(client_peer_id, Allocation),
+    GatewayId = maps:get(gateway_peer_id, Allocation),
+    case ClientDisabled andalso GatewayDisabled andalso
+         pair_stopped(ClientId, GatewayId) of
+        true -> ok;
+        false -> {error, {dynamic_pair_not_quiesced, pair_status(Allocation)}}
+    end.
+
+remove_pair_and_release(Allocation, RegistryConfigs, Options) ->
+    ClientId = maps:get(client_peer_id, Allocation),
+    GatewayId = maps:get(gateway_peer_id, Allocation),
+    case vpn_peer_registry:remove_many([GatewayId, ClientId]) of
+        ok ->
+            case vpn_peer_allocator:release(maps:get(device_id, Allocation)) of
+                {ok, ReleasedAllocation} ->
+                    finish_decommission(ReleasedAllocation, Options);
+                {error, Reason} ->
+                    restore_registry(RegistryConfigs),
+                    {error, {dynamic_allocation_release_failed, Reason}}
+            end;
+        {error, Reason} ->
+            {error, {dynamic_pair_registry_removal_failed, Reason}}
+    end.
+
+restore_registry([]) ->
+    ok;
+restore_registry(RegistryConfigs) ->
+    _ = vpn_peer_registry:put_many(RegistryConfigs),
+    _ = vpn_peer_reconciler:reconcile_now(),
+    ok.
+
+finish_decommission(ReleasedAllocation, #{remove_identity := RemoveIdentity}) ->
+    Base = decommission_summary(ReleasedAllocation),
+    case maybe_release_identity(RemoveIdentity, ReleasedAllocation) of
+        {ok, IdentityState} ->
+            {ok, Base#{identity_state => IdentityState}};
+        {error, Reason} ->
+            {error,
+             {dynamic_identity_cleanup_failed,
+              Reason,
+              Base#{identity_state => retained}}}
+    end.
+
+maybe_release_identity(false, _Allocation) ->
+    {ok, retained};
+maybe_release_identity(true, Allocation) ->
+    AllocationId = maps:get(allocation_id, Allocation),
+    Provider = application:get_env(vpn,
+                                   dynamic_identity_factory_module,
+                                   vpn_dynamic_identity_factory),
+    try Provider:release(AllocationId) of
+        {ok, _SafeResult} -> {ok, removed};
+        {error, dynamic_identity_not_found} -> {ok, absent};
+        {error, not_found} -> {ok, absent};
+        {error, Reason} -> {error, Reason};
+        Other -> {error, {invalid_dynamic_identity_release_result, Other}}
+    catch
+        error:undef ->
+            {error, {dynamic_identity_release_unsupported, Provider}};
+        Class:Reason ->
+            {error, {dynamic_identity_release_failed, Provider, Class, Reason}}
+    end.
+
+decommission_summary(Allocation) ->
+    #{device_id => maps:get(device_id, Allocation),
+      allocation_id => maps:get(allocation_id, Allocation),
+      allocator_instance_id => maps:get(allocator_instance_id,
+                                        Allocation,
+                                        undefined),
+      slot => maps:get(slot, Allocation),
+      generation => maps:get(generation, Allocation),
+      client_peer_id => maps:get(client_peer_id, Allocation),
+      gateway_peer_id => maps:get(gateway_peer_id, Allocation),
+      state => decommissioned,
+      allocation_state => released,
+      registry_state => removed,
+      persistence => maps:get(persistence, Allocation, volatile),
+      decommissioned_at => erlang:system_time(second)}.
+
+normalize_decommission_options(Options) ->
+    Defaults = #{remove_identity => false},
+    Unknown = maps:keys(maps:without([remove_identity], Options)),
+    Normalized = maps:merge(Defaults, Options),
+    case {Unknown, maps:get(remove_identity, Normalized)} of
+        {[], Value} when is_boolean(Value) -> {ok, Normalized};
+        {[_ | _], _} -> {error, {unknown_decommission_options, Unknown}};
+        {[], _} -> {error, invalid_remove_identity_option}
     end.
 
 reconcile_options() ->

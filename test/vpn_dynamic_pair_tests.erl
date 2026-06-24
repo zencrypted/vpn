@@ -322,6 +322,160 @@ pair_aware_enable_fails_closed_without_gateway_test_() ->
                       end)]
      end}.
 
+active_pair_cannot_be_decommissioned_test_() ->
+    {setup,
+     fun setup/0,
+     fun cleanup/1,
+     fun(Context) ->
+             [?_test(begin
+                          DeviceId = <<"device-decommission-active">>,
+                          {ok, Allocation} = vpn_peer_allocator:ensure(DeviceId),
+                          ok = install_identity_bundle(Allocation, Context),
+                          {ok, _} = vpn_dynamic_pair:ensure(DeviceId,
+                                                            desired(DeviceId)),
+                          ClientId = maps:get(client_peer_id, Allocation),
+                          GatewayId = maps:get(gateway_peer_id, Allocation),
+
+                          ?assertMatch(
+                             {error, {dynamic_pair_not_quiesced, _}},
+                             vpn_dynamic_pair:decommission(DeviceId)),
+                          ?assert(vpn_manager:peer_running(ClientId)),
+                          ?assert(vpn_manager:peer_running(GatewayId)),
+                          ?assertMatch({ok, _},
+                                       vpn_peer_allocator:lookup(DeviceId)),
+                          ?assertMatch({ok, _},
+                                       vpn_peer_registry:get(ClientId)),
+                          ?assertMatch({ok, _},
+                                       vpn_peer_registry:get(GatewayId))
+                      end)]
+     end}.
+
+disabled_pair_decommission_releases_runtime_and_allocation_test_() ->
+    {setup,
+     fun setup/0,
+     fun cleanup/1,
+     fun(Context) ->
+             [?_test(begin
+                          DeviceId = <<"device-decommission-disabled">>,
+                          {ok, Allocation} = vpn_peer_allocator:ensure(DeviceId),
+                          ok = install_identity_bundle(Allocation, Context),
+                          {ok, _} = vpn_dynamic_pair:ensure(DeviceId,
+                                                            desired(DeviceId)),
+                          ClientId = maps:get(client_peer_id, Allocation),
+                          GatewayId = maps:get(gateway_peer_id, Allocation),
+                          AllocationId = maps:get(allocation_id, Allocation),
+                          Disable = #{peer_id => ClientId,
+                                      revision => 1,
+                                      operation => disable,
+                                      source => ias,
+                                      desired_state => #{}},
+                          ?assertMatch({ok, #{operation := disable}},
+                                       vpn_provisioning:apply(Disable)),
+
+                          {ok, Summary} =
+                              vpn_dynamic_pair:decommission(DeviceId),
+                          ?assertEqual(decommissioned, maps:get(state, Summary)),
+                          ?assertEqual(released,
+                                       maps:get(allocation_state, Summary)),
+                          ?assertEqual(removed,
+                                       maps:get(registry_state, Summary)),
+                          ?assertEqual(retained,
+                                       maps:get(identity_state, Summary)),
+                          ?assertEqual(ClientId,
+                                       maps:get(client_peer_id, Summary)),
+                          ?assertEqual(GatewayId,
+                                       maps:get(gateway_peer_id, Summary)),
+                          ?assertNot(contains_key(private_key_path, Summary)),
+                          ?assertNot(contains_key(ovpn_identity, Summary)),
+
+                          ?assertEqual(false,
+                                       vpn_manager:peer_running(ClientId)),
+                          ?assertEqual(false,
+                                       vpn_manager:peer_running(GatewayId)),
+                          ?assertEqual({error, not_found},
+                                       vpn_peer_registry:get(ClientId)),
+                          ?assertEqual({error, not_found},
+                                       vpn_peer_registry:get(GatewayId)),
+                          ?assertEqual({error, not_found},
+                                       vpn_peer_allocator:lookup(DeviceId)),
+                          ?assertMatch({ok, #{allocation_id := AllocationId}},
+                                       vpn_dynamic_identity_factory_test_provider:lookup(
+                                         AllocationId)),
+
+                          Stale = #{peer_id => ClientId,
+                                    revision => 0,
+                                    operation => upsert,
+                                    source => ias,
+                                    desired_state => desired(DeviceId)},
+                          ?assertEqual({error, stale_revision},
+                                       vpn_provisioning:apply(Stale)),
+                          Newer = Stale#{revision => 2},
+                          ?assertEqual(
+                             {error,
+                              {dynamic_peer_allocation_required, DeviceId}},
+                             vpn_provisioning:apply(Newer))
+                      end)]
+     end}.
+
+revoked_pair_decommission_can_remove_identity_test_() ->
+    {setup,
+     fun setup/0,
+     fun cleanup/1,
+     fun(Context) ->
+             [?_test(begin
+                          DeviceId = <<"device-decommission-revoked">>,
+                          {ok, Allocation} = vpn_peer_allocator:ensure(DeviceId),
+                          ok = install_identity_bundle(Allocation, Context),
+                          {ok, _} = vpn_dynamic_pair:ensure(DeviceId,
+                                                            desired(DeviceId)),
+                          ClientId = maps:get(client_peer_id, Allocation),
+                          AllocationId = maps:get(allocation_id, Allocation),
+                          Revoke = #{peer_id => ClientId,
+                                     revision => 1,
+                                     operation => revoke,
+                                     source => ias,
+                                     desired_state =>
+                                         #{authorization_reason =>
+                                               certificate_revoked}},
+                          ?assertMatch({ok, #{operation := revoke}},
+                                       vpn_provisioning:apply(Revoke)),
+
+                          {ok, Summary} = vpn_dynamic_pair:decommission(
+                                            DeviceId,
+                                            #{remove_identity => true}),
+                          ?assertEqual(removed,
+                                       maps:get(identity_state, Summary)),
+                          ?assertEqual({error, not_found},
+                                       vpn_dynamic_identity_factory_test_provider:lookup(
+                                         AllocationId)),
+                          {ok, Replacement} =
+                              vpn_peer_allocator:ensure(DeviceId),
+                          ?assertNotEqual(AllocationId,
+                                          maps:get(allocation_id, Replacement)),
+                          ?assertNotEqual(ClientId,
+                                          maps:get(client_peer_id, Replacement))
+                      end)]
+     end}.
+
+reserved_allocation_can_be_decommissioned_test_() ->
+    {setup,
+     fun setup/0,
+     fun cleanup/1,
+     fun(_Context) ->
+             [?_test(begin
+                          DeviceId = <<"device-decommission-reserved">>,
+                          {ok, _Allocation} =
+                              vpn_peer_allocator:ensure(DeviceId),
+                          {ok, Summary} = vpn_dynamic_pair:decommission(
+                                            DeviceId,
+                                            #{remove_identity => true}),
+                          ?assertEqual(absent,
+                                       maps:get(identity_state, Summary)),
+                          ?assertEqual({error, not_found},
+                                       vpn_peer_allocator:lookup(DeviceId))
+                      end)]
+     end}.
+
 registry_collision_is_rejected_test_() ->
     {setup,
      fun setup/0,
@@ -376,7 +530,15 @@ failed_pair_start_rolls_registry_back_test_() ->
 invalid_request_test() ->
     ?assertEqual({error, invalid_dynamic_pair_request},
                  vpn_dynamic_pair:ensure(undefined, #{})),
-    ?assertEqual({error, invalid_device_id}, vpn_dynamic_pair:status(undefined)).
+    ?assertEqual({error, invalid_device_id}, vpn_dynamic_pair:status(undefined)),
+    ?assertEqual({error, invalid_dynamic_pair_decommission_request},
+                 vpn_dynamic_pair:decommission(undefined, #{})),
+    ?assertEqual({error, invalid_remove_identity_option},
+                 vpn_dynamic_pair:decommission(<<"device">>,
+                                               #{remove_identity => yes})),
+    ?assertMatch({error, {unknown_decommission_options, [_]}},
+                 vpn_dynamic_pair:decommission(<<"device">>,
+                                               #{unknown => true})).
 
 setup() ->
     stop_registered(vpn_provisioning),

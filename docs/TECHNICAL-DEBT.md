@@ -49,49 +49,28 @@ Accepted, unchanged, stale, conflicting, and revoked commands are represented in
 bounded per-peer audit history. Authorization metadata is normalized when policy
 state changes, and explicit revoke reasons are preserved.
 
-## In progress — Dynamic peer allocation
+## Completed — Dynamic peer allocation and lifecycle
 
-The first five stages are complete across VPN and IAS. `vpn_peer_allocator`
-reserves a unique
-binary client/gateway peer pair and non-overlapping TUN, address, and UDP
-resources for each binary IAS Device ID. Reservations are idempotent while the
-allocator process remains alive and intentionally do not contain identity or
-session secrets.
+VPN-owned allocation now reserves binary client/gateway peer IDs and
+non-overlapping transport resources. The runtime resolver, development identity
+factory, IAS reservation/delivery cutover, pair reconciliation, synchronized
+enable/disable/revoke behavior, startup quarantine, and explicit decommission
+are exercised end to end. Static `client_a/client_b` peers remain low-level
+debug fixtures rather than the normal IAS delivery target.
 
-`vpn_runtime_config_resolver` has a `dynamic_allocator` mode and a lookup-only
-`resolve_pair/2` API. It converts an existing reservation into validated client
-and gateway runtime maps while rejecting Device mismatches and transport or
-identity ownership in trusted defaults or IAS desired state.
+`vpn_dynamic_pair:decommission/1,2` removes only quiesced pairs. It validates
+ownership, batch-removes client and gateway registry entries, releases the
+allocator slot, and optionally removes the local development identity bundle.
+Stale revisions remain blocked by the live provisioning head, and allocation
+release prevents resolver-based reconstruction of the old peer IDs.
 
-`vpn_dynamic_identity_factory` now creates development-only client OVPN and
-gateway RSA identity bundles under the Git-ignored `local/dynamic/` tree. It
-binds certificate CNs to binary allocated peer IDs, validates trust and key
-ownership, rejects partial or unsafe bundles, and exposes only file references
-and public fingerprints. The resolver consumes those references.
+The remaining work is durability rather than runtime functionality: allocator
+assignments, revision heads, revoke/decommission tombstones, and recovery order
+must survive process and node restarts without persisting private or session
+material. See
+[`DYNAMIC-PEER-ALLOCATION.md`](DYNAMIC-PEER-ALLOCATION.md).
 
-IAS now reserves safe allocation metadata before CSR preparation. On the VPN
-side, `vpn_dynamic_pair:ensure/2` materializes identities, resolves both runtime
-maps, writes them through one registry batch, starts/restarts the gateway and
-client, waits for both handshakes, and rolls back partial startup. Allocation
-ownership is exposed in safe registry/admin metadata.
-
-The allocator is still volatile. Restart namespaces prevent stale on-disk
-identity bundle name collisions, but they do not restore assignments or protect
-transport slots after an allocator-only process restart. The remaining work is
-tracked in
-[`DYNAMIC-PEER-ALLOCATION.md`](DYNAMIC-PEER-ALLOCATION.md):
-
-- remove the hard-coded Alice/Bob slot mapping from the normal IAS path;
-- route dynamic lifecycle revisions and revocations through the allocated client;
-- add arbitrary third-Device end-to-end coverage;
-- persist and restore assignments before provisioning reconciliation;
-- coordinate release and reuse with revision, revoke, and tombstone barriers.
-
-Until the IAS cutover is complete, `client_a/client_b` remain the supported
-normal integration topology. Reserved dynamic allocations are runnable through
-`vpn_dynamic_pair`, but they are not yet the default IAS delivery target.
-
-## Deferred until IAS integration — Durable provisioning projection
+## Deferred — Durable provisioning and allocation projection
 
 The VPN provisioning registry is currently an in-memory runtime projection. A
 process or node restart rebuilds bootstrap entries from trusted application
