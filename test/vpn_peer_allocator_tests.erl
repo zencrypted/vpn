@@ -95,20 +95,46 @@ invalid_config_test() ->
                         #{capacity => 10,
                           client_udp_port_base => 22000,
                           gateway_udp_port_base => 22005}),
-    Result = vpn_peer_allocator:start_link(),
-    case Result of
-        {ok, Pid} ->
-            unlink(Pid),
-            exit(Pid, shutdown),
-            wait_until_stopped(Pid, 20);
-        _ ->
-            ok
-    end,
-    application:unset_env(vpn, dynamic_peer_allocator),
-    ?assertEqual({error,
-                  {invalid_dynamic_peer_allocator_config,
-                   overlapping_udp_port_ranges}},
-                 Result).
+    try
+        ?assertEqual({error,
+                      {invalid_dynamic_peer_allocator_config,
+                       overlapping_udp_port_ranges}},
+                     isolated_start_link())
+    after
+        stop_registered(vpn_peer_allocator),
+        application:unset_env(vpn, dynamic_peer_allocator)
+    end.
+
+isolated_start_link() ->
+    Parent = self(),
+    Ref = make_ref(),
+    {Pid, MonitorRef} =
+        spawn_monitor(
+          fun() ->
+                  process_flag(trap_exit, true),
+                  Parent ! {Ref, vpn_peer_allocator:start_link()}
+          end),
+    receive
+        {Ref, Result} ->
+            receive
+                {'DOWN', MonitorRef, process, Pid, normal} ->
+                    Result;
+                {'DOWN', MonitorRef, process, Pid, Reason} ->
+                    erlang:error({allocator_start_helper_failed, Reason})
+            after 1000 ->
+                    erlang:demonitor(MonitorRef, [flush]),
+                    Result
+            end;
+        {'DOWN', MonitorRef, process, Pid, Reason} ->
+            erlang:error({allocator_start_helper_failed, Reason})
+    after 1000 ->
+            exit(Pid, kill),
+            receive
+                {'DOWN', MonitorRef, process, Pid, _Reason} -> ok
+            after 1000 -> ok
+            end,
+            erlang:error(allocator_start_helper_timeout)
+    end.
 
 setup() ->
     stop_registered(vpn_peer_allocator),
