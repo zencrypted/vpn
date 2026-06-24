@@ -172,8 +172,11 @@ handle_call(_Request, _From, State) ->
 handle_cast(_Request, State) ->
     {noreply, State}.
 
+handle_info(handshake_start, State = #{handshake_started := false}) ->
+    start_handshake(State#{handshake_started := true,
+                           handshake_start_timer := undefined});
 handle_info(handshake_start, State) ->
-    start_handshake(State);
+    {noreply, State};
 handle_info(auto_rekey_check, State) ->
     {noreply, schedule_auto_rekey_check(maybe_auto_rekey(State))};
 handle_info({auto_rekey_start, Token},
@@ -205,6 +208,11 @@ handle_info({vpn_tun_packet, TunPid, Packet},
     end;
 handle_info({vpn_tun_packet, _OtherTunPid, _Packet}, State) ->
     {noreply, State};
+handle_info({vpn_udp_packet, UdpPid, _Ip, _Port, Packet},
+            State = #{udp_pid := UdpPid, handshake_started := false}) ->
+    Size = byte_size(Packet),
+    State1 = incr_counters(State, udp_rx_packets, udp_rx_bytes, Size),
+    {noreply, incr_counter(State1, handshake_start_dropped_packets)};
 handle_info({vpn_udp_packet, UdpPid, Ip, Port, Packet},
             State = #{udp_pid := UdpPid, tun_pid := TunPid, mode := Mode}) ->
     Size = byte_size(Packet),
@@ -242,6 +250,7 @@ handle_info(_Message, State) ->
     {noreply, State}.
 
 terminate(_Reason, State) ->
+    cancel_initial_handshake_timer(State),
     stop_worker(maps:get(tun_pid, State, undefined), fun vpn_tun:stop/1),
     stop_worker(maps:get(udp_pid, State, undefined), fun vpn_udp:stop/1),
     ok.
@@ -298,15 +307,29 @@ init_tun(UdpPid, TunName, TunIp, Mode, RemoteIp, RemoteUdpPort, PeerId, RemotePe
                                  tx_seq => 0,
                                  rx_seq => 0,
                                  remote_ip => RemoteIp,
-                                 remote_udp_port => RemoteUdpPort},
+                                 remote_udp_port => RemoteUdpPort,
+                                 handshake_started => false,
+                                 handshake_start_timer => undefined,
+                                 handshake_start_delay_ms =>
+                                     maps:get(start_delay_ms,
+                                              HandshakeOptions,
+                                              0)},
                                zero_counters()),
-            self() ! handshake_start,
-            {ok, schedule_auto_rekey_check(State)};
+            State1 = schedule_initial_handshake(State),
+            {ok, schedule_auto_rekey_check(State1)};
         {error, Reason} ->
             _ = vpn_udp:stop(UdpPid),
             {stop, Reason}
     end.
 
+
+schedule_initial_handshake(State = #{handshake_start_delay_ms := 0}) ->
+    self() ! handshake_start,
+    State;
+schedule_initial_handshake(State = #{handshake_start_delay_ms := DelayMs})
+  when is_integer(DelayMs), DelayMs > 0 ->
+    Ref = erlang:send_after(DelayMs, self(), handshake_start),
+    State#{handshake_start_timer := Ref}.
 
 begin_rekey(State = #{handshake := Handshake,
                       udp_pid := UdpPid,
@@ -443,6 +466,12 @@ schedule_handshake_retry(State, Handshake) ->
             cancel_handshake_timer(State),
             Ref = erlang:send_after(maps:get(retry_interval, Handshake), self(), handshake_retry),
             State#{handshake_timer := Ref}
+    end.
+
+cancel_initial_handshake_timer(State) ->
+    case maps:get(handshake_start_timer, State, undefined) of
+        undefined -> ok;
+        Ref -> _ = erlang:cancel_timer(Ref), ok
     end.
 
 cancel_handshake_timer(State) ->
@@ -792,6 +821,7 @@ stats_map(State = #{tun_pid := TunPid,
                  replay => replay_info(State),
                  debug_replay => debug_replay_info(State),
                  auto_rekey => auto_rekey_info(State),
+                 handshake_start => handshake_start_info(State),
                  session_reset => session_reset_info(State)},
                maps:with(counter_keys(), State)).
 
@@ -800,6 +830,10 @@ debug_session_state_info(State) ->
     Replay = replay_info(State),
     Handshake = vpn_handshake:info(maps:get(handshake, State)),
     #{handshake_status => maps:get(status, Handshake, undefined),
+      handshake_start_pending => not maps:get(handshake_started, State, true),
+      handshake_start_delay_ms => maps:get(handshake_start_delay_ms, State, 0),
+      handshake_start_dropped_packets =>
+          maps:get(handshake_start_dropped_packets, State, 0),
       current_epoch => maps:get(current_epoch, Replay, 0),
       previous_epoch => maps:get(previous_epoch, Replay, undefined),
       previous_epoch_expires_in_ms =>
@@ -817,6 +851,11 @@ debug_session_state_info(State) ->
                                     #{rx_packets_since_rekey := Count2} -> Count2;
                                     _ -> 0
                                 end}.
+
+handshake_start_info(State) ->
+    #{pending => not maps:get(handshake_started, State, true),
+      delay_ms => maps:get(handshake_start_delay_ms, State, 0),
+      dropped_packets => maps:get(handshake_start_dropped_packets, State, 0)}.
 
 session_reset_info(State) ->
     #{pending => maps:get(remote_restart_pending, State, false),
@@ -902,6 +941,7 @@ counter_keys() ->
      handshake_control_rx,
      handshake_failures,
      handshake_blocked_packets,
+     handshake_start_dropped_packets,
      rekeys_completed,
      peer_session_resets,
      auto_rekeys_started,

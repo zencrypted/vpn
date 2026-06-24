@@ -239,11 +239,22 @@ Revisioned lifecycle operations on a dynamic client are pair-aware. `disable`
 updates the dedicated gateway and client in one registry batch, reconciles the
 gateway first, and returns only after both processes are stopped. `enable`
 re-enables the gateway first, then the client, and returns only after both
-certificate-control handshakes report `established`. If enable cannot establish
-the pair, both sides are rolled back to `enabled => false`. `revoke` uses the
-same gateway-first quiesce path, but only the client is marked revoked; the
-gateway remains authorized and unrevoked so an explicit higher-level reissue
-can reuse the reserved identity without leaving an orphaned handshake timer.
+certificate-control handshakes report `established`. Dynamic peers use a short
+VPN-owned handshake-start quarantine before emitting the first control frame.
+While that timer is pending, packets arriving on the newly rebound UDP sockets
+are discarded. This drains delayed control/data frames from the previous pair
+incarnation so an immediate Disable -> Enable cycle cannot contaminate the new
+certificate transcript with an old rekey exchange. The debug default is:
+
+```erlang
+handshake_start_delay_ms => 250
+```
+
+Static peers retain the zero-delay default. If enable cannot establish the pair,
+both sides are rolled back to `enabled => false`. `revoke` uses the same
+gateway-first quiesce path, but only the client is marked revoked; the gateway
+remains authorized and unrevoked so an explicit higher-level reissue can reuse
+the reserved identity without leaving an orphaned handshake timer.
 
 The wait policy is VPN-owned and configurable:
 

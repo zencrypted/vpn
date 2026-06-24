@@ -55,6 +55,12 @@ dynamic_allocation_resolver_test_() ->
                           ?assertEqual(true, maps:get(authorized, Client)),
                           ?assertEqual(development_bypass,
                                        maps:get(authorization_mode, Gateway)),
+                          ?assertEqual(75,
+                                       maps:get(handshake_start_delay_ms,
+                                                Client)),
+                          ?assertEqual(75,
+                                       maps:get(handshake_start_delay_ms,
+                                                Gateway)),
                           ?assertEqual(undefined,
                                        maps:get(profile_id, Gateway, undefined)),
                           ?assertMatch(#{ovpn_identity := #{identity_ready := true}},
@@ -201,6 +207,7 @@ runtime_common_defaults() ->
       psk => <<"dynamic-resolver-test-psk">>,
       authorization_mode => development_bypass,
       authorized => true,
+      handshake_start_delay_ms => 75,
       authorization_reason => dynamic_allocator_test}.
 
 install_identity_bundle(Allocation) ->

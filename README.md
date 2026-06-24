@@ -171,8 +171,11 @@ running peer. Transport, identity, handshake, authorization, enabled, or other
 runtime configuration changes still reconcile the process. Revisioned `disable` and `enable` operations on a dynamic client are also
 pair-aware. Disable quiesces the gateway before the client and returns only after
 both processes are stopped. Enable starts the gateway before the client and
-returns only after both certificate-control handshakes are `established`; a
-failed enable rolls the pair back to the disabled state. A revisioned revoke
+returns only after both certificate-control handshakes are `established`.
+Dynamic peers delay the first handshake briefly and discard packets received
+while the newly rebound UDP sockets are in that startup quarantine. This keeps
+old rekey/control frames from a just-disabled pair out of the new certificate
+transcript. A failed enable rolls the pair back to the disabled state. A revisioned revoke
 uses the same gateway-first quiesce path, but only the client is marked revoked.
 This prevents orphaned handshake retries while preserving the gateway identity
 for an explicit higher-level reissue.

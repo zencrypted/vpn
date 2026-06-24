@@ -186,6 +186,7 @@ handshake_options(Config, IdentityInfo) ->
     Base = #{mode => maps:get(handshake_mode, Config, disabled),
              retry_interval => maps:get(handshake_retry_interval, Config, 1000),
              max_retries => maps:get(handshake_max_retries, Config, 5),
+             start_delay_ms => maps:get(handshake_start_delay_ms, Config, 0),
              previous_epoch_grace_ms =>
                  maps:get(previous_epoch_grace_ms, Config, 5000),
              debug_replay_controls =>
@@ -264,12 +265,20 @@ missing_key(Config, [Key | Rest]) ->
 validate_handshake_config(#{handshake_mode := certificate_control} = Config) ->
     case maps:get(handshake_remote_ca_certificate_path, Config, undefined) of
         Path when is_list(Path); is_binary(Path) ->
-            validate_previous_epoch_grace(Config);
+            validate_handshake_start_delay(Config);
         _ ->
             {error, {missing_config_key, handshake_remote_ca_certificate_path}}
     end;
 validate_handshake_config(Config) ->
-    validate_previous_epoch_grace(Config).
+    validate_handshake_start_delay(Config).
+
+validate_handshake_start_delay(Config) ->
+    case maps:get(handshake_start_delay_ms, Config, 0) of
+        DelayMs when is_integer(DelayMs), DelayMs >= 0 ->
+            validate_previous_epoch_grace(Config);
+        DelayMs ->
+            {error, {invalid_handshake_start_delay_ms, DelayMs}}
+    end.
 
 validate_previous_epoch_grace(Config) ->
     case maps:get(previous_epoch_grace_ms, Config, 5000) of
@@ -363,6 +372,7 @@ runtime_config(Config) ->
                handshake_mode,
                handshake_retry_interval,
                handshake_max_retries,
+               handshake_start_delay_ms,
                previous_epoch_grace_ms,
                auto_rekey_after_seconds,
                auto_rekey_after_packets,
