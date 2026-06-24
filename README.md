@@ -302,6 +302,65 @@ Run its smoke test with:
 ./tools/test-debug-ovpn.sh
 ```
 
+### Verified two-user IAS demo topology
+
+The bounded debug topology now supports two IAS-managed client slots at the
+same time:
+
+```text
+IAS Alice Device -> client_a <-> peer_b
+IAS Bob Device   -> client_b <-> peer_c
+```
+
+`client_a` and `client_b` are trusted runtime slots. Each slot has its own
+OVPN identity, certificate, private key, TUN name, tunnel address, UDP port,
+and expected gateway peer. `peer_b` and `peer_c` are infrastructure-side debug
+peers and are not provisioned as IAS user identities.
+
+The complete flow has been verified manually from the IAS Provisioning Wizard:
+
+```text
+User
+-> Device
+-> Security Profile
+-> Client Certificate
+-> VPN Service
+-> IAS revisioned provisioning command
+-> trusted VPN runtime slot
+-> certificate-authenticated handshake
+-> encrypted UDP dataplane
+```
+
+The following runtime checks succeeded simultaneously for both pairs:
+
+- all four peer processes were running;
+- `client_a <-> peer_b` and `client_b <-> peer_c` reported
+  `handshake_status => established`;
+- an Alice payload sent from `client_a` was received only by `peer_b`;
+- a Bob payload sent from `client_b` was received only by `peer_c`;
+- both IAS-managed client slots retained the selected Device ID, Security
+  Profile, authorization decision, certificate fingerprint, and revision;
+- certificate trust and private-key matching succeeded;
+- crypto-failure and rejected-frame counters remained zero.
+
+A compact shell verification is:
+
+```erlang
+vpn_manager:running_peers().
+vpn_manager:debug_session_state(client_a).
+vpn_manager:debug_session_state(peer_b).
+vpn_manager:debug_session_state(client_b).
+vpn_manager:debug_session_state(peer_c).
+vpn_peer_registry:get(client_a).
+vpn_peer_registry:get(client_b).
+vpn_admin:summary().
+```
+
+This is intentionally a bounded demo pool, not a general dynamic allocator. A
+future milestone must allocate peer IDs, TUN interfaces, addresses, ports, and
+gateway-side sessions dynamically and persist those assignments across VPN
+restarts.
+
 ## Demo Guide
 
 This guide shows the current end-to-end VPN milestone: encrypted TUN peers,
@@ -456,11 +515,18 @@ Interactive peer management operational
 Canonical OVPN envelope contract defined
 Canonical OVPN parser operational
 OVPN local identity validation operational
+Certificate-authenticated session establishment operational
+Ephemeral ECDH/HKDF traffic keys operational
+Authenticated rekey and replay protection operational
+IAS revisioned runtime provisioning operational
+Two simultaneous trusted IAS client slots operational
 ```
 
-The OVPN import milestone now includes strict parsing and EC P-384 local
-identity validation. It does not yet include certificate-authenticated session
-establishment, Device-lock enforcement, or a 2FA provider. These gaps are tracked in
+The current two-user topology is a bounded development milestone. It proves
+that two distinct IAS Users and Devices can be provisioned into separate trusted
+VPN slots and exchange encrypted payloads concurrently. Dynamic slot allocation,
+durable provisioning projection, production Device-lock enforcement, and a real
+2FA provider remain future work and are tracked in
 [`docs/TECHNICAL-DEBT.md`](docs/TECHNICAL-DEBT.md).
 
 ## VPN Management API
