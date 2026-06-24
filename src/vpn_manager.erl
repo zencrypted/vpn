@@ -150,9 +150,20 @@ debug_peer_pid(PeerId) ->
 
 debug_restart_peer(PeerId) ->
     case debug_peer_pid(PeerId) of
-        {ok, Pid} ->
-            exit(Pid, kill),
-            {ok, Pid};
+        {ok, OldPid} ->
+            case stop_peer(PeerId) of
+                ok ->
+                    case start_peer(PeerId) of
+                        {ok, NewPid} when is_pid(NewPid), NewPid =/= OldPid ->
+                            {ok, OldPid};
+                        {ok, OldPid} ->
+                            {error, {peer_restart_failed, pid_not_replaced}};
+                        {error, Reason} ->
+                            {error, {peer_restart_failed, Reason}}
+                    end;
+                {error, Reason} ->
+                    {error, {peer_restart_failed, Reason}}
+            end;
         {error, _} = Error ->
             Error
     end.

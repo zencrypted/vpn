@@ -41,6 +41,47 @@ stale_control_frames_are_drained_before_delayed_handshake_test_() ->
              end
      end}.
 
+
+link_stops_and_releases_udp_port_when_owner_is_killed_test_() ->
+    {timeout,
+     10,
+     fun() ->
+             {Port, RemotePort} = distinct_udp_ports(),
+             Parent = self(),
+             Owner = spawn(
+                       fun() ->
+                               Result = vpn_link:start_link(
+                                          <<"owner-exit">>,
+                                          "10.99.2.1",
+                                          tun,
+                                          Port,
+                                          {127, 0, 0, 1},
+                                          RemotePort,
+                                          owner_peer,
+                                          remote_peer,
+                                          <<"owner-exit-psk">>,
+                                          #{mode => disabled}),
+                               Parent ! {owner_link_result, self(), Result},
+                               receive stop -> ok end
+                       end),
+             LinkPid = receive
+                           {owner_link_result, Owner, {ok, Pid}} -> Pid;
+                           {owner_link_result, Owner, Other} ->
+                               erlang:error({vpn_link_start_failed, Other})
+                       after 3000 ->
+                           erlang:error(vpn_link_start_timeout)
+                       end,
+             Monitor = erlang:monitor(process, LinkPid),
+             exit(Owner, kill),
+             receive
+                 {'DOWN', Monitor, process, LinkPid, _Reason} -> ok
+             after 3000 ->
+                 erlang:error(vpn_link_orphaned_after_owner_exit)
+             end,
+             {ok, Socket} = gen_udp:open(Port, [binary]),
+             gen_udp:close(Socket)
+     end}.
+
 invalid_handshake_start_delay_is_rejected_test() ->
     Config = #{id => peer_a,
                mode => tun,

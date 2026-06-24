@@ -246,6 +246,11 @@ handle_info({'EXIT', TunPid, Reason}, State = #{tun_pid := TunPid}) ->
     {stop, {tun_exit, Reason}, State};
 handle_info({'EXIT', UdpPid, Reason}, State = #{udp_pid := UdpPid}) ->
     {stop, {udp_exit, Reason}, State};
+handle_info({'EXIT', LinkedPid, Reason}, State) ->
+    %% vpn_link traps exits so it can close TUN/UDP workers in terminate/2.
+    %% The remaining linked process is its vpn_peer owner. Ignoring that EXIT
+    %% leaves an orphan link holding the UDP port after an abrupt peer death.
+    {stop, {owner_exit, LinkedPid, Reason}, State};
 handle_info(_Message, State) ->
     {noreply, State}.
 
