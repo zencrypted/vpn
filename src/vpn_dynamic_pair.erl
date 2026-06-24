@@ -508,6 +508,8 @@ pair_stopped(ClientId, GatewayId) ->
 pair_status(Allocation) ->
     ClientId = maps:get(client_peer_id, Allocation),
     GatewayId = maps:get(gateway_peer_id, Allocation),
+    Client = public_peer_status(ClientId),
+    Gateway = public_peer_status(GatewayId),
     #{allocation_id => maps:get(allocation_id, Allocation),
       allocator_instance_id => maps:get(allocator_instance_id,
                                         Allocation,
@@ -515,9 +517,25 @@ pair_status(Allocation) ->
       device_id => maps:get(device_id, Allocation),
       client_peer_id => ClientId,
       gateway_peer_id => GatewayId,
-      state => maps:get(state, Allocation),
-      client => public_peer_status(ClientId),
-      gateway => public_peer_status(GatewayId)}.
+      allocation_state => maps:get(state, Allocation),
+      state => pair_runtime_state(Allocation, Client, Gateway),
+      client => Client,
+      gateway => Gateway}.
+
+pair_runtime_state(_Allocation,
+                   #{running := true, handshake_status := established},
+                   #{running := true, handshake_status := established}) ->
+    established;
+pair_runtime_state(Allocation,
+                   #{running := false, registry := undefined},
+                   #{running := false, registry := undefined}) ->
+    maps:get(state, Allocation);
+pair_runtime_state(_Allocation,
+                   #{running := false},
+                   #{running := false}) ->
+    stopped;
+pair_runtime_state(_Allocation, _Client, _Gateway) ->
+    reconciling.
 
 public_peer_status(PeerId) ->
     Runtime = runtime_peer_status(PeerId),

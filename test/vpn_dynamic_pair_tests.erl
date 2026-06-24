@@ -23,6 +23,9 @@ atomic_dynamic_provisioning_applies_revision_before_start_test_() ->
                           ?assertEqual(upsert, maps:get(operation, First)),
                           Pair = maps:get(pair, First),
                           ?assertEqual(reconciled, maps:get(outcome, Pair)),
+                          ?assertEqual(established, maps:get(state, Pair)),
+                          ?assertEqual(reserved,
+                                       maps:get(allocation_state, Pair)),
                           ?assertNot(contains_key(private_key_path, First)),
                           ?assertNot(contains_key(ovpn_identity, First)),
 
@@ -267,6 +270,9 @@ pair_is_registered_started_and_idempotent_test_() ->
                           ?assertEqual({ok, GatewayPid1}, vpn_manager:find_peer(GatewayId)),
 
                           {ok, Status} = vpn_dynamic_pair:status(DeviceId),
+                          ?assertEqual(established, maps:get(state, Status)),
+                          ?assertEqual(reserved,
+                                       maps:get(allocation_state, Status)),
                           ?assertMatch(#{client := #{running := true,
                                                     handshake_status := established},
                                          gateway := #{running := true,
@@ -388,6 +394,9 @@ pair_aware_revoke_quiesces_gateway_test_() ->
                           ?assertEqual(false, maps:get(revoked, GatewayEntry)),
 
                           {ok, Status} = vpn_dynamic_pair:status(DeviceId),
+                          ?assertEqual(stopped, maps:get(state, Status)),
+                          ?assertEqual(reserved,
+                                       maps:get(allocation_state, Status)),
                           ?assertMatch(#{client := #{running := false},
                                          gateway := #{running := false}},
                                        Status)

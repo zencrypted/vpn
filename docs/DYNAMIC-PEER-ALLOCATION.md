@@ -277,7 +277,10 @@ The wait policy is VPN-owned and configurable:
 
 Public pair status and administration summaries expose allocation ownership,
 runtime state, and handshake state without exposing OVPN identity internals,
-private-key paths, PEM bodies, or session secrets.
+private-key paths, PEM bodies, or session secrets. The pair-level `state` is
+derived from the two runtime peers (`established`, `stopped`, `reconciling`, or
+`reserved` before runtime materialization); the durable allocator lifecycle is
+reported separately as `allocation_state`.
 
 ### Stage 6 — IAS dynamic cutover and end-to-end tests (completed)
 
