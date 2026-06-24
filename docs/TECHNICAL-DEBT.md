@@ -63,7 +63,10 @@ ownership, rejects partial or unsafe bundles, and exposes only file references
 and public fingerprints. The resolver consumes those references but still does
 not write or start the pair.
 
-The allocator is still volatile. The remaining work is tracked in
+The allocator is still volatile. Restart namespaces prevent stale on-disk
+identity bundle name collisions, but they do not restore assignments or protect
+transport slots after an allocator-only process restart. The remaining work is
+tracked in
 [`DYNAMIC-PEER-ALLOCATION.md`](DYNAMIC-PEER-ALLOCATION.md):
 
 - integrate IAS Device reservation before certificate issuance;

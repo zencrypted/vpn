@@ -380,7 +380,10 @@ The first three dynamic-allocation stages are now available through
 client OVPN and gateway RSA identity material beneath `local/dynamic/`, and the
 resolver consumes only those validated file references. Reservations and
 identity manifests remain local development state and are not yet connected to
-IAS reservation, registry mutation, peer startup, or durable recovery. The
+IAS reservation, registry mutation, peer startup, or durable recovery. Each
+volatile allocator process uses a fresh random namespace in allocation and peer
+IDs, preventing a restarted node from reusing a persistent identity bundle that
+belongs to an earlier Device. The
 ownership model and staged integration plan are documented in
 [`docs/DYNAMIC-PEER-ALLOCATION.md`](docs/DYNAMIC-PEER-ALLOCATION.md).
 

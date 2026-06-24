@@ -52,7 +52,10 @@ process remains alive. Distinct active Devices receive distinct peer IDs, TUN
 names, tunnel addresses, and UDP ports. `release/1` makes the numeric transport
 slot reusable, returns a snapshot marked `state => released`, and a later
 allocation receives a fresh peer-ID generation so a different Device does not
-inherit the released peer identifiers.
+inherit the released peer identifiers. Each allocator process also generates a
+random instance namespace. Allocation IDs and peer IDs include that namespace,
+so a volatile allocator restart cannot accidentally reuse the directory or
+certificate names of identity bundles left by an earlier VPN node.
 
 An allocation contains only resource metadata, for example:
 
@@ -60,21 +63,22 @@ An allocation contains only resource metadata, for example:
 #{device_id => <<"device-123">>,
   slot => 1,
   generation => 42,
+  allocator_instance_id => <<"7f32a91bc4de">>,
   state => reserved,
   persistence => volatile,
-  client_peer_id => <<"client_dyn_1_42">>,
-  gateway_peer_id => <<"gateway_dyn_1_42">>,
-  client => #{peer_id => <<"client_dyn_1_42">>,
+  client_peer_id => <<"client_dyn_1_7f32a91bc4de_42">>,
+  gateway_peer_id => <<"gateway_dyn_1_7f32a91bc4de_42">>,
+  client => #{peer_id => <<"client_dyn_1_7f32a91bc4de_42">>,
               ifname => <<"vpc1">>,
               ip => "10.30.0.10",
               local_udp_port => 20000,
-              remote_peer_id => <<"gateway_dyn_1_42">>,
+              remote_peer_id => <<"gateway_dyn_1_7f32a91bc4de_42">>,
               remote_udp_port => 30000},
-  gateway => #{peer_id => <<"gateway_dyn_1_42">>,
+  gateway => #{peer_id => <<"gateway_dyn_1_7f32a91bc4de_42">>,
                ifname => <<"vpg1">>,
                ip => "10.31.0.10",
                local_udp_port => 30000,
-               remote_peer_id => <<"client_dyn_1_42">>,
+               remote_peer_id => <<"client_dyn_1_7f32a91bc4de_42">>,
                remote_udp_port => 20000}}.
 ```
 
@@ -224,7 +228,10 @@ session, and expose the allocation in administration status. Tests must prove:
 ### Stage 6 — durable allocation projection
 
 The current allocator is deliberately volatile. A VPN restart loses all
-reservations, and allocation order may change. Before dynamic allocation is used
+reservations, and allocation order may change. A fresh random allocator
+namespace prevents old on-disk identity bundles from colliding with newly
+reserved allocation IDs, but it does not restore Device-to-slot ownership or
+make old bundles active again. Before dynamic allocation is used
 outside the local development milestone, persist Device-to-resource assignments
 atomically and restore them before provisioning reconciliation starts.
 

@@ -59,6 +59,7 @@ init([]) ->
     case load_config() of
         {ok, Config} ->
             {ok, #{config => Config,
+                   allocator_instance_id => new_allocator_instance_id(),
                    by_device => #{},
                    by_slot => #{}}};
         {error, Reason} ->
@@ -118,12 +119,16 @@ handle_info(_Message, State) ->
 
 reserve(DeviceId,
         State = #{config := Config,
+                  allocator_instance_id := AllocatorInstanceId,
                   by_device := ByDevice,
                   by_slot := BySlot}) ->
     Capacity = maps:get(capacity, Config),
     case first_free_slot(1, Capacity, BySlot) of
         {ok, Slot} ->
-            Allocation = build_allocation(DeviceId, Slot, Config),
+            Allocation = build_allocation(DeviceId,
+                                          Slot,
+                                          AllocatorInstanceId,
+                                          Config),
             {reply, {ok, Allocation},
              State#{by_device => ByDevice#{DeviceId => Allocation},
                     by_slot => BySlot#{Slot => DeviceId}}};
@@ -139,11 +144,12 @@ first_free_slot(Slot, Capacity, BySlot) ->
         false -> {ok, Slot}
     end.
 
-build_allocation(DeviceId, Slot, Config) ->
+build_allocation(DeviceId, Slot, AllocatorInstanceId, Config) ->
     SlotSuffix = integer_to_binary(Slot),
     Generation = erlang:unique_integer([positive, monotonic]),
     GenerationSuffix = integer_to_binary(Generation),
-    PeerSuffix = <<SlotSuffix/binary, "_", GenerationSuffix/binary>>,
+    PeerSuffix = <<SlotSuffix/binary, "_", AllocatorInstanceId/binary,
+                   "_", GenerationSuffix/binary>>,
     ClientPeerId = prefixed_binary(client_peer_prefix, PeerSuffix, Config),
     GatewayPeerId = prefixed_binary(gateway_peer_prefix, PeerSuffix, Config),
     ClientIfName = prefixed_binary(client_ifname_prefix, SlotSuffix, Config),
@@ -158,6 +164,7 @@ build_allocation(DeviceId, Slot, Config) ->
       device_id => DeviceId,
       slot => Slot,
       generation => Generation,
+      allocator_instance_id => AllocatorInstanceId,
       state => reserved,
       persistence => volatile,
       client_peer_id => ClientPeerId,
@@ -177,6 +184,21 @@ build_allocation(DeviceId, Slot, Config) ->
                    remote_ip => RemoteIp,
                    remote_udp_port => ClientPort},
       created_at => erlang:system_time(second)}.
+
+
+new_allocator_instance_id() ->
+    hex_binary(crypto:strong_rand_bytes(6)).
+
+hex_binary(Binary) ->
+    list_to_binary([hex_byte(Byte) || <<Byte>> <= Binary]).
+
+hex_byte(Byte) ->
+    [hex_digit(Byte bsr 4), hex_digit(Byte band 16#0f)].
+
+hex_digit(Value) when Value < 10 ->
+    $0 + Value;
+hex_digit(Value) ->
+    $a + Value - 10.
 
 prefixed_binary(Key, Suffix, Config) ->
     Prefix = maps:get(Key, Config),
