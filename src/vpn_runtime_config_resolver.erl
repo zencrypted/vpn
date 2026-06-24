@@ -20,13 +20,32 @@ mode() ->
     end.
 
 resolve_static_template(PeerId, Desired) ->
-    case application:get_env(vpn, runtime_config_template) of
-        {ok, Template} when is_map(Template) ->
+    case static_template(PeerId) of
+        {ok, Template} ->
             resolve_template(PeerId, Desired, sanitize_template(Template));
+        {error, _} = Error ->
+            Error
+    end.
+
+static_template(PeerId) ->
+    case application:get_env(vpn, runtime_config_templates) of
+        {ok, Templates} when is_map(Templates) ->
+            case maps:find(PeerId, Templates) of
+                {ok, Template} when is_map(Template) -> {ok, Template};
+                {ok, _Other} -> {error, invalid_runtime_config_template};
+                error -> {error, {runtime_config_template_not_found, PeerId}}
+            end;
         {ok, _Other} ->
-            {error, invalid_runtime_config_template};
+            {error, invalid_runtime_config_templates};
         undefined ->
-            {error, runtime_config_required}
+            legacy_static_template()
+    end.
+
+legacy_static_template() ->
+    case application:get_env(vpn, runtime_config_template) of
+        {ok, Template} when is_map(Template) -> {ok, Template};
+        {ok, _Other} -> {error, invalid_runtime_config_template};
+        undefined -> {error, runtime_config_required}
     end.
 
 resolve_template(PeerId, Desired, Template) ->

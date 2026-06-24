@@ -140,10 +140,12 @@ explicit configured local key, certificate, or OVPN references, but it does not
 inherit session keys, replay state, ECDH material, PIDs, counters, or other
 ephemeral runtime data from the template.
 
-The shipped debug template starts resolved IAS peers with the production
-`vpn_peer` runtime module. Its fixed TUN name and UDP port make it suitable for
-one dynamically provisioned debug peer at a time; additional concurrent peers
-require distinct trusted runtime templates.
+A single `runtime_config_template` remains supported for backward
+compatibility. A trusted `runtime_config_templates` map can define a bounded
+pool keyed by runtime peer ID. The shipped debug profile provides `client_a`
+and `client_b`; each slot has its own OVPN identity, TUN/UDP resources, and a
+compatible gateway-side peer. Unknown slot IDs fail closed. This pool is for a
+two-user demo and is not dynamic production allocation.
 
 Use `vpn_provisioning:status/0` for counters and
 `vpn_provisioning:history/1` for bounded per-peer audit history.

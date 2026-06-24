@@ -254,6 +254,47 @@ certificate_fingerprint_validation_test() ->
                  vpn_runtime_config_resolver:validate_certificate_fingerprint(
                    #{}, Missing)).
 
+
+static_template_pool_selects_peer_specific_runtime_test() ->
+    application:set_env(vpn, runtime_config_resolver, static_template),
+    ClientA = static_template(),
+    ClientB = ClientA#{id => ias_template_client_b,
+                       ifname => <<"tun12">>,
+                       ip => "10.20.30.12",
+                       local_udp_port => 5562,
+                       remote_peer_id => peer_c},
+    application:set_env(vpn, runtime_config_templates,
+                        #{client_a => ClientA, client_b => ClientB}),
+    try
+        {ok, ResolvedA} = vpn_runtime_config_resolver:resolve(
+                            client_a, #{authorized => true}),
+        {ok, ResolvedB} = vpn_runtime_config_resolver:resolve(
+                            client_b, #{authorized => true}),
+        ?assertEqual(client_a, maps:get(id, ResolvedA)),
+        ?assertEqual(<<"tun11">>, maps:get(ifname, ResolvedA)),
+        ?assertEqual(client_b, maps:get(id, ResolvedB)),
+        ?assertEqual(<<"tun12">>, maps:get(ifname, ResolvedB)),
+        ?assertEqual(peer_c, maps:get(remote_peer_id, ResolvedB)),
+        ?assertEqual({error, {runtime_config_template_not_found, client_c}},
+                     vpn_runtime_config_resolver:resolve(
+                       client_c, #{authorized => true}))
+    after
+        application:unset_env(vpn, runtime_config_resolver),
+        application:unset_env(vpn, runtime_config_templates)
+    end.
+
+invalid_static_template_pool_fails_closed_test() ->
+    application:set_env(vpn, runtime_config_resolver, static_template),
+    application:set_env(vpn, runtime_config_templates, [static_template()]),
+    try
+        ?assertEqual({error, invalid_runtime_config_templates},
+                     vpn_runtime_config_resolver:resolve(
+                       client_a, #{authorized => true}))
+    after
+        application:unset_env(vpn, runtime_config_resolver),
+        application:unset_env(vpn, runtime_config_templates)
+    end.
+
 invalid_static_template_fails_closed_test_() ->
     {setup,
      fun setup/0,
@@ -291,6 +332,7 @@ setup() ->
     stop(vpn_peer_registry),
     application:unset_env(vpn, runtime_config_resolver),
     application:unset_env(vpn, runtime_config_template),
+    application:unset_env(vpn, runtime_config_templates),
     application:set_env(vpn, peers, [peer_config(peer_a)]),
     application:set_env(vpn, ovpn_sessions, []),
     {ok, Registry} = vpn_peer_registry:start_link(),
@@ -302,6 +344,7 @@ cleanup({Registry, Provisioning}) ->
     shutdown(Registry),
     application:unset_env(vpn, runtime_config_resolver),
     application:unset_env(vpn, runtime_config_template),
+    application:unset_env(vpn, runtime_config_templates),
     application:unset_env(vpn, peers),
     application:unset_env(vpn, ovpn_sessions),
     ok.
@@ -313,6 +356,7 @@ setup_with_runtime() ->
     stop(vpn_peer_registry),
     application:unset_env(vpn, runtime_config_resolver),
     application:unset_env(vpn, runtime_config_template),
+    application:unset_env(vpn, runtime_config_templates),
     application:set_env(vpn, peers, [peer_config(peer_a)]),
     application:set_env(vpn, ovpn_sessions, []),
     {ok, Registry} = vpn_peer_registry:start_link(),
@@ -328,6 +372,7 @@ cleanup_with_runtime({Registry, Provisioning, PeerSup, Reconciler}) ->
     shutdown(Registry),
     application:unset_env(vpn, runtime_config_resolver),
     application:unset_env(vpn, runtime_config_template),
+    application:unset_env(vpn, runtime_config_templates),
     application:unset_env(vpn, peers),
     application:unset_env(vpn, ovpn_sessions),
     ok.
