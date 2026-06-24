@@ -199,33 +199,67 @@ bodies and private-key contents are never stored in allocator state, the
 manifest, or public factory results. Production identity issuance still belongs
 to IAS/the configured CA workflow.
 
-### Stage 4 — IAS reservation integration
+### Stage 4 — IAS reservation integration (completed in IAS)
 
-IAS will call `ensure(DeviceId)` before certificate issuance and store the
-returned client and gateway peer IDs with the Device provisioning draft. The
-current hard-coded mapping:
+IAS now reserves an allocation before CSR preparation and stores only the safe
+allocation projection with the Device and wizard draft: allocation ID, allocator
+instance ID, client/gateway peer IDs, slot, generation, state, persistence, and
+creation time. Transport internals, identity file paths, PEM, and private-key
+material remain VPN-owned. The existing two-slot delivery path remains active
+until the final dynamic cutover.
+
+### Stage 5 — VPN runtime pair reconciliation (completed)
+
+`vpn_dynamic_pair` exposes:
 
 ```erlang
-#{alice => client_a,
-  bob => client_b}
+vpn_dynamic_pair:ensure(DeviceId, Desired).
+vpn_dynamic_pair:status(DeviceId).
 ```
 
-will then be removed from the normal wizard path. Reopening the same Device must
-reuse the same active reservation rather than allocate another pair.
+`ensure/2` is lookup-only with respect to allocation ownership: IAS must already
+have reserved the Device. The VPN then:
 
-### Stage 5 — end-to-end reconciliation and tests
+1. materializes or reuses the development identity bundle;
+2. resolves the client and gateway runtime maps from the allocation;
+3. validates that existing registry entries, if any, belong to the same
+   allocation and Device;
+4. writes both peers through one registry batch;
+5. reconciles the gateway before the client;
+6. waits until both certificate-control handshakes report `established`.
 
-Provisioning will materialize and start both peers, establish the authenticated
-session, and expose the allocation in administration status. Tests must prove:
+The registry batch prevents observers from seeing only one desired side of a
+new pair. A startup or handshake timeout restores the previous registry state
+and stops newly started partial peers. Repeating `ensure/2` for an already
+established unchanged pair does not restart it.
+
+The wait policy is VPN-owned and configurable:
+
+```erlang
+{dynamic_pair_reconcile, #{
+  establish_timeout_ms => 5000,
+  poll_interval_ms => 50
+}}.
+```
+
+Public pair status and administration summaries expose allocation ownership,
+runtime state, and handshake state without exposing OVPN identity internals,
+private-key paths, PEM bodies, or session secrets.
+
+### Stage 6 — IAS dynamic cutover and end-to-end tests
+
+IAS provisioning still delivers the supported two-slot demo to `client_a` and
+`client_b`. The next cutover will use the reserved dynamic client peer ID and
+call the VPN pair API. Tests must then prove:
 
 - a third arbitrary Device requires no `sys.config` edit;
-- repeated allocation for one Device is idempotent;
+- repeated allocation and pair reconciliation for one Device are idempotent;
 - different Devices never share peer IDs, interfaces, addresses, or ports;
 - release/reallocation cannot bypass revision or revocation barriers;
 - allocator exhaustion fails closed;
 - no dynamic atoms or secret material enter allocation state or public status.
 
-### Stage 6 — durable allocation projection
+### Stage 7 — durable allocation projection
 
 The current allocator is deliberately volatile. A VPN restart loses all
 reservations, and allocation order may change. A fresh random allocator
@@ -240,13 +274,13 @@ private-key bodies, session keys, replay windows, ECDH material, or packet state
 Release, tombstone, and migration semantics must be coordinated with the durable
 provisioning projection described in `TECHNICAL-DEBT.md`.
 
-## Current non-goals after Stage 3
+## Current non-goals after Stage 5
 
-The completed allocator, resolver, and development identity stages do not:
+The completed allocator, resolver, identity, IAS reservation, and VPN pair
+reconciliation stages do not:
 
-- replace `client_a/client_b` in the existing two-user demo;
-- automatically reserve a Device during provisioning;
-- mutate `vpn_peer_registry` with both sides of the pair;
-- start TUN/UDP processes;
+- replace `client_a/client_b` in the existing IAS delivery path;
 - survive a VPN application or node restart;
+- persist revisions, tombstones, or Device-to-slot ownership;
+- release allocation and identity state automatically after lifecycle removal;
 - accept allocator resource choices from IAS, trusted defaults, or an OVPN file.

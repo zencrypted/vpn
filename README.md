@@ -159,8 +159,13 @@ active allocation, a validated development identity bundle, and
 defaults. The resolver exposes `vpn_runtime_config_resolver:resolve_pair/2` to
 produce client and gateway runtime maps together. Identity paths come only from
 `vpn_dynamic_identity_factory`; transport and identity paths supplied through
-IAS desired state or dynamic defaults are rejected/ignored. The resolver still
-does not write the pair to the registry or start either peer.
+IAS desired state or dynamic defaults are rejected/ignored.
+
+`vpn_dynamic_pair:ensure/2` now consumes that resolved pair, writes both sides
+through one registry batch, reconciles the gateway and client, and waits for
+both certificate-control handshakes to become `established`. Repeated calls for
+an unchanged established pair do not restart it. A failed startup or timeout
+restores the previous registry projection.
 
 Use `vpn_provisioning:status/0` for counters and
 `vpn_provisioning:history/1` for bounded per-peer audit history.
@@ -374,17 +379,16 @@ vpn_admin:summary().
 
 This is intentionally a bounded demo pool, not a general dynamic allocator.
 
-The first three dynamic-allocation stages are now available through
-`vpn_peer_allocator`, `vpn_runtime_config_resolver`, and
-`vpn_dynamic_identity_factory`. A reserved Device can receive peer-specific
-client OVPN and gateway RSA identity material beneath `local/dynamic/`, and the
-resolver consumes only those validated file references. Reservations and
-identity manifests remain local development state and are not yet connected to
-IAS reservation, registry mutation, peer startup, or durable recovery. Each
-volatile allocator process uses a fresh random namespace in allocation and peer
-IDs, preventing a restarted node from reusing a persistent identity bundle that
-belongs to an earlier Device. The
-ownership model and staged integration plan are documented in
+The first five dynamic-allocation stages now span VPN allocation, runtime
+resolution, development identities, IAS reservation, and VPN pair
+reconciliation. `vpn_dynamic_pair:ensure/2` can materialize and start a reserved
+client/gateway pair without editing trusted peer configuration. IAS still uses
+the bounded `client_a/client_b` delivery path until the final cutover.
+Reservations and identity manifests remain volatile/local development state.
+Each allocator process uses a fresh random namespace in allocation and peer IDs,
+preventing a restarted node from reusing a persistent identity bundle that
+belongs to an earlier Device. The ownership model and staged integration plan
+are documented in
 [`docs/DYNAMIC-PEER-ALLOCATION.md`](docs/DYNAMIC-PEER-ALLOCATION.md).
 
 ## Materialize a dynamic development identity bundle
@@ -422,6 +426,29 @@ vpn_dynamic_identity_factory:release(maps:get(allocation_id, Allocation)).
 
 Allocator release and identity release are deliberately separate operations.
 Neither public result contains PEM bodies or private-key contents.
+
+## Reconcile a reserved dynamic pair
+
+With a live reservation and the debug identity factory configured:
+
+```erlang
+DeviceId = <<"device-dynamic-smoke">>.
+{ok, _Allocation} = vpn_peer_allocator:ensure(DeviceId).
+Desired = #{device_id => DeviceId,
+            profile_id => default_user,
+            authorization_mode => policy,
+            authorized => true,
+            authorization_reason => profile_allows_vpn,
+            enabled => true,
+            revoked => false}.
+{ok, PairStatus} = vpn_dynamic_pair:ensure(DeviceId, Desired).
+vpn_dynamic_pair:status(DeviceId).
+```
+
+The result contains only allocation ownership, safe registry metadata, running
+state, and handshake state. Administration summaries also expose
+`allocation_id`, allocator instance, slot, generation, role, and Device ID for
+dynamic peers.
 
 ## Demo Guide
 
@@ -585,14 +612,17 @@ Two simultaneous trusted IAS client slots operational
 Volatile dynamic peer reservation allocator operational
 Allocator-backed runtime pair resolution operational
 Development dynamic identity factory operational
+IAS dynamic allocation reservation operational
+Dynamic client/gateway registry reconciliation operational
 ```
 
 The current two-user topology is a bounded development milestone. It proves
 that two distinct IAS Users and Devices can be provisioned into separate trusted
 VPN slots and exchange encrypted payloads concurrently. Dynamic reservation,
-runtime-pair resolution, and development identity materialization now work as
-isolated VPN-owned stages. IAS reservation, registry reconciliation/startup, and
-durable assignments remain future stages.
+runtime-pair resolution, development identity materialization, IAS reservation,
+and VPN-side pair startup now work. The remaining cutover is to route normal IAS
+provisioning through the reserved dynamic client peer and then add arbitrary
+third-Device end-to-end coverage. Durable assignments remain future work.
 See [`docs/DYNAMIC-PEER-ALLOCATION.md`](docs/DYNAMIC-PEER-ALLOCATION.md) and
 [`docs/TECHNICAL-DEBT.md`](docs/TECHNICAL-DEBT.md). Production Device-lock
 enforcement and a real 2FA provider also remain future work.

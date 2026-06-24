@@ -45,7 +45,8 @@ state changes, and explicit revoke reasons are preserved.
 
 ## In progress — Dynamic peer allocation
 
-The first three stages are complete. `vpn_peer_allocator` reserves a unique
+The first five stages are complete across VPN and IAS. `vpn_peer_allocator`
+reserves a unique
 binary client/gateway peer pair and non-overlapping TUN, address, and UDP
 resources for each binary IAS Device ID. Reservations are idempotent while the
 allocator process remains alive and intentionally do not contain identity or
@@ -60,8 +61,13 @@ identity ownership in trusted defaults or IAS desired state.
 gateway RSA identity bundles under the Git-ignored `local/dynamic/` tree. It
 binds certificate CNs to binary allocated peer IDs, validates trust and key
 ownership, rejects partial or unsafe bundles, and exposes only file references
-and public fingerprints. The resolver consumes those references but still does
-not write or start the pair.
+and public fingerprints. The resolver consumes those references.
+
+IAS now reserves safe allocation metadata before CSR preparation. On the VPN
+side, `vpn_dynamic_pair:ensure/2` materializes identities, resolves both runtime
+maps, writes them through one registry batch, starts/restarts the gateway and
+client, waits for both handshakes, and rolls back partial startup. Allocation
+ownership is exposed in safe registry/admin metadata.
 
 The allocator is still volatile. Restart namespaces prevent stale on-disk
 identity bundle name collisions, but they do not restore assignments or protect
@@ -69,15 +75,15 @@ transport slots after an allocator-only process restart. The remaining work is
 tracked in
 [`DYNAMIC-PEER-ALLOCATION.md`](DYNAMIC-PEER-ALLOCATION.md):
 
-- integrate IAS Device reservation before certificate issuance;
-- reconcile and start both sides of each allocated pair;
-- remove the hard-coded Alice/Bob slot mapping from the normal path;
+- remove the hard-coded Alice/Bob slot mapping from the normal IAS path;
+- route dynamic lifecycle revisions and revocations through the allocated client;
+- add arbitrary third-Device end-to-end coverage;
 - persist and restore assignments before provisioning reconciliation;
 - coordinate release and reuse with revision, revoke, and tombstone barriers.
 
-Until those stages are complete, `client_a/client_b` remain the supported
-two-user integration topology and dynamic allocations must not be treated as
-runnable peers.
+Until the IAS cutover is complete, `client_a/client_b` remain the supported
+normal integration topology. Reserved dynamic allocations are runnable through
+`vpn_dynamic_pair`, but they are not yet the default IAS delivery target.
 
 ## Deferred until IAS integration — Durable provisioning projection
 

@@ -65,7 +65,37 @@ invalid_put_test_() ->
      fun cleanup/1,
      fun(_Pid) ->
              [?_assertEqual({error, invalid_peer_config}, vpn_peer_registry:put(#{})),
-              ?_assertEqual({error, invalid_peer_config}, vpn_peer_registry:put(not_a_map))]
+              ?_assertEqual({error, invalid_peer_config}, vpn_peer_registry:put(not_a_map)),
+              ?_assertEqual({error, invalid_peer_config}, vpn_peer_registry:put_many([])),
+              ?_assertEqual({error, duplicate_peer_id},
+                            vpn_peer_registry:put_many([peer_config(peer_b),
+                                                        peer_config(peer_b)])),
+              ?_assertEqual({error, invalid_peer_ids},
+                            vpn_peer_registry:remove_many([]))]
+     end}.
+
+batch_registry_mutation_test_() ->
+    {setup,
+     fun setup/0,
+     fun cleanup/1,
+     fun(_Pid) ->
+             [?_test(begin
+                          PeerB = (peer_config(peer_b))#{allocation_id => <<"alloc-1">>,
+                                                         allocation_role => client},
+                          PeerC = (peer_config(peer_c))#{allocation_id => <<"alloc-1">>,
+                                                         allocation_role => gateway},
+                          {ok, Entries} = vpn_peer_registry:put_many([PeerC, PeerB]),
+                          ?assertEqual([peer_c, peer_b],
+                                       [maps:get(id, Entry) || Entry <- Entries]),
+                          ?assertEqual([peer_a, peer_b, peer_c],
+                                       [maps:get(id, Entry)
+                                        || Entry <- vpn_peer_registry:list()]),
+                          ?assertEqual(ok,
+                                       vpn_peer_registry:remove_many([peer_b, peer_c])),
+                          ?assertEqual([peer_a],
+                                       [maps:get(id, Entry)
+                                        || Entry <- vpn_peer_registry:list()])
+                      end)]
      end}.
 
 

@@ -13,9 +13,11 @@
          list/0,
          get/1,
          put/1,
+         put_many/1,
          disable/1,
          enable/1,
          remove/1,
+         remove_many/1,
          config/1,
          enabled_configs/0]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2]).
@@ -35,6 +37,9 @@ get(PeerId) ->
 put(PeerConfig) ->
     gen_server:call(?SERVER, {put, PeerConfig}).
 
+put_many(PeerConfigs) ->
+    gen_server:call(?SERVER, {put_many, PeerConfigs}).
+
 disable(PeerId) ->
     gen_server:call(?SERVER, {set_enabled, PeerId, false}).
 
@@ -43,6 +48,9 @@ enable(PeerId) ->
 
 remove(PeerId) ->
     gen_server:call(?SERVER, {remove, PeerId}).
+
+remove_many(PeerIds) ->
+    gen_server:call(?SERVER, {remove_many, PeerIds}).
 
 %% Internal runtime access. Never expose the returned configuration through
 %% HTTP, JSON, logs, or administration status.
@@ -95,6 +103,17 @@ handle_call({put, PeerConfig}, _From, State) when is_map(PeerConfig) ->
     end;
 handle_call({put, _PeerConfig}, _From, State) ->
     {reply, {error, invalid_peer_config}, State};
+handle_call({put_many, PeerConfigs}, _From, State) ->
+    case batch_entries(PeerConfigs) of
+        {ok, Entries} ->
+            true = ets:insert(?TABLE,
+                              [{maps:get(id, Entry), Entry} || Entry <- Entries]),
+            PeerIds = [maps:get(id, Entry) || Entry <- Entries],
+            notify_reconciler(#{action => put_many, peer_ids => PeerIds}),
+            {reply, {ok, [safe_entry(Entry) || Entry <- Entries]}, State};
+        {error, _} = Error ->
+            {reply, Error, State}
+    end;
 handle_call({set_enabled, PeerId, Enabled}, _From, State) ->
     case lookup(PeerId) of
         {ok, Entry} ->
@@ -115,6 +134,16 @@ handle_call({remove, PeerId}, _From, State) ->
             {reply, ok, State};
         {error, not_found} = Error ->
             {reply, Error, State}
+    end;
+handle_call({remove_many, PeerIds}, _From, State) ->
+    case valid_peer_ids(PeerIds) of
+        true ->
+            lists:foreach(fun(PeerId) -> true = ets:delete(?TABLE, PeerId) end,
+                          PeerIds),
+            notify_reconciler(#{action => remove_many, peer_ids => PeerIds}),
+            {reply, ok, State};
+        false ->
+            {reply, {error, invalid_peer_ids}, State}
     end;
 handle_call(_Request, _From, State) ->
     {reply, {error, unsupported_operation}, State}.
@@ -143,6 +172,43 @@ existing_enabled(PeerId) ->
         {error, not_found} -> true
     end.
 
+batch_entries(PeerConfigs) when is_list(PeerConfigs), PeerConfigs =/= [] ->
+    case lists:all(fun valid_peer_config/1, PeerConfigs) of
+        true ->
+            PeerIds = [maps:get(id, PeerConfig) || PeerConfig <- PeerConfigs],
+            case length(PeerIds) =:= length(lists:usort(PeerIds)) of
+                true ->
+                    {ok, [entry(PeerConfig,
+                                runtime_api,
+                                existing_enabled(maps:get(id, PeerConfig)))
+                          || PeerConfig <- PeerConfigs]};
+                false ->
+                    {error, duplicate_peer_id}
+            end;
+        false ->
+            {error, invalid_peer_config}
+    end;
+batch_entries(_PeerConfigs) ->
+    {error, invalid_peer_config}.
+
+valid_peer_config(PeerConfig) when is_map(PeerConfig) ->
+    case maps:find(id, PeerConfig) of
+        {ok, PeerId} -> valid_peer_id(PeerId);
+        error -> false
+    end;
+valid_peer_config(_PeerConfig) ->
+    false.
+
+valid_peer_ids(PeerIds) when is_list(PeerIds) ->
+    PeerIds =/= [] andalso
+    lists:all(fun valid_peer_id/1, PeerIds) andalso
+    length(PeerIds) =:= length(lists:usort(PeerIds));
+valid_peer_ids(_PeerIds) ->
+    false.
+
+valid_peer_id(PeerId) ->
+    is_atom(PeerId) orelse is_binary(PeerId).
+
 entry(PeerConfig, Source, DefaultEnabled) ->
     PeerId = maps:get(id, PeerConfig),
     Enabled = maps:get(enabled, PeerConfig, DefaultEnabled),
@@ -152,6 +218,11 @@ entry(PeerConfig, Source, DefaultEnabled) ->
       enabled => Enabled,
       provisioning_source => maps:get(provisioning_source, PeerConfig, Source),
       device_id => maps:get(device_id, PeerConfig, undefined),
+      allocation_id => maps:get(allocation_id, PeerConfig, undefined),
+      allocator_instance_id => maps:get(allocator_instance_id, PeerConfig, undefined),
+      allocation_slot => maps:get(allocation_slot, PeerConfig, undefined),
+      allocation_generation => maps:get(allocation_generation, PeerConfig, undefined),
+      allocation_role => maps:get(allocation_role, PeerConfig, undefined),
       profile_id => maps:get(profile_id, PeerConfig, undefined),
       authorization_mode => maps:get(authorization_mode, PeerConfig, policy),
       authorized => maps:get(authorized, PeerConfig, false),
@@ -173,6 +244,11 @@ safe_entry(Entry) ->
                enabled,
                provisioning_source,
                device_id,
+               allocation_id,
+               allocator_instance_id,
+               allocation_slot,
+               allocation_generation,
+               allocation_role,
                profile_id,
                authorization_mode,
                authorized,

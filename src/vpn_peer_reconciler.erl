@@ -55,8 +55,26 @@ handle_info(_Message, State) ->
 
 reconcile_event(#{action := put, peer_id := PeerId}) ->
     reconcile_put(PeerId);
+reconcile_event(#{action := put_many, peer_ids := PeerIds}) ->
+    reconcile_many(PeerIds);
 reconcile_event(_Event) ->
     vpn_manager:reload_config().
+
+
+reconcile_many(PeerIds) ->
+    lists:foldl(fun(PeerId, Acc) ->
+                        merge_results(Acc, reconcile_put(PeerId))
+                end,
+                empty_result(),
+                PeerIds).
+
+empty_result() ->
+    #{started => [], stopped => [], failed => [], unchanged => []}.
+
+merge_results(Left, Right) ->
+    maps:from_list([{Key,
+                     maps:get(Key, Left, []) ++ maps:get(Key, Right, [])}
+                    || Key <- [started, stopped, failed, unchanged]]).
 
 reconcile_put(PeerId) ->
     case vpn_peer_registry:get(PeerId) of
