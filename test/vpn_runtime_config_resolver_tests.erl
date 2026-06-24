@@ -157,6 +157,8 @@ binary_dynamic_mode_test() ->
 
 setup() ->
     stop_registered(vpn_peer_allocator),
+    stop_registered(vpn_projection),
+    ok = vpn_projection_test_store:reset(),
     application:set_env(vpn,
                         dynamic_peer_allocator,
                         #{capacity => 4,
@@ -177,18 +179,14 @@ setup() ->
                                        authorization_mode => development_bypass,
                                        authorized => true,
                                        authorization_reason => dynamic_gateway}}),
-    {ok, Pid} = vpn_peer_allocator:start_link(),
-    Pid.
+    {ok, ProjectionPid} =
+        vpn_projection:start_link(vpn_projection_test_store),
+    {ok, AllocatorPid} = vpn_peer_allocator:start_link(),
+    #{projection => ProjectionPid, allocator => AllocatorPid}.
 
-cleanup(Pid) ->
-    case is_process_alive(Pid) of
-        true ->
-            unlink(Pid),
-            exit(Pid, shutdown),
-            wait_until_stopped(Pid, 20);
-        false ->
-            ok
-    end,
+cleanup(#{projection := ProjectionPid, allocator := AllocatorPid}) ->
+    stop_pid(AllocatorPid),
+    stop_pid(ProjectionPid),
     application:unset_env(vpn, dynamic_peer_allocator),
     application:unset_env(vpn, runtime_config_resolver),
     application:unset_env(vpn, dynamic_runtime_config_defaults),
@@ -199,6 +197,7 @@ cleanup(Pid) ->
     end,
     application:unset_env(vpn, dynamic_identity_test_bundle),
     application:unset_env(vpn, dynamic_identity_test_root),
+    ok = vpn_projection_test_store:reset(),
     ok.
 
 runtime_common_defaults() ->
@@ -279,10 +278,15 @@ remove_tree(Path) ->
 stop_registered(Name) ->
     case whereis(Name) of
         undefined -> ok;
-        Pid ->
-            unlink(Pid),
-            exit(Pid, shutdown),
-            wait_until_stopped(Pid, 20)
+        Pid -> stop_pid(Pid)
+    end.
+
+stop_pid(Pid) when is_pid(Pid) ->
+    case is_process_alive(Pid) of
+        true ->
+            ok = gen_server:stop(Pid, normal, 5000),
+            wait_until_stopped(Pid, 50);
+        false -> ok
     end.
 
 wait_until_stopped(_Pid, 0) ->

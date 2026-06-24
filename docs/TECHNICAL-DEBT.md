@@ -64,10 +64,11 @@ allocator slot, and optionally removes the local development identity bundle.
 Stale revisions remain blocked by the live provisioning head, and allocation
 release prevents resolver-based reconstruction of the old peer IDs.
 
-The remaining work is durability rather than runtime functionality: allocator
-assignments, revision heads, revoke/decommission tombstones, and recovery order
-must survive process and node restarts without persisting private or session
-material. See
+Allocator assignments now survive allocator and projection restarts through the
+Stage 8A.2 durable projection. The remaining work is provisioning durability and
+runtime recovery: revision heads, revoke/remove/decommission tombstones, registry
+reconstruction, and recovery order must survive process and node restarts without
+persisting private or session material. See
 [`DYNAMIC-PEER-ALLOCATION.md`](DYNAMIC-PEER-ALLOCATION.md).
 
 ## Completed — TD-018 single-RPC revisioned dynamic bootstrap
@@ -83,19 +84,27 @@ two-step APIs remain temporarily available for IAS migration compatibility.
 
 ## In progress — Durable provisioning and allocation projection
 
-The VPN provisioning registry and allocator remain in-memory runtime projections.
-A process or node restart rebuilds bootstrap entries from trusted application
-configuration but does not yet retain IAS-applied revisions, tombstones,
-revocations, allocations, or provisioning history.
+The allocator is now backed by the durable VPN projection, while the provisioning
+registry and command ledger remain in-memory runtime projections. A process or
+node restart restores active Device allocations, release barriers, and the
+monotonic generation barrier, but it still does not retain IAS-applied
+revisions, provisioning tombstones, revocations, registry entries, or
+provisioning history.
 
 Stage 8A.1 now provides the separate durable foundation: a replaceable
 `vpn_projection_store` behaviour, a KVS/Mnesia synchronous compare-and-set backend, one
 versioned and checksummed projection record, fail-closed schema/checksum
 validation, and a serialized `vpn_projection` process started before allocator
 and provisioning workers. Known secret-bearing fields are rejected before
-commit. No allocator or provisioning mutation is connected to this store yet,
-so current runtime behavior intentionally remains volatile until the following
-reviewable patches.
+commit.
+
+Stage 8A.2 connects allocator initialization, reserve, and release mutations to
+the projection. One stable allocator instance ID, `next_generation`, active
+Device allocations, and per-Device release barriers are restored before the
+allocator becomes ready. Mutations are published only after synchronous commit,
+and malformed or configuration-
+incompatible allocator state fails startup closed. Provisioning remains the next
+reviewable durability boundary.
 
 The target ownership model is:
 
@@ -107,7 +116,7 @@ identity and policy state -> revisioned desired state
                               -> reconciled processes
 ```
 
-The next stage should add a minimal durable projection with these constraints:
+The next stage should add the durable provisioning ledger with these constraints:
 
 - persist the last accepted revision and canonical command identity per peer;
 - persist remove tombstones and revoked state so stale commands cannot resurrect
@@ -128,8 +137,8 @@ The next stage should add a minimal durable projection with these constraints:
 
 The storage boundary is now fixed while the backend remains replaceable. The
 first backend uses `zencrypted/kvs` with local Mnesia `disc_copies` and an
-explicit transaction rather than the KVS default dirty context. Subsequent
-patches must connect allocator state first, then provisioning heads/tombstones,
+explicit transaction rather than the KVS default dirty context. Allocator state
+is now connected. Subsequent patches must connect provisioning heads/tombstones,
 and finally reconstruct registry/runtime state only after projection validation.
 
 ## TD-005 — Device-lock authorization

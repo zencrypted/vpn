@@ -784,6 +784,8 @@ setup() ->
     stop_registered(vpn_peer_sup),
     stop_registered(vpn_peer_registry),
     stop_registered(vpn_peer_allocator),
+    stop_registered(vpn_projection),
+    ok = vpn_projection_test_store:reset(),
     Root = temp_root(),
     application:set_env(vpn, peers, []),
     application:set_env(vpn, ovpn_sessions, []),
@@ -814,6 +816,8 @@ setup() ->
                         dynamic_pair_reconcile,
                         #{establish_timeout_ms => 500,
                           poll_interval_ms => 5}),
+    {ok, ProjectionPid} =
+        vpn_projection:start_link(vpn_projection_test_store),
     {ok, AllocatorPid} = vpn_peer_allocator:start_link(),
     {ok, RegistryPid} = vpn_peer_registry:start_link(),
     {ok, PeerSupPid} = vpn_peer_sup:start_link(),
@@ -824,7 +828,8 @@ setup() ->
                ReconcilerPid,
                PeerSupPid,
                RegistryPid,
-               AllocatorPid]}.
+               AllocatorPid,
+               ProjectionPid]}.
 
 cleanup(#{root := Root, pids := Pids}) ->
     lists:foreach(fun stop_pid/1, Pids),
@@ -840,6 +845,7 @@ cleanup(#{root := Root, pids := Pids}) ->
                    dynamic_pair_reconcile,
                    dynamic_pair_test_fail_role,
                    dynamic_pair_test_fail_profile]),
+    ok = vpn_projection_test_store:reset(),
     remove_tree(Root),
     ok.
 

@@ -66,7 +66,7 @@ private-key body is never returned or logged.
 - `vpn_peer` - public runtime peer abstraction.
 - `vpn_manager` - management API for supervised peers.
 - `vpn_peer_registry` - ETS-backed runtime registry bootstrapped from trusted application configuration.
-- `vpn_peer_allocator` - VPN-owned volatile reservations for dynamic client/gateway peer resources.
+- `vpn_peer_allocator` - VPN-owned durable reservations for dynamic client/gateway peer resources.
 - `vpn_kvs` - KVS/Mnesia schema registration and fail-closed startup boundary.
 - `vpn_projection` - serialized versioned projection process and backend-neutral API.
 - `vpn_projection_store` - replaceable durable projection backend contract.
@@ -93,11 +93,20 @@ RocksDB is not downloaded because the existing KVS rebar override removes its
 dependency and application declaration. The storage backend remains replaceable
 through the `vpn_projection_store` behaviour.
 
-This foundation does **not** yet make allocator reservations, provisioning heads,
-or tombstones durable. Those processes remain unchanged and volatile until the
-next Stage 8A patches explicitly route their mutations through `vpn_projection`.
-The projection rejects known secret-bearing fields such as PSKs, private-key
-paths, session keys, ECDH private material, and replay windows.
+Stage 8A.2 routes allocator initialization, reservation, and release through
+`vpn_projection`. The persisted allocator section contains a schema version, one
+stable allocator instance namespace, a monotonic `next_generation` barrier,
+active Device allocations, and the most recent released allocation per Device.
+A reservation or release becomes visible only after the synchronous projection
+commit succeeds. Repeating a completed release returns the persisted release
+barrier until that Device is allocated again. Restored allocations are checked
+against the current transport configuration; incompatible or malformed state
+fails allocator startup instead of silently reallocating resources.
+
+Provisioning heads, revocations, remove tombstones, registry entries, and runtime
+processes are still volatile until the following Stage 8A patches. The projection
+continues to reject known secret-bearing fields such as PSKs, private-key paths,
+session keys, ECDH private material, and replay windows.
 
 ## Runtime peer registry
 
@@ -429,11 +438,11 @@ The dynamic-allocation flow now spans VPN allocation, runtime resolution,
 development identities, IAS reservation and delivery, pair reconciliation,
 pair-aware enable/disable/revoke, and explicit decommission. Normal IAS
 provisioning can create and operate a reserved binary client/gateway pair without
-editing trusted peer configuration. Reservations remain volatile and identity
-manifests remain local development state. Each allocator process uses a fresh
-random namespace in allocation and peer IDs, preventing a restarted node from
-reusing a persistent identity bundle that belongs to an earlier Device. The
-ownership model and staged integration plan are documented in
+editing trusted peer configuration. Reservations are durable while identity
+manifests remain local development state. The allocator instance namespace and
+monotonic generation barrier survive allocator and projection restarts, so an
+active Device keeps the same allocation and a released slot cannot reuse its old
+peer IDs. The ownership model and staged integration plan are documented in
 [`docs/DYNAMIC-PEER-ALLOCATION.md`](docs/DYNAMIC-PEER-ALLOCATION.md).
 
 ## Materialize a dynamic development identity bundle

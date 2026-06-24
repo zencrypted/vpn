@@ -6,7 +6,7 @@ allocation_lifecycle_test_() ->
     {setup,
      fun setup/0,
      fun cleanup/1,
-     fun(_Pid) ->
+     fun(_Context) ->
              [?_test(begin
                           DeviceA = <<"device-a">>,
                           DeviceB = <<"device-b">>,
@@ -16,6 +16,8 @@ allocation_lifecycle_test_() ->
                           {ok, AllocationA2} = vpn_peer_allocator:ensure(DeviceA),
                           ?assertEqual(AllocationA1, AllocationA2),
                           ?assertEqual(1, maps:get(slot, AllocationA1)),
+                          ?assertEqual(durable,
+                                       maps:get(persistence, AllocationA1)),
                           ?assertEqual(12,
                                        byte_size(maps:get(allocator_instance_id,
                                                           AllocationA1))),
@@ -46,7 +48,7 @@ allocation_lifecycle_test_() ->
                           {ok, AllocationB} = vpn_peer_allocator:ensure(DeviceB),
                           ?assertEqual(2, maps:get(slot, AllocationB)),
                           assert_distinct_resources(AllocationA1, AllocationB),
-                          ?assertEqual(#{persistence => volatile,
+                          ?assertEqual(#{persistence => durable,
                                          capacity => 2,
                                          allocated => 2,
                                          free => 0},
@@ -56,17 +58,21 @@ allocation_lifecycle_test_() ->
 
                           {ok, ReleasedA} = vpn_peer_allocator:release(DeviceA),
                           ?assertEqual(released, maps:get(state, ReleasedA)),
+                          ?assertEqual(durable,
+                                       maps:get(persistence, ReleasedA)),
                           ?assert(is_integer(maps:get(released_at, ReleasedA))),
                           ?assertEqual(maps:remove(state, AllocationA1),
                                        maps:remove(released_at,
                                                    maps:remove(state, ReleasedA))),
                           ?assertEqual({error, not_found},
                                        vpn_peer_allocator:lookup(DeviceA)),
-                          ?assertEqual({error, not_found},
+                          ?assertEqual({ok, ReleasedA},
                                        vpn_peer_allocator:release(DeviceA)),
 
                           {ok, AllocationC} = vpn_peer_allocator:ensure(DeviceC),
                           ?assertEqual(1, maps:get(slot, AllocationC)),
+                          ?assert(maps:get(generation, AllocationC) >
+                                  maps:get(generation, AllocationA1)),
                           assert_binary_prefix(<<"client_dyn_1_">>,
                                                maps:get(client_peer_id,
                                                         AllocationC)),
@@ -80,44 +86,102 @@ allocation_lifecycle_test_() ->
                       end)]
      end}.
 
-
-allocator_restart_uses_fresh_identity_namespace_test() ->
+allocator_and_projection_restart_restore_state_test() ->
     stop_registered(vpn_peer_allocator),
+    stop_registered(vpn_projection),
+    ok = vpn_projection_test_store:reset(),
     application:set_env(vpn,
                         dynamic_peer_allocator,
-                        #{capacity => 2,
-                          first_host => 20,
-                          client_network => {10, 40, 0},
-                          gateway_network => {10, 41, 0},
-                          client_udp_port_base => 22000,
-                          gateway_udp_port_base => 23000}),
+                        allocator_config()),
     try
-        {ok, FirstPid} = vpn_peer_allocator:start_link(),
-        {ok, First} = vpn_peer_allocator:ensure(<<"device-restart">>),
-        stop_pid(FirstPid),
-        {ok, SecondPid} = vpn_peer_allocator:start_link(),
-        {ok, Second} = vpn_peer_allocator:ensure(<<"device-restart">>),
-        ?assertEqual(1, maps:get(slot, First)),
-        ?assertEqual(1, maps:get(slot, Second)),
-        ?assertNotEqual(maps:get(allocator_instance_id, First),
-                        maps:get(allocator_instance_id, Second)),
+        {ok, ProjectionPid1} =
+            vpn_projection:start_link(vpn_projection_test_store),
+        {ok, AllocatorPid1} = vpn_peer_allocator:start_link(),
+        DeviceId = <<"device-restart">>,
+        {ok, First} = vpn_peer_allocator:ensure(DeviceId),
+        stop_pid(AllocatorPid1),
+        stop_pid(ProjectionPid1),
+
+        {ok, ProjectionPid2} =
+            vpn_projection:start_link(vpn_projection_test_store),
+        {ok, AllocatorPid2} = vpn_peer_allocator:start_link(),
+        ?assertEqual({ok, First}, vpn_peer_allocator:lookup(DeviceId)),
+        ?assertEqual({ok, First}, vpn_peer_allocator:ensure(DeviceId)),
+        ?assertEqual(durable, maps:get(persistence, First)),
+
+        {ok, Released} = vpn_peer_allocator:release(DeviceId),
+        ?assertEqual(released, maps:get(state, Released)),
+        stop_pid(AllocatorPid2),
+        stop_pid(ProjectionPid2),
+
+        {ok, ProjectionPid3} =
+            vpn_projection:start_link(vpn_projection_test_store),
+        {ok, AllocatorPid3} = vpn_peer_allocator:start_link(),
+        ?assertEqual({error, not_found},
+                     vpn_peer_allocator:lookup(DeviceId)),
+        ?assertEqual({ok, Released},
+                     vpn_peer_allocator:release(DeviceId)),
+        {ok, Second} = vpn_peer_allocator:ensure(DeviceId),
+        ?assertEqual(maps:get(allocator_instance_id, First),
+                     maps:get(allocator_instance_id, Second)),
+        ?assertEqual(maps:get(slot, First), maps:get(slot, Second)),
+        ?assert(maps:get(generation, Second) > maps:get(generation, First)),
         ?assertNotEqual(maps:get(allocation_id, First),
                         maps:get(allocation_id, Second)),
         ?assertNotEqual(maps:get(client_peer_id, First),
                         maps:get(client_peer_id, Second)),
         ?assertNotEqual(maps:get(gateway_peer_id, First),
                         maps:get(gateway_peer_id, Second)),
-        stop_pid(SecondPid)
+        stop_pid(AllocatorPid3),
+        stop_pid(ProjectionPid3)
     after
         stop_registered(vpn_peer_allocator),
+        stop_registered(vpn_projection),
+        ok = vpn_projection_test_store:reset(),
         application:unset_env(vpn, dynamic_peer_allocator)
     end.
+
+failed_projection_commit_does_not_publish_mutation_test_() ->
+    {setup,
+     fun setup/0,
+     fun cleanup/1,
+     fun(_Context) ->
+             [?_test(begin
+                          DeviceId = <<"device-persistence-failure">>,
+                          ok = vpn_projection_test_store:fail_next_commit(
+                                 disk_full),
+                          ?assertEqual(
+                             {error,
+                              {allocator_persistence_failed,
+                               {projection_commit_failed, disk_full}}},
+                             vpn_peer_allocator:ensure(DeviceId)),
+                          ?assertEqual({error, not_found},
+                                       vpn_peer_allocator:lookup(DeviceId)),
+                          ?assertEqual(#{persistence => durable,
+                                         capacity => 2,
+                                         allocated => 0,
+                                         free => 2},
+                                       vpn_peer_allocator:status()),
+
+                          {ok, Allocation} =
+                              vpn_peer_allocator:ensure(DeviceId),
+                          ok = vpn_projection_test_store:fail_next_commit(
+                                 read_only),
+                          ?assertEqual(
+                             {error,
+                              {allocator_persistence_failed,
+                               {projection_commit_failed, read_only}}},
+                             vpn_peer_allocator:release(DeviceId)),
+                          ?assertEqual({ok, Allocation},
+                                       vpn_peer_allocator:lookup(DeviceId))
+                      end)]
+     end}.
 
 invalid_device_id_test_() ->
     {setup,
      fun setup/0,
      fun cleanup/1,
-     fun(_Pid) ->
+     fun(_Context) ->
              [?_assertEqual({error, invalid_device_id},
                             vpn_peer_allocator:ensure(anonymous)),
               ?_assertEqual({error, invalid_device_id},
@@ -178,28 +242,30 @@ isolated_start_link() ->
 
 setup() ->
     stop_registered(vpn_peer_allocator),
+    stop_registered(vpn_projection),
+    ok = vpn_projection_test_store:reset(),
     application:set_env(vpn,
                         dynamic_peer_allocator,
-                        #{capacity => 2,
-                          first_host => 20,
-                          client_network => {10, 40, 0},
-                          gateway_network => {10, 41, 0},
-                          client_udp_port_base => 22000,
-                          gateway_udp_port_base => 23000}),
-    {ok, Pid} = vpn_peer_allocator:start_link(),
-    Pid.
+                        allocator_config()),
+    {ok, ProjectionPid} =
+        vpn_projection:start_link(vpn_projection_test_store),
+    {ok, AllocatorPid} = vpn_peer_allocator:start_link(),
+    #{projection => ProjectionPid, allocator => AllocatorPid}.
 
-cleanup(Pid) ->
-    case is_process_alive(Pid) of
-        true ->
-            unlink(Pid),
-            exit(Pid, shutdown),
-            wait_until_stopped(Pid, 20);
-        false ->
-            ok
-    end,
+cleanup(#{projection := ProjectionPid, allocator := AllocatorPid}) ->
+    stop_pid(AllocatorPid),
+    stop_pid(ProjectionPid),
+    ok = vpn_projection_test_store:reset(),
     application:unset_env(vpn, dynamic_peer_allocator),
     ok.
+
+allocator_config() ->
+    #{capacity => 2,
+      first_host => 20,
+      client_network => {10, 40, 0},
+      gateway_network => {10, 41, 0},
+      client_udp_port_base => 22000,
+      gateway_udp_port_base => 23000}.
 
 assert_binary_prefix(Prefix, Value) when is_binary(Prefix), is_binary(Value) ->
     PrefixSize = byte_size(Prefix),
@@ -224,13 +290,11 @@ assert_distinct_resources(AllocationA, AllocationB) ->
     ?assertNotEqual(maps:get(local_udp_port, GatewayA),
                     maps:get(local_udp_port, GatewayB)).
 
-
 stop_pid(Pid) when is_pid(Pid) ->
     case is_process_alive(Pid) of
         true ->
-            unlink(Pid),
-            exit(Pid, shutdown),
-            wait_until_stopped(Pid, 20);
+            ok = gen_server:stop(Pid, normal, 5000),
+            wait_until_stopped(Pid, 50);
         false ->
             ok
     end.
@@ -238,10 +302,7 @@ stop_pid(Pid) when is_pid(Pid) ->
 stop_registered(Name) ->
     case whereis(Name) of
         undefined -> ok;
-        Pid ->
-            unlink(Pid),
-            exit(Pid, shutdown),
-            wait_until_stopped(Pid, 20)
+        Pid -> stop_pid(Pid)
     end.
 
 wait_until_stopped(_Pid, 0) ->

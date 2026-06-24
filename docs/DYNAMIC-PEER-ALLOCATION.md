@@ -35,7 +35,7 @@ VPN peer allocator
 Peer IDs are binaries. Dynamic allocation must never create atoms from external
 or Device-derived values.
 
-## Stage 1 — volatile reservation allocator
+## Stage 1 — reservation allocator
 
 `vpn_peer_allocator` is the first completed stage. It exposes:
 
@@ -47,15 +47,19 @@ vpn_peer_allocator:list().
 vpn_peer_allocator:status().
 ```
 
-`ensure/1` is idempotent for a non-empty binary Device ID while the allocator
-process remains alive. Distinct active Devices receive distinct peer IDs, TUN
-names, tunnel addresses, and UDP ports. `release/1` makes the numeric transport
-slot reusable, returns a snapshot marked `state => released`, and a later
-allocation receives a fresh peer-ID generation so a different Device does not
-inherit the released peer identifiers. Each allocator process also generates a
-random instance namespace. Allocation IDs and peer IDs include that namespace,
-so a volatile allocator restart cannot accidentally reuse the directory or
-certificate names of identity bundles left by an earlier VPN node.
+`ensure/1` is idempotent for a non-empty binary Device ID. Distinct active
+Devices receive distinct peer IDs, TUN names, tunnel addresses, and UDP ports.
+`release/1` makes the numeric transport slot reusable, returns a snapshot marked
+`state => released`, and a later allocation receives a fresh peer-ID generation
+so a different Device does not inherit the released peer identifiers.
+
+Since Stage 8A.2, the allocator instance namespace, monotonic
+`next_generation`, active Device allocations, and the most recent release barrier
+per Device are stored in the durable VPN projection. A process or projection
+restart restores the same active allocation. A released allocation stays absent
+after restart, while a repeated release returns the same safe released snapshot
+until that Device is allocated again. The persisted generation barrier prevents
+the reused slot from recreating its former allocation or peer IDs.
 
 An allocation contains only resource metadata, for example:
 
@@ -65,7 +69,7 @@ An allocation contains only resource metadata, for example:
   generation => 42,
   allocator_instance_id => <<"7f32a91bc4de">>,
   state => reserved,
-  persistence => volatile,
+  persistence => durable,
   client_peer_id => <<"client_dyn_1_7f32a91bc4de_42">>,
   gateway_peer_id => <<"gateway_dyn_1_7f32a91bc4de_42">>,
   client => #{peer_id => <<"client_dyn_1_7f32a91bc4de_42">>,
@@ -84,7 +88,9 @@ An allocation contains only resource metadata, for example:
 
 The allocator does not create certificate material and does not start peer
 processes. Stage 2 can consume an existing reservation, but reservation itself
-remains an explicit operation.
+remains an explicit operation. Reserve and release are acknowledged only after
+their projection commit succeeds; a failed commit leaves the in-memory allocator
+unchanged.
 
 ### Configuration
 
@@ -361,31 +367,38 @@ Durable tombstones across restart remain Stage 8.
 
 ### Stage 8 — durable allocation projection
 
-Stage 8A.1 completes the storage foundation only. VPN now owns a versioned,
-checksummed KVS/Mnesia projection record behind the replaceable
-`vpn_projection_store` behaviour. The projection process starts before the
-allocator and rejects corrupt, unsupported, or secret-bearing payloads
-fail-closed.
+Stage 8A.1 completed the storage foundation. VPN owns a versioned, checksummed
+KVS/Mnesia projection record behind the replaceable `vpn_projection_store`
+behaviour. The projection process starts before the allocator and rejects
+corrupt, unsupported, or secret-bearing payloads fail-closed.
 
-The allocator itself is still deliberately volatile. A VPN restart loses all
-reservations, and allocation order may change. A fresh random allocator
-namespace prevents old on-disk identity bundles from colliding with newly
-reserved allocation IDs, but it does not restore Device-to-slot ownership or
-make old bundles active again. The next Stage 8A patch must route allocator
-reserve/release mutations through the durable projection and restore them before
-provisioning reconciliation starts.
+Stage 8A.2 connects `vpn_peer_allocator` to that projection. The allocator
+initializes and restores a versioned allocator section containing:
 
-Durable state must contain only allocation metadata. It must never contain
-private-key bodies, session keys, replay windows, ECDH material, or packet state.
-Release, tombstone, and migration semantics must be coordinated with the durable
-provisioning projection described in `TECHNICAL-DEBT.md`.
+- one stable allocator instance namespace;
+- a monotonic `next_generation` barrier;
+- active Device-to-allocation mappings;
+- the most recent released allocation per Device for idempotent release recovery.
+
+Reserve and release mutations are committed before they become visible through
+the allocator API. If persistence fails, the previous in-memory allocation state
+remains authoritative for the running process and the call returns an error.
+Restored allocations are reconstructed into the slot index and checked against
+the current allocator configuration; malformed, duplicated, or incompatible
+state stops allocator startup instead of silently reallocating resources.
+
+Durable state contains only allocation metadata. It never contains private-key
+bodies, session keys, replay windows, ECDH material, or packet state. Provisioning
+revisions, revoke/remove/decommission tombstones, registry reconstruction, and
+runtime restart recovery remain later Stage 8A work described in
+`TECHNICAL-DEBT.md`.
 
 ## Current non-goals after the single-RPC bootstrap and Stage 7
 
 The completed dynamic allocation, IAS cutover, synchronized lifecycle, and
 explicit decommission stages do not:
 
-- survive a VPN application or node restart;
-- persist revisions, decommission tombstones, or Device-to-slot ownership;
+- restore registry entries or peer processes after a VPN application or node restart;
+- persist provisioning revisions or revoke/remove/decommission tombstones;
 - automatically erase retained development identities unless explicitly asked;
 - accept allocator resource choices from IAS, trusted defaults, or an OVPN file.

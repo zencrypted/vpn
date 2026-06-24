@@ -1,15 +1,16 @@
 %%%-------------------------------------------------------------------
 %% @doc Serialized durable projection boundary.
 %%
-%% Stage 8A.1 deliberately does not connect allocator or provisioning state to
-%% this process yet. It establishes the versioned, checksummed and replaceable
-%% backend contract that later stages will consume.
+%% Stage 8A.1 established the versioned, checksummed and replaceable backend
+%% contract. Stage 8A.2 connects the allocator section while provisioning remains
+%% a later durability boundary.
 %%%-------------------------------------------------------------------
 -module(vpn_projection).
 
 -behaviour(gen_server).
 
 -export([start_link/0,
+         start_link/1,
          get/0,
          update/2,
          replace/2,
@@ -32,7 +33,12 @@
 }).
 
 start_link() ->
-    gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
+    gen_server:start_link({local, ?SERVER}, ?MODULE, configured, []).
+
+start_link(Backend) when is_atom(Backend) ->
+    gen_server:start_link({local, ?SERVER}, ?MODULE, {backend, Backend}, []);
+start_link(_Backend) ->
+    {error, invalid_projection_store_backend}.
 
 get() ->
     gen_server:call(?SERVER, get).
@@ -50,20 +56,33 @@ replace(ExpectedVersion, Projection) ->
 status() ->
     gen_server:call(?SERVER, status).
 
-init([]) ->
+init(configured) ->
     case configured_backend() of
-        {ok, Backend} ->
-            case load_projection(Backend) of
-                {ok, Version, Projection, UpdatedAt} ->
-                    {ok, #state{backend = Backend,
-                                version = Version,
-                                projection = Projection,
-                                updated_at = UpdatedAt}};
-                {error, Reason} ->
-                    {stop, {projection_load_failed, Reason}}
-            end;
+        {ok, Backend} -> init_backend(Backend);
+        {error, Reason} -> {stop, Reason}
+    end;
+init({backend, Backend}) when is_atom(Backend) ->
+    case ensure_backend(Backend) of
+        ok -> init_backend(Backend);
+        {error, Reason} -> {stop, Reason}
+    end.
+
+init_backend(Backend) ->
+    case load_projection(Backend) of
+        {ok, Version, Projection, UpdatedAt} ->
+            {ok, #state{backend = Backend,
+                        version = Version,
+                        projection = Projection,
+                        updated_at = UpdatedAt}};
         {error, Reason} ->
-            {stop, Reason}
+            {stop, {projection_load_failed, Reason}}
+    end.
+
+ensure_backend(Backend) ->
+    case code:ensure_loaded(Backend) of
+        {module, Backend} -> ok;
+        {error, Reason} ->
+            {error, {projection_backend_unavailable, Backend, Reason}}
     end.
 
 handle_call(get, _From, State) ->
@@ -126,12 +145,9 @@ configured_backend() ->
                              projection_store_backend,
                              vpn_projection_store_kvs) of
         Backend when is_atom(Backend) ->
-            case code:ensure_loaded(Backend) of
-                {module, Backend} -> {ok, Backend};
-                {error, Reason} ->
-                    {error, {projection_backend_unavailable,
-                             Backend,
-                             Reason}}
+            case ensure_backend(Backend) of
+                ok -> {ok, Backend};
+                {error, Reason} -> {error, Reason}
             end;
         Invalid ->
             {error, {invalid_projection_store_backend, Invalid}}
