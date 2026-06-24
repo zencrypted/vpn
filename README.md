@@ -164,8 +164,12 @@ IAS desired state or dynamic defaults are rejected/ignored.
 `vpn_dynamic_pair:ensure/2` now consumes that resolved pair, writes both sides
 through one registry batch, reconciles the gateway and client, and waits for
 both certificate-control handshakes to become `established`. Repeated calls for
-an unchanged established pair do not restart it. A failed startup or timeout
-restores the previous registry projection.
+an unchanged established pair do not restart it. Revision bookkeeping updates
+(`revision`, `provisioning_source`, `last_provisioning_operation`, and
+`updated_at`) are also applied to the registry without restarting an already
+running peer. Transport, identity, handshake, authorization, enabled, or other
+runtime configuration changes still reconcile the process. A failed startup or
+timeout restores the previous registry projection.
 
 Use `vpn_provisioning:status/0` for counters and
 `vpn_provisioning:history/1` for bounded per-peer audit history.

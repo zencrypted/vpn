@@ -24,6 +24,11 @@
 
 -define(SERVER, ?MODULE).
 -define(TABLE, vpn_peer_registry_entries).
+-define(NON_RESTART_FIELDS,
+        [revision,
+         provisioning_source,
+         last_provisioning_operation,
+         updated_at]).
 
 start_link() ->
     gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
@@ -93,10 +98,14 @@ handle_call(enabled_configs, _From, State) ->
 handle_call({put, PeerConfig}, _From, State) when is_map(PeerConfig) ->
     case maps:find(id, PeerConfig) of
         {ok, PeerId} when is_atom(PeerId); is_binary(PeerId) ->
+            Previous = lookup(PeerId),
             DefaultEnabled = existing_enabled(PeerId),
             Entry = entry(PeerConfig, runtime_api, DefaultEnabled),
+            RestartRequired = restart_required(Previous, PeerConfig),
             true = ets:insert(?TABLE, {PeerId, Entry}),
-            notify_reconciler(#{action => put, peer_id => PeerId}),
+            notify_reconciler(#{action => put,
+                                peer_id => PeerId,
+                                restart_required => RestartRequired}),
             {reply, {ok, safe_entry(Entry)}, State};
         _ ->
             {reply, {error, invalid_peer_config}, State}
@@ -106,10 +115,15 @@ handle_call({put, _PeerConfig}, _From, State) ->
 handle_call({put_many, PeerConfigs}, _From, State) ->
     case batch_entries(PeerConfigs) of
         {ok, Entries} ->
+            PeerChanges = [#{peer_id => maps:get(id, Entry),
+                             restart_required =>
+                                 restart_required(lookup(maps:get(id, Entry)),
+                                                  maps:get(config, Entry))}
+                           || Entry <- Entries],
             true = ets:insert(?TABLE,
                               [{maps:get(id, Entry), Entry} || Entry <- Entries]),
-            PeerIds = [maps:get(id, Entry) || Entry <- Entries],
-            notify_reconciler(#{action => put_many, peer_ids => PeerIds}),
+            notify_reconciler(#{action => put_many,
+                                peer_changes => PeerChanges}),
             {reply, {ok, [safe_entry(Entry) || Entry <- Entries]}, State};
         {error, _} = Error ->
             {reply, Error, State}
@@ -265,6 +279,14 @@ compare_entries(#{id := A}, #{id := B}) ->
 
 compare_configs(#{id := A}, #{id := B}) ->
     A =< B.
+
+restart_required({error, not_found}, _NewConfig) ->
+    true;
+restart_required({ok, #{config := PreviousConfig}}, NewConfig) ->
+    restart_projection(PreviousConfig) =/= restart_projection(NewConfig).
+
+restart_projection(Config) ->
+    maps:without(?NON_RESTART_FIELDS, Config).
 
 notify_reconciler(Event) ->
     vpn_peer_reconciler:notify(Event).

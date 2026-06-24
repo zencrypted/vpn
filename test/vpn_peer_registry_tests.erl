@@ -112,8 +112,30 @@ automatic_manager_reconcile_test_() ->
                                                     lists:sort(vpn_manager:running_peers()) =:=
                                                         [peer_a, peer_b]
                                             end, 50)),
+                          {ok, PeerBPid1} = vpn_manager:find_peer(peer_b),
+                          EventsBeforeMetadata = maps:get(
+                                                   events_received,
+                                                   vpn_peer_reconciler:status()),
 
-                          UpdatedPeerB = (peer_config(peer_b))#{ifname => "peer_b_updated"},
+                          MetadataPeerB = (peer_config(peer_b))#{revision => 1,
+                                                                  provisioning_source => ias,
+                                                                  last_provisioning_operation => upsert,
+                                                                  updated_at => 12345},
+                          {ok, _} = vpn_peer_registry:put(MetadataPeerB),
+                          ?assert(wait_until(fun() ->
+                                                    Status0 = vpn_peer_reconciler:status(),
+                                                    maps:get(events_received, Status0) >
+                                                        EventsBeforeMetadata
+                                            end, 50)),
+                          ?assertEqual({ok, PeerBPid1},
+                                       vpn_manager:find_peer(peer_b)),
+                          MetadataStatus = vpn_peer_reconciler:status(),
+                          ?assertEqual([peer_b],
+                                       maps:get(unchanged,
+                                                maps:get(last_result,
+                                                         MetadataStatus))),
+
+                          UpdatedPeerB = MetadataPeerB#{ifname => "peer_b_updated"},
                           {ok, _} = vpn_peer_registry:put(UpdatedPeerB),
                           ?assert(wait_until(fun() ->
                                                     case vpn_manager:peer_info(peer_b) of
@@ -121,6 +143,8 @@ automatic_manager_reconcile_test_() ->
                                                         _ -> false
                                                     end
                                             end, 50)),
+                          {ok, PeerBPid2} = vpn_manager:find_peer(peer_b),
+                          ?assertNotEqual(PeerBPid1, PeerBPid2),
 
                           {ok, _} = vpn_peer_registry:disable(peer_a),
                           ?assert(wait_until(fun() ->

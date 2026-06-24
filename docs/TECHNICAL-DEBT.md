@@ -30,8 +30,12 @@ from trusted application configuration. Safe registry reads expose provisioning
 metadata without PSKs, private-key paths, or complete runtime configuration.
 Registry mutations are reconciled automatically by `vpn_peer_reconciler`, so
 `put`, `enable`, `disable`, and `remove` update running peer processes without a
-manual `vpn_manager:reload_config/0` call. The explicit reload operation remains
-available as a recovery/full-reconcile path.
+manual `vpn_manager:reload_config/0` call. Registry writes classify revision
+bookkeeping fields as non-restart metadata, preserving an established process
+when IAS only advances revision/source/operation timestamps. Any other desired
+runtime change remains restart-reconciled, while enable/disable still controls
+process presence. The explicit reload operation remains available as a
+recovery/full-reconcile path.
 
 ## Completed — Revisioned provisioning contract
 

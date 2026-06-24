@@ -53,20 +53,29 @@ handle_cast(_Message, State) ->
 handle_info(_Message, State) ->
     {noreply, State}.
 
+reconcile_event(#{action := put,
+                  peer_id := PeerId,
+                  restart_required := RestartRequired}) ->
+    reconcile_put(PeerId, RestartRequired);
 reconcile_event(#{action := put, peer_id := PeerId}) ->
-    reconcile_put(PeerId);
+    reconcile_put(PeerId, true);
+reconcile_event(#{action := put_many, peer_changes := PeerChanges}) ->
+    reconcile_many(PeerChanges);
 reconcile_event(#{action := put_many, peer_ids := PeerIds}) ->
-    reconcile_many(PeerIds);
+    reconcile_many([#{peer_id => PeerId, restart_required => true}
+                    || PeerId <- PeerIds]);
 reconcile_event(_Event) ->
     vpn_manager:reload_config().
 
 
-reconcile_many(PeerIds) ->
-    lists:foldl(fun(PeerId, Acc) ->
-                        merge_results(Acc, reconcile_put(PeerId))
+reconcile_many(PeerChanges) ->
+    lists:foldl(fun(#{peer_id := PeerId,
+                      restart_required := RestartRequired}, Acc) ->
+                        merge_results(Acc,
+                                      reconcile_put(PeerId, RestartRequired))
                 end,
                 empty_result(),
-                PeerIds).
+                PeerChanges).
 
 empty_result() ->
     #{started => [], stopped => [], failed => [], unchanged => []}.
@@ -76,15 +85,25 @@ merge_results(Left, Right) ->
                      maps:get(Key, Left, []) ++ maps:get(Key, Right, [])}
                     || Key <- [started, stopped, failed, unchanged]]).
 
-reconcile_put(PeerId) ->
+reconcile_put(PeerId, RestartRequired) ->
     case vpn_peer_registry:get(PeerId) of
         {ok, #{enabled := false}} ->
             ensure_stopped(PeerId);
         {ok, #{enabled := true}} ->
-            restart_or_start(PeerId);
+            reconcile_enabled(PeerId, RestartRequired);
         {error, not_found} ->
             ensure_stopped(PeerId)
     end.
+
+reconcile_enabled(PeerId, false) ->
+    case vpn_manager:peer_running(PeerId) of
+        true ->
+            #{started => [], stopped => [], failed => [], unchanged => [PeerId]};
+        false ->
+            normalize_start(PeerId, vpn_manager:start_peer(PeerId))
+    end;
+reconcile_enabled(PeerId, true) ->
+    restart_or_start(PeerId).
 
 restart_or_start(PeerId) ->
     StopResult = case vpn_manager:peer_running(PeerId) of

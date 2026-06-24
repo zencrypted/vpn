@@ -231,7 +231,10 @@ have reserved the Device. The VPN then:
 The registry batch prevents observers from seeing only one desired side of a
 new pair. A startup or handshake timeout restores the previous registry state
 and stops newly started partial peers. Repeating `ensure/2` for an already
-established unchanged pair does not restart it.
+established unchanged pair does not restart it. A following IAS revisioned
+`upsert` that changes only revision bookkeeping metadata updates the registry
+in place and preserves both peer PIDs and the established handshake; runtime,
+identity, authorization, or transport changes still trigger reconciliation.
 
 The wait policy is VPN-owned and configurable:
 

@@ -53,6 +53,65 @@ pair_is_registered_started_and_idempotent_test_() ->
                       end)]
      end}.
 
+revision_only_provisioning_preserves_established_pair_test_() ->
+    {setup,
+     fun setup/0,
+     fun cleanup/1,
+     fun(Context) ->
+             [?_test(begin
+                          DeviceId = <<"device-revision-update">>,
+                          {ok, Allocation} = vpn_peer_allocator:ensure(DeviceId),
+                          ok = install_identity_bundle(Allocation, Context),
+                          {ok, _} = vpn_dynamic_pair:ensure(DeviceId,
+                                                            desired(DeviceId)),
+                          ClientId = maps:get(client_peer_id, Allocation),
+                          GatewayId = maps:get(gateway_peer_id, Allocation),
+                          {ok, ClientPid1} = vpn_manager:find_peer(ClientId),
+                          {ok, GatewayPid1} = vpn_manager:find_peer(GatewayId),
+                          EventsBefore = maps:get(events_received,
+                                                  vpn_peer_reconciler:status()),
+
+                          Command = #{peer_id => ClientId,
+                                      revision => 1,
+                                      operation => upsert,
+                                      source => ias,
+                                      desired_state => desired(DeviceId)},
+                          {ok, #{operation := upsert}} =
+                              vpn_provisioning:apply(Command),
+                          ?assert(wait_until(fun() ->
+                                                    Status0 =
+                                                        vpn_peer_reconciler:status(),
+                                                    maps:get(events_received, Status0) >
+                                                        EventsBefore
+                                            end,
+                                            50)),
+
+                          ?assertEqual({ok, ClientPid1},
+                                       vpn_manager:find_peer(ClientId)),
+                          ?assertEqual({ok, GatewayPid1},
+                                       vpn_manager:find_peer(GatewayId)),
+                          {ok, Status} = vpn_dynamic_pair:status(DeviceId),
+                          ?assertMatch(#{client := #{running := true,
+                                                    handshake_status := established},
+                                         gateway := #{running := true,
+                                                     handshake_status := established}},
+                                       Status),
+                          {ok, ClientEntry} = vpn_peer_registry:get(ClientId),
+                          ?assertEqual(1, maps:get(revision, ClientEntry)),
+                          ?assertEqual(ias,
+                                       maps:get(provisioning_source,
+                                                ClientEntry)),
+                          ?assertEqual(upsert,
+                                       maps:get(last_provisioning_operation,
+                                                ClientEntry)),
+                          ReconcileStatus = vpn_peer_reconciler:status(),
+                          ?assertEqual([ClientId],
+                                       maps:get(unchanged,
+                                                maps:get(last_result,
+                                                         ReconcileStatus)))
+                      end)]
+     end}.
+
 registry_collision_is_rejected_test_() ->
     {setup,
      fun setup/0,
@@ -110,6 +169,7 @@ invalid_request_test() ->
     ?assertEqual({error, invalid_device_id}, vpn_dynamic_pair:status(undefined)).
 
 setup() ->
+    stop_registered(vpn_provisioning),
     stop_registered(vpn_peer_reconciler),
     stop_registered(vpn_peer_sup),
     stop_registered(vpn_peer_registry),
@@ -148,8 +208,13 @@ setup() ->
     {ok, RegistryPid} = vpn_peer_registry:start_link(),
     {ok, PeerSupPid} = vpn_peer_sup:start_link(),
     {ok, ReconcilerPid} = vpn_peer_reconciler:start_link(),
+    {ok, ProvisioningPid} = vpn_provisioning:start_link(),
     #{root => Root,
-      pids => [ReconcilerPid, PeerSupPid, RegistryPid, AllocatorPid]}.
+      pids => [ProvisioningPid,
+               ReconcilerPid,
+               PeerSupPid,
+               RegistryPid,
+               AllocatorPid]}.
 
 cleanup(#{root := Root, pids := Pids}) ->
     lists:foreach(fun stop_pid/1, Pids),
