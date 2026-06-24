@@ -761,6 +761,235 @@ failed_pair_start_rolls_registry_back_test_() ->
                       end)]
      end}.
 
+durable_pair_runtime_recovers_after_full_restart_test_() ->
+    {setup,
+     fun setup/0,
+     fun cleanup/1,
+     fun(Context) ->
+             [?_test(begin
+                          DeviceId = <<"device-runtime-recovery">>,
+                          {ok, Allocation0} =
+                              vpn_peer_allocator:ensure(DeviceId),
+                          ok = install_identity_bundle(Allocation0, Context),
+                          Command = dynamic_command(
+                                      Allocation0,
+                                      1,
+                                      desired(DeviceId)),
+                          ?assertMatch(
+                             {ok, #{operation := upsert,
+                                    pair := #{state := established}}},
+                             vpn_provisioning:apply_dynamic(
+                               DeviceId,
+                               Command)),
+                          ClientId = maps:get(client_peer_id, Allocation0),
+                          GatewayId = maps:get(gateway_peer_id, Allocation0),
+                          ?assert(wait_until(
+                                    fun() ->
+                                            vpn_manager:peer_running(ClientId)
+                                            andalso
+                                            vpn_manager:peer_running(GatewayId)
+                                    end,
+                                    50)),
+
+                          lists:foreach(
+                            fun stop_registered_normal/1,
+                            [vpn_provisioning,
+                             vpn_peer_reconciler,
+                             vpn_peer_sup,
+                             vpn_peer_registry,
+                             vpn_peer_allocator,
+                             vpn_projection]),
+
+                          try
+                              {ok, _ProjectionPid} =
+                                  vpn_projection:start_link(
+                                    vpn_projection_test_store),
+                              {ok, _AllocatorPid} =
+                                  vpn_peer_allocator:start_link(),
+                              {ok, Allocation1} =
+                                  vpn_peer_allocator:lookup(DeviceId),
+                              ?assertEqual(
+                                 maps:get(allocation_id, Allocation0),
+                                 maps:get(allocation_id, Allocation1)),
+
+                              {ok, _RegistryPid} =
+                                  vpn_peer_registry:start_link(),
+                              Recovery =
+                                  vpn_peer_registry:recovery_status(),
+                              ?assertEqual(durable,
+                                           maps:get(persistence, Recovery)),
+                              ?assertEqual(1,
+                                           maps:get(dynamic_pairs, Recovery)),
+                              ?assertEqual(
+                                 lists:sort([ClientId, GatewayId]),
+                                 lists:sort(
+                                   maps:get(restored_peers, Recovery))),
+
+                              {ok, _ProvisioningPid} =
+                                  vpn_provisioning:start_link(),
+                              {ok, _PeerSupPid} =
+                                  vpn_peer_sup:start_link(),
+                              {ok, _ReconcilerPid} =
+                                  vpn_peer_reconciler:start_link(),
+
+                              ?assert(wait_until(
+                                        fun() ->
+                                                vpn_manager:peer_running(
+                                                  ClientId)
+                                                andalso
+                                                vpn_manager:peer_running(
+                                                  GatewayId)
+                                        end,
+                                        50)),
+                              {ok, PairStatus} =
+                                  vpn_dynamic_pair:status(DeviceId),
+                              ?assertEqual(established,
+                                           maps:get(state, PairStatus)),
+                              {ok, ClientEntry} =
+                                  vpn_peer_registry:get(ClientId),
+                              {ok, GatewayEntry} =
+                                  vpn_peer_registry:get(GatewayId),
+                              ?assertEqual(1,
+                                           maps:get(revision,
+                                                    ClientEntry)),
+                              ?assertEqual(1,
+                                           maps:get(revision,
+                                                    GatewayEntry)),
+                              ?assertEqual(ias,
+                                           maps:get(provisioning_source,
+                                                    ClientEntry)),
+                              ?assertEqual(upsert,
+                                           maps:get(
+                                             last_provisioning_operation,
+                                             GatewayEntry))
+                          after
+                              lists:foreach(
+                                fun stop_registered_normal/1,
+                                [vpn_provisioning,
+                                 vpn_peer_reconciler,
+                                 vpn_peer_sup,
+                                 vpn_peer_registry,
+                                 vpn_peer_allocator,
+                                 vpn_projection])
+                          end
+                      end)]
+     end}.
+
+decommissioned_pair_remains_suppressed_after_restart_test_() ->
+    {setup,
+     fun setup/0,
+     fun cleanup/1,
+     fun(Context) ->
+             [?_test(begin
+                          DeviceId = <<"device-decommission-recovery">>,
+                          {ok, Allocation} =
+                              vpn_peer_allocator:ensure(DeviceId),
+                          ok = install_identity_bundle(Allocation, Context),
+                          ClientId = maps:get(client_peer_id, Allocation),
+                          GatewayId = maps:get(gateway_peer_id, Allocation),
+                          ?assertMatch(
+                             {ok, #{operation := upsert}},
+                             vpn_provisioning:apply_dynamic(
+                               DeviceId,
+                               dynamic_command(
+                                 Allocation,
+                                 1,
+                                 desired(DeviceId)))),
+                          ?assertMatch(
+                             {ok, #{operation := disable}},
+                             vpn_provisioning:apply(
+                               #{peer_id => ClientId,
+                                 revision => 2,
+                                 operation => disable,
+                                 source => ias,
+                                 desired_state => #{}})),
+                          ?assertMatch(
+                             {ok, #{state := decommissioned}},
+                             vpn_dynamic_pair:decommission(DeviceId)),
+
+                          lists:foreach(
+                            fun stop_registered_normal/1,
+                            [vpn_provisioning,
+                             vpn_peer_reconciler,
+                             vpn_peer_sup,
+                             vpn_peer_registry,
+                             vpn_peer_allocator,
+                             vpn_projection]),
+
+                          try
+                              {ok, _ProjectionPid} =
+                                  vpn_projection:start_link(
+                                    vpn_projection_test_store),
+                              {ok, _AllocatorPid} =
+                                  vpn_peer_allocator:start_link(),
+                              ?assertEqual(
+                                 {error, not_found},
+                                 vpn_peer_allocator:lookup(DeviceId)),
+                              ?assertMatch(
+                                 {ok, #{state := released}},
+                                 vpn_peer_allocator:released(DeviceId)),
+                              {ok, _RegistryPid} =
+                                  vpn_peer_registry:start_link(),
+                              ?assertEqual({error, not_found},
+                                           vpn_peer_registry:get(ClientId)),
+                              ?assertEqual({error, not_found},
+                                           vpn_peer_registry:get(GatewayId)),
+                              Recovery =
+                                  vpn_peer_registry:recovery_status(),
+                              ?assertEqual(1,
+                                           maps:get(released_pairs,
+                                                    Recovery)),
+                              ?assertEqual(
+                                 lists:sort([ClientId, GatewayId]),
+                                 lists:sort(
+                                   maps:get(suppressed_peers, Recovery))),
+
+                              stop_registered_normal(vpn_peer_registry),
+                              {ok, Reallocated} =
+                                  vpn_peer_allocator:ensure(DeviceId),
+                              NewClientId =
+                                  maps:get(client_peer_id, Reallocated),
+                              NewGatewayId =
+                                  maps:get(gateway_peer_id, Reallocated),
+                              ?assertNotEqual(ClientId, NewClientId),
+                              ?assertNotEqual(GatewayId, NewGatewayId),
+                              stop_registered_normal(vpn_peer_allocator),
+                              stop_registered_normal(vpn_projection),
+
+                              {ok, _ProjectionPid2} =
+                                  vpn_projection:start_link(
+                                    vpn_projection_test_store),
+                              {ok, _AllocatorPid2} =
+                                  vpn_peer_allocator:start_link(),
+                              ?assertEqual({ok, Reallocated},
+                                           vpn_peer_allocator:lookup(
+                                             DeviceId)),
+                              ?assertEqual({error, not_found},
+                                           vpn_peer_allocator:released(
+                                             DeviceId)),
+                              {ok, _RegistryPid2} =
+                                  vpn_peer_registry:start_link(),
+                              Recovery2 =
+                                  vpn_peer_registry:recovery_status(),
+                              ?assertEqual(1,
+                                           maps:get(stale_dynamic_heads,
+                                                    Recovery2)),
+                              ?assertEqual({error, not_found},
+                                           vpn_peer_registry:get(ClientId)),
+                              ?assertEqual({error, not_found},
+                                           vpn_peer_registry:get(NewClientId)),
+                              ?assertEqual({error, not_found},
+                                           vpn_peer_registry:get(NewGatewayId))
+                          after
+                              lists:foreach(
+                                fun stop_registered_normal/1,
+                                [vpn_peer_registry,
+                                 vpn_peer_allocator,
+                                 vpn_projection])
+                          end
+                      end)]
+     end}.
+
 invalid_request_test() ->
     ?assertEqual({error, invalid_dynamic_pair_request},
                  vpn_dynamic_pair:ensure(undefined, #{})),
@@ -934,6 +1163,14 @@ wait_until(Fun, Attempts) ->
     case Fun() of
         true -> true;
         false -> timer:sleep(10), wait_until(Fun, Attempts - 1)
+    end.
+
+stop_registered_normal(Name) ->
+    case whereis(Name) of
+        undefined -> ok;
+        Pid ->
+            ok = gen_server:stop(Pid, normal, 5000),
+            wait_until_stopped(Pid, 50)
     end.
 
 stop_registered(Name) ->

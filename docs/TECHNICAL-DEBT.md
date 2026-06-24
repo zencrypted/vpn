@@ -64,12 +64,12 @@ allocator slot, and optionally removes the local development identity bundle.
 Stale revisions remain blocked by the live provisioning head, and allocation
 release prevents resolver-based reconstruction of the old peer IDs.
 
-Allocator assignments and revisioned provisioning barriers now survive process
-and projection restarts through the Stage 8A durable projection. The remaining
-work is runtime recovery and atomic decommission state: registry reconstruction,
-peer restart order, and allocator-plus-provisioning decommission barriers must
-survive process and node restarts without persisting private or session material.
-See
+Allocator assignments, revisioned provisioning barriers, registry
+reconstruction, and eligible peer restart now survive process and node restart
+through the Stage 8A durable projection. The remaining local durability gap is
+atomic decommission state: allocator release and the provisioning tombstone must
+commit as one cross-section barrier without persisting private or session
+material. See
 [`DYNAMIC-PEER-ALLOCATION.md`](DYNAMIC-PEER-ALLOCATION.md).
 
 ## Completed — TD-018 single-RPC revisioned dynamic bootstrap
@@ -85,13 +85,17 @@ two-step APIs remain temporarily available for IAS migration compatibility.
 
 ## In progress — Durable provisioning and allocation projection
 
-The allocator and revisioned provisioning ledger are now backed by the durable VPN
-projection, while the peer registry and runtime process set remain in-memory
-projections. A process or node restart restores active Device allocations,
-release barriers, the monotonic generation barrier, accepted revisions, command
-digests, revocations, and remove tombstones. It still does not reconstruct
-registry entries or peer processes, and bounded provisioning history remains
-volatile operational telemetry.
+The allocator and revisioned provisioning ledger are backed by the durable VPN
+projection. Stage 8A.4 now reconstructs eligible registry entries before peer
+supervision and starts only applied active peers. Disabled/revoked heads remain
+stopped, remove and incomplete active pending heads are suppressed, and a durable
+allocator release barrier suppresses stale dynamic heads after completed
+decommission. Old peer-keyed heads are also prevented from rebinding to a newer
+allocation generation for the same Device. Active dynamic recovery requires the matching durable allocation
+and validated local identity bundle. The VPN supervisor now restarts dependent
+children with
+`rest_for_one` so local recovery ordering is preserved after child failure.
+Bounded provisioning history remains volatile operational telemetry.
 
 Stage 8A.1 now provides the separate durable foundation: a replaceable
 `vpn_projection_store` behaviour, a KVS/Mnesia synchronous compare-and-set backend, one
@@ -135,15 +139,18 @@ The durable provisioning ledger now provides these guarantees:
   references, and raw runtime configuration are excluded;
 - audit retention remains separate from the minimal revision/tombstone state.
 
-The next stage must reconstruct registry/runtime state only after this ledger and
-the allocator projection have both passed validation, with IAS replay remaining
-the authority when local desired state is absent.
+Registry/runtime reconstruction now occurs only after this ledger and the
+allocator projection have both passed validation. IAS replay remains the
+authority when local desired state is absent or when an interrupted command must
+be completed.
 
 The storage boundary is now fixed while the backend remains replaceable. The
 first backend uses `zencrypted/kvs` with local Mnesia `disc_copies` and an
 explicit transaction rather than the KVS default dirty context. Allocator state
-and provisioning heads/tombstones are now connected. The next patch must
-reconstruct registry/runtime state only after projection validation.
+and provisioning heads/tombstones are connected. Stage 8A.4 reconstructs the
+registry and eligible peer processes only after projection validation. The
+remaining local durability gap is an atomic allocator-plus-provisioning
+decommission barrier.
 
 ## TD-005 — Device-lock authorization
 

@@ -17,6 +17,7 @@
 -export([start_link/0,
          ensure/1,
          lookup/1,
+         released/1,
          release/1,
          list/0,
          status/0]).
@@ -42,6 +43,12 @@ ensure(_DeviceId) ->
 lookup(DeviceId) when is_binary(DeviceId), byte_size(DeviceId) > 0 ->
     gen_server:call(?SERVER, {lookup, DeviceId});
 lookup(_DeviceId) ->
+    {error, invalid_device_id}.
+
+-spec released(device_id()) -> {ok, allocation()} | {error, term()}.
+released(DeviceId) when is_binary(DeviceId), byte_size(DeviceId) > 0 ->
+    gen_server:call(?SERVER, {released, DeviceId});
+released(_DeviceId) ->
     {error, invalid_device_id}.
 
 -spec release(device_id()) -> {ok, allocation()} | {error, term()}.
@@ -84,6 +91,13 @@ handle_call({ensure, DeviceId}, _From,
 handle_call({lookup, DeviceId}, _From,
             State = #{by_device := ByDevice}) ->
     Reply = case maps:find(DeviceId, ByDevice) of
+                {ok, Allocation} -> {ok, Allocation};
+                error -> {error, not_found}
+            end,
+    {reply, Reply, State};
+handle_call({released, DeviceId}, _From,
+            State = #{released_by_device := ReleasedByDevice}) ->
+    Reply = case maps:find(DeviceId, ReleasedByDevice) of
                 {ok, Allocation} -> {ok, Allocation};
                 error -> {error, not_found}
             end,

@@ -3,7 +3,7 @@
 VPN Overlay Network for the Zencrypted ecosystem.
 
 This repository currently contains a minimal Erlang/OTP VPN dataplane prototype.
-Certificate-control peers now derive directional dataplane keys with ephemeral ECDH and HKDF-SHA256. Legacy non-certificate peers may still use PSK mode. A runtime peer registry supports trusted inventory mutation and automatic live reconciliation, while allocator reservations and provisioning revision barriers are durable through KVS/Mnesia. Registry/runtime reconstruction, CA services, and IAS policy synchronization remain future work.
+Certificate-control peers now derive directional dataplane keys with ephemeral ECDH and HKDF-SHA256. Legacy non-certificate peers may still use PSK mode. A runtime peer registry supports trusted inventory mutation and automatic live reconciliation, while allocator reservations, provisioning revision barriers, registry entries, and eligible peer runtime are recovered through KVS/Mnesia. CA services, IAS authority persistence, and IAS/VPN reconciliation remain future work.
 
 ## Architecture
 
@@ -65,12 +65,13 @@ private-key body is never returned or logged.
 - `vpn_udp_sink` - local UDP test sink.
 - `vpn_peer` - public runtime peer abstraction.
 - `vpn_manager` - management API for supervised peers.
-- `vpn_peer_registry` - ETS-backed runtime registry bootstrapped from trusted application configuration.
+- `vpn_peer_registry` - ETS-backed runtime registry reconstructed from trusted application configuration and durable provisioning state.
 - `vpn_peer_allocator` - VPN-owned durable reservations for dynamic client/gateway peer resources.
 - `vpn_kvs` - KVS/Mnesia schema registration and fail-closed startup boundary.
 - `vpn_projection` - serialized versioned projection process and backend-neutral API.
 - `vpn_projection_store` - replaceable durable projection backend contract.
 - `vpn_projection_store_kvs` - compare-and-set KVS/Mnesia implementation.
+- `vpn_runtime_recovery` - fail-closed reconstruction of registry/runtime configuration before peer supervision.
 - `vpn_dynamic_identity_factory` - development-only dynamic client OVPN and gateway certificate materialization.
 - `vpn_provisioning` - revisioned, idempotent IAS-to-VPN desired-state command contract.
 - `vpn_trust_store` - development CA certificate trust store.
@@ -112,15 +113,29 @@ completes. Applied revision digests, safe desired-state metadata, revoked state,
 and remove tombstones therefore survive provisioning-process and VPN-node
 restart. The ledger excludes `runtime_config` and all known secret-bearing fields.
 
-Registry entries and runtime processes are not reconstructed from this ledger yet;
-that is the following Stage 8A recovery patch. Provisioning history and counters
-remain bounded, volatile operational telemetry rather than durable audit storage.
+Stage 8A.4 reconstructs registry entries before `vpn_peer_sup` starts. Dynamic
+pairs are resolved only from a restored allocator reservation plus a validated
+local identity bundle; static peers are recovered from trusted bootstrap
+configuration or a configured runtime template. Applied active heads are started,
+disabled and revoked heads remain configured but stopped, remove tombstones are
+suppressed, and incomplete active/enable heads remain stopped until matching
+command replay completes. A durable allocator release barrier suppresses stale
+dynamic provisioning heads after completed decommission. If the same Device is
+reserved again with a new generation, the old peer-keyed head is suppressed
+rather than rebound to the new allocation. Missing
+allocation/identity material, ownership
+collisions, or unrecoverable active runtime configuration fail startup closed.
+The top-level supervisor uses `rest_for_one`, so projection, allocator, or
+registry failure restarts all dependent runtime components in recovery order.
+
+Provisioning history and counters remain bounded, volatile operational telemetry
+rather than durable audit storage.
 
 ## Runtime peer registry
 
-`vpn_peer_registry` is the trusted runtime inventory for provisioned peers. It is
-bootstrapped from `peers` and `ovpn_sessions` in application configuration, so
-existing deployments keep their startup behavior. Public `list/0` and `get/1`
+`vpn_peer_registry` is the trusted runtime inventory for provisioned peers. It
+first loads `peers` and `ovpn_sessions` as trusted bootstrap configuration, then
+applies the validated durable provisioning heads before `vpn_peer_sup` starts. Public `list/0` and `get/1`
 results contain only safe provisioning metadata and never include PSKs, private
 key paths, or complete runtime configuration.
 

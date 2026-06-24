@@ -1,9 +1,11 @@
 %%%-------------------------------------------------------------------
 %% @doc Runtime registry for provisioned VPN peers.
 %%
-%% Public reads expose only trusted metadata. Full runtime configuration is
-%% available only through config/1 and enabled_configs/0 for the VPN runtime;
-%% callers must never render those values in management responses.
+%% Public reads expose only trusted metadata. During startup the registry first
+%% loads trusted bootstrap peers and then reconstructs eligible durable runtime
+%% entries before vpn_peer_sup starts. Full runtime configuration is available
+%% only through config/1 and enabled_configs/0 for the VPN runtime; callers must
+%% never render those values in management responses.
 %%%-------------------------------------------------------------------
 -module(vpn_peer_registry).
 
@@ -19,7 +21,8 @@
          remove/1,
          remove_many/1,
          config/1,
-         enabled_configs/0]).
+         enabled_configs/0,
+         recovery_status/0]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2]).
 
 -define(SERVER, ?MODULE).
@@ -65,17 +68,30 @@ config(PeerId) ->
 enabled_configs() ->
     gen_server:call(?SERVER, enabled_configs).
 
+recovery_status() ->
+    gen_server:call(?SERVER, recovery_status).
+
 init([]) ->
     _ = ets:new(?TABLE, [named_table, set, protected, {read_concurrency, true}]),
     case vpn_session_config:configured_peers() of
         {ok, Peers} ->
-            lists:foreach(
-              fun(PeerConfig) ->
-                      Entry = entry(PeerConfig, bootstrap_sys_config, true),
-                      true = ets:insert(?TABLE, {maps:get(id, Entry), Entry})
-              end,
-              Peers),
-            {ok, #{}};
+            case vpn_runtime_recovery:restore(Peers) of
+                {ok, RuntimePeers, RecoveryStatus} ->
+                    lists:foreach(
+                      fun(PeerConfig) ->
+                              Enabled = maps:get(enabled, PeerConfig, true),
+                              Entry = entry(PeerConfig,
+                                            durable_recovery,
+                                            Enabled),
+                              true = ets:insert(
+                                       ?TABLE,
+                                       {maps:get(id, Entry), Entry})
+                      end,
+                      RuntimePeers),
+                    {ok, #{recovery => RecoveryStatus}};
+                {error, Reason} ->
+                    {stop, {peer_registry_recovery_failed, Reason}}
+            end;
         {error, Reason} ->
             {stop, {peer_registry_bootstrap_failed, Reason}}
     end.
@@ -83,6 +99,8 @@ init([]) ->
 handle_call(list, _From, State) ->
     Entries = [safe_entry(Entry) || {_PeerId, Entry} <- ets:tab2list(?TABLE)],
     {reply, lists:sort(fun compare_entries/2, Entries), State};
+handle_call(recovery_status, _From, State) ->
+    {reply, maps:get(recovery, State), State};
 handle_call({get, PeerId}, _From, State) ->
     {reply, lookup_safe(PeerId), State};
 handle_call({config, PeerId}, _From, State) ->

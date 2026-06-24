@@ -42,6 +42,7 @@ or Device-derived values.
 ```erlang
 vpn_peer_allocator:ensure(DeviceId).
 vpn_peer_allocator:lookup(DeviceId).
+vpn_peer_allocator:released(DeviceId).
 vpn_peer_allocator:release(DeviceId).
 vpn_peer_allocator:list().
 vpn_peer_allocator:status().
@@ -49,6 +50,7 @@ vpn_peer_allocator:status().
 
 `ensure/1` is idempotent for a non-empty binary Device ID. Distinct active
 Devices receive distinct peer IDs, TUN names, tunnel addresses, and UDP ports.
+`released/1` reads the persisted release barrier without mutating it.
 `release/1` makes the numeric transport slot reusable, returns a snapshot marked
 `state => released`, and a later allocation receives a fresh peer-ID generation
 so a different Device does not inherit the released peer identifiers.
@@ -395,17 +397,30 @@ finish an interrupted idempotent operation while newer revisions stay blocked.
 
 Durable state never contains private-key bodies or paths, PSKs, session keys,
 replay windows, ECDH material, raw runtime configuration, or packet state.
-Registry reconstruction, peer-process restart recovery, and an atomic
-cross-section decommission barrier remain later Stage 8A work described in
-`TECHNICAL-DEBT.md`.
+
+Stage 8A.4 reconstructs the registry after both allocator and provisioning
+sections have passed validation and before `vpn_peer_sup` starts. Active dynamic
+pairs are rebuilt from the durable allocation plus the validated local identity
+bundle; disabled and revoked pairs are restored with both runtime peers stopped.
+Remove tombstones and incomplete active/enable pending heads suppress the peer
+IDs. A persisted allocator release barrier also suppresses the stale dynamic
+provisioning head left by a completed decommission. If that Device later receives
+a new allocation generation, the old peer-keyed head is treated as stale
+ownership and cannot attach to the new peer IDs. Static peers are rebuilt from
+trusted bootstrap configuration or a configured resolver template. Missing
+identity material, allocation mismatch, or
+peer ownership collision fails startup closed. The top-level supervisor is
+`rest_for_one`, so a projection, allocator, or registry restart also restarts all
+dependent runtime children after recovery.
+
+An atomic cross-section decommission barrier remains later Stage 8A work
+described in `TECHNICAL-DEBT.md`.
 
 ## Current non-goals after the single-RPC bootstrap and Stage 7
 
 The completed dynamic allocation, IAS cutover, synchronized lifecycle, and
 explicit decommission stages do not:
 
-- restore registry entries or peer processes after a VPN application or node restart;
-- reconstruct registry entries or peer processes from durable provisioning state;
 - persist an atomic allocator-plus-provisioning decommission barrier;
 - automatically erase retained development identities unless explicitly asked;
 - accept allocator resource choices from IAS, trusted defaults, or an OVPN file.

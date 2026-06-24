@@ -98,6 +98,33 @@ vpn_peer_sup_exports_test() ->
     ?assert(erlang:function_exported(vpn_peer_sup, start_peer, 1)),
     ?assert(erlang:function_exported(vpn_peer_sup, stop_peer, 1)).
 
+vpn_runtime_recovery_exports_test() ->
+    ?assertMatch({module, vpn_runtime_recovery},
+                 code:ensure_loaded(vpn_runtime_recovery)),
+    ?assertMatch({module, vpn_peer_registry},
+                 code:ensure_loaded(vpn_peer_registry)),
+    ?assertMatch({module, vpn_peer_allocator},
+                 code:ensure_loaded(vpn_peer_allocator)),
+    ?assert(erlang:function_exported(vpn_runtime_recovery, restore, 1)),
+    ?assert(erlang:function_exported(vpn_peer_registry,
+                                     recovery_status,
+                                     0)),
+    ?assert(erlang:function_exported(vpn_peer_allocator,
+                                     released,
+                                     1)).
+
+vpn_supervisor_recovery_order_test() ->
+    {ok, {Flags, ChildSpecs}} = vpn_sup:init([]),
+    ?assertEqual(rest_for_one, maps:get(strategy, Flags)),
+    ?assertEqual([vpn_projection,
+                  vpn_peer_allocator,
+                  vpn_peer_registry,
+                  vpn_provisioning,
+                  vpn_peer_sup,
+                  vpn_peer_reconciler,
+                  vpn_http],
+                 [maps:get(id, Spec) || Spec <- ChildSpecs]).
+
 vpn_tun_exports_test() ->
     ?assertMatch({module, vpn_tun}, code:ensure_loaded(vpn_tun)),
     ?assert(erlang:function_exported(vpn_tun, open, 2)),

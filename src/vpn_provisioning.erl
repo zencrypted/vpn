@@ -4,12 +4,14 @@
 %% Commands are serialized by this process. Revisions are monotonic per peer,
 %% duplicate delivery is idempotent, and accepted heads are stored in the
 %% durable VPN projection so revoke/remove barriers survive process and node
-%% restart. Runtime registry reconstruction remains a later Stage 8A boundary.
+%% restart. Validated heads are also exposed to startup runtime recovery before
+%% peer supervision begins.
 %%%-------------------------------------------------------------------
 -module(vpn_provisioning).
 -behaviour(gen_server).
 
--export([start_link/0, apply/1, apply_dynamic/2, status/0, history/1]).
+-export([start_link/0, apply/1, apply_dynamic/2, status/0, history/1,
+         recovery_heads/0]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2]).
 
 -define(SERVER, ?MODULE).
@@ -494,17 +496,31 @@ valid_source(Value) when is_binary(Value) -> byte_size(Value) > 0;
 valid_source(_Value) -> false.
 
 restore_heads() ->
+    case recovery_heads() of
+        {ok, DurableHeads} ->
+            {ok, maps:merge(bootstrap_heads(), DurableHeads)};
+        {error, _} = Error ->
+            Error
+    end.
+
+%% @doc Return only validated durable provisioning heads.
+%%
+%% This pure recovery boundary is intentionally callable before the
+%% vpn_provisioning process starts. The peer registry uses it during startup so
+%% runtime configuration is reconstructed before vpn_peer_sup starts children.
+recovery_heads() ->
     case vpn_projection:get() of
         {ok, _ProjectionVersion, #{provisioning := Section}} ->
             case normalize_provisioning_section(Section) of
                 {ok, Entries} ->
-                    DurableHeads = maps:map(
-                                     fun(_PeerId, Entry) ->
-                                             Entry#{durable => true}
-                                     end,
-                                     Entries),
-                    {ok, maps:merge(bootstrap_heads(), DurableHeads)};
-                {error, _} = Error -> Error
+                    {ok,
+                     maps:map(
+                       fun(_PeerId, Entry) ->
+                               Entry#{durable => true}
+                       end,
+                       Entries)};
+                {error, _} = Error ->
+                    Error
             end;
         {ok, _ProjectionVersion, _Projection} ->
             {error, invalid_projection_payload};

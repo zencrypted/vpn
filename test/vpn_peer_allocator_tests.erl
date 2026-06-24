@@ -67,6 +67,8 @@ allocation_lifecycle_test_() ->
                           ?assertEqual({error, not_found},
                                        vpn_peer_allocator:lookup(DeviceA)),
                           ?assertEqual({ok, ReleasedA},
+                                       vpn_peer_allocator:released(DeviceA)),
+                          ?assertEqual({ok, ReleasedA},
                                        vpn_peer_allocator:release(DeviceA)),
 
                           {ok, AllocationC} = vpn_peer_allocator:ensure(DeviceC),
@@ -119,6 +121,8 @@ allocator_and_projection_restart_restore_state_test() ->
         {ok, AllocatorPid3} = vpn_peer_allocator:start_link(),
         ?assertEqual({error, not_found},
                      vpn_peer_allocator:lookup(DeviceId)),
+        ?assertEqual({ok, Released},
+                     vpn_peer_allocator:released(DeviceId)),
         ?assertEqual({ok, Released},
                      vpn_peer_allocator:release(DeviceId)),
         {ok, Second} = vpn_peer_allocator:ensure(DeviceId),
@@ -188,6 +192,8 @@ invalid_device_id_test_() ->
                             vpn_peer_allocator:ensure(<<>>)),
               ?_assertEqual({error, invalid_device_id},
                             vpn_peer_allocator:lookup(undefined)),
+              ?_assertEqual({error, invalid_device_id},
+                            vpn_peer_allocator:released(undefined)),
               ?_assertEqual({error, invalid_device_id},
                             vpn_peer_allocator:release([]))]
      end}.

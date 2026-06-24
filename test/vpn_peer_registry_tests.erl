@@ -99,6 +99,94 @@ batch_registry_mutation_test_() ->
      end}.
 
 
+durable_registry_recovery_enforces_lifecycle_barriers_test_() ->
+    {setup,
+     fun setup/0,
+     fun cleanup/1,
+     fun(_Pid) ->
+             [?_test(begin
+                          Disabled = durable_head(
+                                       1,
+                                       applied,
+                                       disable,
+                                       disabled,
+                                       #{enabled => false}),
+                          ok = persist_heads(#{peer_a => Disabled}),
+                          {ok, _Registry1} = restart_registry(),
+                          {ok, DisabledEntry} = vpn_peer_registry:get(peer_a),
+                          ?assertEqual(false,
+                                       maps:get(enabled, DisabledEntry)),
+                          ?assertEqual(1,
+                                       maps:get(revision, DisabledEntry)),
+                          ?assertEqual(ias,
+                                       maps:get(provisioning_source,
+                                                DisabledEntry)),
+                          Recovery1 = vpn_peer_registry:recovery_status(),
+                          ?assertEqual(durable,
+                                       maps:get(persistence, Recovery1)),
+                          ?assertEqual([peer_a],
+                                       maps:get(restored_peers, Recovery1)),
+
+                          Removed = durable_head(
+                                      2,
+                                      applied,
+                                      remove,
+                                      removed,
+                                      #{enabled => false}),
+                          ok = persist_heads(#{peer_a => Removed}),
+                          {ok, _Registry2} = restart_registry(),
+                          ?assertEqual({error, not_found},
+                                       vpn_peer_registry:get(peer_a)),
+                          Recovery2 = vpn_peer_registry:recovery_status(),
+                          ?assertEqual([peer_a],
+                                       maps:get(suppressed_peers,
+                                                Recovery2)),
+
+                          PendingEnable = durable_head(
+                                            3,
+                                            pending,
+                                            enable,
+                                            active,
+                                            #{enabled => true}),
+                          ok = persist_heads(#{peer_a => PendingEnable}),
+                          {ok, _Registry3} = restart_registry(),
+                          ?assertEqual({error, not_found},
+                                       vpn_peer_registry:get(peer_a)),
+                          Recovery3 = vpn_peer_registry:recovery_status(),
+                          ?assertEqual(1,
+                                       maps:get(pending_heads, Recovery3)),
+                          ?assertEqual([peer_a],
+                                       maps:get(suppressed_peers,
+                                                Recovery3))
+                      end)]
+     end}.
+
+
+unrecoverable_active_runtime_fails_closed_test_() ->
+    {setup,
+     fun setup/0,
+     fun cleanup/1,
+     fun(_Pid) ->
+             [?_test(begin
+                          Active = durable_head(
+                                     1,
+                                     applied,
+                                     upsert,
+                                     active,
+                                     #{enabled => true,
+                                       authorized => true}),
+                          ok = persist_heads(#{peer_b => Active}),
+                          ?assertEqual(
+                             {error,
+                              {runtime_recovery_failed,
+                               peer_b,
+                               {runtime_config_recovery_failed,
+                                runtime_config_required}}},
+                             vpn_runtime_recovery:restore([]))
+                      end)]
+     end}.
+
+
 automatic_manager_reconcile_test_() ->
     {setup,
      fun setup_with_reconciler/0,
@@ -197,23 +285,40 @@ manager_reconcile_test_() ->
 
 setup() ->
     stop_registered(vpn_peer_registry),
+    stop_projection(),
+    ok = vpn_projection_test_store:reset(),
     application:set_env(vpn, peers, [peer_config(peer_a)]),
     application:set_env(vpn, ovpn_sessions, []),
+    application:set_env(vpn, runtime_config_resolver, disabled),
+    {ok, _ProjectionPid} =
+        vpn_projection:start_link(vpn_projection_test_store),
     {ok, Pid} = vpn_peer_registry:start_link(),
     Pid.
 
-cleanup(Pid) ->
-    case is_process_alive(Pid) of
-        true ->
-            unlink(Pid),
-            exit(Pid, shutdown),
-            wait_until_stopped(Pid, 20);
-        false ->
-            ok
-    end,
+cleanup(_Pid) ->
+    stop_named_normal(vpn_peer_registry),
+    stop_projection(),
+    ok = vpn_projection_test_store:reset(),
     application:unset_env(vpn, peers),
     application:unset_env(vpn, ovpn_sessions),
+    application:unset_env(vpn, runtime_config_resolver),
     ok.
+
+stop_named_normal(Name) ->
+    case whereis(Name) of
+        undefined -> ok;
+        Pid ->
+            ok = gen_server:stop(Pid, normal, 5000),
+            wait_until_stopped(Pid, 20)
+    end.
+
+stop_projection() ->
+    case whereis(vpn_projection) of
+        undefined -> ok;
+        Pid ->
+            ok = gen_server:stop(Pid, normal, 5000),
+            wait_until_stopped(Pid, 20)
+    end.
 
 stop_registered(Name) ->
     case whereis(Name) of
@@ -230,6 +335,34 @@ wait_until_stopped(Pid, Attempts) ->
         false -> ok;
         true -> timer:sleep(10), wait_until_stopped(Pid, Attempts - 1)
     end.
+
+persist_heads(Heads) ->
+    case vpn_projection:update(
+           provisioning,
+           fun(_Current) ->
+                   #{schema_version => 1,
+                     entries => Heads}
+           end) of
+        {ok, _Version, _Projection} -> ok;
+        {ok, unchanged, _Version, _Projection} -> ok
+    end.
+
+durable_head(Revision, Phase, Operation, Lifecycle, Desired) ->
+    #{revision => Revision,
+      digest => crypto:hash(
+                  sha256,
+                  term_to_binary({Revision, Phase, Operation, Desired},
+                                 [deterministic])),
+      phase => Phase,
+      operation => Operation,
+      source => ias,
+      lifecycle_state => Lifecycle,
+      desired_state => Desired,
+      updated_at => Revision * 1000}.
+
+restart_registry() ->
+    stop_named_normal(vpn_peer_registry),
+    vpn_peer_registry:start_link().
 
 peer_config(PeerId) ->
     #{id => PeerId,
