@@ -66,12 +66,22 @@ projection_store_foundation_test_() ->
                           ?assertEqual({ok, 1, Projection1},
                                        vpn_projection:get()),
 
+                          ConflictVersion = 1,
+                          ConflictUpdatedAt = 1,
+                          ConflictChecksum =
+                              crypto:hash(
+                                sha256,
+                                term_to_binary(
+                                  {1,
+                                   ConflictVersion,
+                                   Projection1,
+                                   ConflictUpdatedAt})),
                           ConflictEnvelope =
                               #{schema_version => 1,
-                                projection_version => 2,
-                                checksum => <<0:256>>,
+                                projection_version => ConflictVersion,
+                                checksum => ConflictChecksum,
                                 payload => Projection1,
-                                updated_at => 1},
+                                updated_at => ConflictUpdatedAt},
                           ?assertEqual({error, conflict},
                                        vpn_projection_store_kvs:commit(
                                          0,
@@ -96,11 +106,13 @@ unsupported_schema_and_checksum_fail_closed_test_() ->
                                     checksum = <<0:256>>,
                                     payload = Projection,
                                     updated_at = 1}),
-                          ?assertMatch(
+                          ?assertEqual(
                              {error,
                               {projection_load_failed,
                                {unsupported_schema_version, 99}}},
-                             vpn_projection:start_link()),
+                             start_projection_fail_closed(
+                               {projection_load_failed,
+                                {unsupported_schema_version, 99}})),
 
                           ok = write_raw(
                                  #vpn_projection{
@@ -110,11 +122,13 @@ unsupported_schema_and_checksum_fail_closed_test_() ->
                                     checksum = <<0:256>>,
                                     payload = Projection,
                                     updated_at = 1}),
-                          ?assertMatch(
+                          ?assertEqual(
                              {error,
                               {projection_load_failed,
                                invalid_projection_checksum}},
-                             vpn_projection:start_link())
+                             start_projection_fail_closed(
+                               {projection_load_failed,
+                                invalid_projection_checksum}))
                       end)]
      end}.
 
@@ -162,6 +176,23 @@ cleanup(Context) ->
     application:unset_env(mnesia, dir),
     remove_tree(maps:get(root, Context)),
     ok.
+
+start_projection_fail_closed(ExpectedReason) ->
+    PreviousTrapExit = process_flag(trap_exit, true),
+    try
+        Result = vpn_projection:start_link(),
+        %% A failed start_link/0 can still deliver the linked process EXIT
+        %% signal to the caller. Consume it while exits are trapped so the
+        %% expected fail-closed startup does not cancel the EUnit fixture.
+        receive
+            {'EXIT', _Pid, ExpectedReason} -> ok
+        after 100 ->
+            ok
+        end,
+        Result
+    after
+        process_flag(trap_exit, PreviousTrapExit)
+    end.
 
 write_raw(Record) ->
     case mnesia:transaction(fun() -> mnesia:write(Record) end) of
