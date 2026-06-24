@@ -176,9 +176,10 @@ Dynamic peers delay the first handshake briefly and discard packets received
 while the newly rebound UDP sockets are in that startup quarantine. This keeps
 old rekey/control frames from a just-disabled pair out of the new certificate
 transcript. A failed enable rolls the pair back to the disabled state. A revisioned revoke
-uses the same gateway-first quiesce path, but only the client is marked revoked.
-This prevents orphaned handshake retries while preserving the gateway identity
-for an explicit higher-level reissue.
+uses the same gateway-first quiesce path, waits until both runtime processes are
+stopped before acknowledging the command, but marks only the client revoked.
+This prevents orphaned handshake retries, makes immediate decommission safe,
+and preserves the gateway identity for an explicit higher-level reissue.
 
 Use `vpn_provisioning:status/0` for counters and
 `vpn_provisioning:history/1` for bounded per-peer audit history.

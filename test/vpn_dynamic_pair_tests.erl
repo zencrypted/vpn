@@ -137,13 +137,10 @@ pair_aware_revoke_quiesces_gateway_test_() ->
                                                 certificate_revoked}},
                           ?assertMatch({ok, #{operation := revoke}},
                                        vpn_provisioning:apply(Command)),
-                          ?assert(wait_until(fun() ->
-                                                    not vpn_manager:peer_running(
-                                                          GatewayId) andalso
-                                                    not vpn_manager:peer_running(
-                                                          ClientId)
-                                            end,
-                                            50)),
+                          ?assertEqual(false,
+                                       vpn_manager:peer_running(ClientId)),
+                          ?assertEqual(false,
+                                       vpn_manager:peer_running(GatewayId)),
 
                           {ok, ClientEntry} = vpn_peer_registry:get(ClientId),
                           ?assertEqual(false, maps:get(enabled, ClientEntry)),
@@ -439,6 +436,11 @@ revoked_pair_decommission_can_remove_identity_test_() ->
                                                certificate_revoked}},
                           ?assertMatch({ok, #{operation := revoke}},
                                        vpn_provisioning:apply(Revoke)),
+                          ?assertEqual(false,
+                                       vpn_manager:peer_running(ClientId)),
+                          ?assertEqual(false,
+                                       vpn_manager:peer_running(
+                                         maps:get(gateway_peer_id, Allocation))),
 
                           {ok, Summary} = vpn_dynamic_pair:decommission(
                                             DeviceId,

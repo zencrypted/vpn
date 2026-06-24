@@ -179,18 +179,7 @@ persist_next_config(enable, PeerId, BaseConfig, Next) ->
 persist_next_config(revoke, PeerId, BaseConfig, Next) ->
     case dynamic_gateway_config(PeerId, BaseConfig) of
         {ok, GatewayConfig} ->
-            QuiescedGateway = GatewayConfig#{enabled => false},
-            case vpn_peer_registry:put_many([QuiescedGateway, Next]) of
-                {ok, SafeEntries} ->
-                    case safe_peer_entry(PeerId, SafeEntries) of
-                        {ok, Safe} ->
-                            {ok, #{operation => revoke, peer => Safe}};
-                        {error, _} = Error ->
-                            Error
-                    end;
-                {error, Reason} ->
-                    {error, Reason}
-            end;
+            persist_dynamic_pair_revoke(PeerId, GatewayConfig, Next);
         not_dynamic_client ->
             put_single_config(revoke, Next);
         {error, Reason} ->
@@ -210,6 +199,21 @@ persist_dynamic_pair_disable(PeerId, GatewayConfig, Next) ->
             case vpn_dynamic_pair:await_stopped(DeviceId) of
                 ok ->
                     pair_operation_result(disable, PeerId, SafeEntries);
+                {error, _} = Error ->
+                    Error
+            end;
+        {error, Reason} ->
+            {error, Reason}
+    end.
+
+persist_dynamic_pair_revoke(PeerId, GatewayConfig, Next) ->
+    DeviceId = maps:get(device_id, Next),
+    QuiescedGateway = GatewayConfig#{enabled => false},
+    case vpn_peer_registry:put_many([QuiescedGateway, Next]) of
+        {ok, SafeEntries} ->
+            case vpn_dynamic_pair:await_stopped(DeviceId) of
+                ok ->
+                    pair_operation_result(revoke, PeerId, SafeEntries);
                 {error, _} = Error ->
                     Error
             end;

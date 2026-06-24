@@ -252,9 +252,11 @@ handshake_start_delay_ms => 250
 
 Static peers retain the zero-delay default. If enable cannot establish the pair,
 both sides are rolled back to `enabled => false`. `revoke` uses the same
-gateway-first quiesce path, but only the client is marked revoked; the gateway
-remains authorized and unrevoked so an explicit higher-level reissue can reuse
-the reserved identity without leaving an orphaned handshake timer.
+gateway-first quiesce path and is acknowledged only after both runtime processes
+are stopped, but only the client is marked revoked. The gateway remains
+authorized and unrevoked so an explicit higher-level reissue can reuse the
+reserved identity without leaving an orphaned handshake timer. The synchronous
+stop boundary also allows immediate decommission after a successful revoke.
 
 The wait policy is VPN-owned and configurable:
 
