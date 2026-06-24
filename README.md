@@ -261,7 +261,7 @@ Run the local provisioning smoke tests with:
 
 The debug bootstrap keeps stable local identities for both trusted client
 slots and the second gateway peer. It creates the development CA and the
-`client_a`, `client_b`, and `peer_c` bundles only when they are missing, then
+`client_a` and `client_b` OVPN bundles plus the RSA `peer_c` gateway identity only when they are missing or incompatible, then
 reuses them on later starts:
 
 ```sh

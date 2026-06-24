@@ -37,13 +37,19 @@ require_file() {
 cd "$REPO_DIR"
 ensure_identity client_a 5556
 ensure_identity client_b 5557
-ensure_identity peer_c 5562
+if [ -n "$FORCE_ARG" ]; then
+    "$SCRIPT_DIR/ensure-debug-peer.sh" "$FORCE_ARG" --name peer_c
+else
+    "$SCRIPT_DIR/ensure-debug-peer.sh" --name peer_c
+fi
 
-for name in client_a client_b peer_c; do
+for name in client_a client_b; do
     require_file "local/debug/$name.ovpn"
     require_file "local/debug/keys/$name.key"
     require_file "local/debug/certs/$name.crt"
 done
+require_file "local/debug/keys/peer_c.key"
+require_file "local/debug/certs/peer_c.crt"
 
 printf '%s\n' \
     "Debug VPN topology is ready:" \
