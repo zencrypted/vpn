@@ -109,10 +109,7 @@ execute(Command = #{operation := Operation,
                                   provisioning_source => Source,
                                   last_provisioning_operation => Operation,
                                   updated_at => Now},
-                    case vpn_peer_registry:put(Next) of
-                        {ok, Safe} -> {ok, #{operation => Operation, peer => Safe}};
-                        {error, Reason} -> {error, Reason}
-                    end;
+                    persist_next_config(Operation, PeerId, BaseConfig, Next);
                 Error -> Error
             end;
         Error -> Error
@@ -154,6 +151,64 @@ next_config(revoke, Base, Desired) ->
                                    authorized => false,
                                    authorization_reason => Reason,
                                    revoked => true}}.
+
+persist_next_config(revoke, PeerId, BaseConfig, Next) ->
+    case dynamic_gateway_config(PeerId, BaseConfig) of
+        {ok, GatewayConfig} ->
+            QuiescedGateway = GatewayConfig#{enabled => false},
+            case vpn_peer_registry:put_many([QuiescedGateway, Next]) of
+                {ok, SafeEntries} ->
+                    case safe_peer_entry(PeerId, SafeEntries) of
+                        {ok, Safe} ->
+                            {ok, #{operation => revoke, peer => Safe}};
+                        {error, _} = Error ->
+                            Error
+                    end;
+                {error, Reason} ->
+                    {error, Reason}
+            end;
+        not_dynamic_client ->
+            put_single_config(revoke, Next);
+        {error, Reason} ->
+            logger:warning(
+              "Dynamic client revoke could not quiesce companion gateway: ~p",
+              [Reason]),
+            put_single_config(revoke, Next)
+    end;
+persist_next_config(Operation, _PeerId, _BaseConfig, Next) ->
+    put_single_config(Operation, Next).
+
+put_single_config(Operation, Next) ->
+    case vpn_peer_registry:put(Next) of
+        {ok, Safe} -> {ok, #{operation => Operation, peer => Safe}};
+        {error, Reason} -> {error, Reason}
+    end.
+
+dynamic_gateway_config(ClientId,
+                       #{allocation_role := client,
+                         allocation_id := AllocationId,
+                         device_id := DeviceId,
+                         remote_peer_id := GatewayId}) ->
+    case vpn_peer_registry:config(GatewayId) of
+        {ok, GatewayConfig} ->
+            case maps:get(allocation_role, GatewayConfig, undefined) =:= gateway andalso
+                 maps:get(allocation_id, GatewayConfig, undefined) =:= AllocationId andalso
+                 maps:get(device_id, GatewayConfig, undefined) =:= DeviceId andalso
+                 maps:get(remote_peer_id, GatewayConfig, undefined) =:= ClientId of
+                true -> {ok, GatewayConfig};
+                false -> {error, {dynamic_pair_gateway_mismatch, GatewayId}}
+            end;
+        {error, not_found} ->
+            {error, {dynamic_pair_gateway_not_found, GatewayId}}
+    end;
+dynamic_gateway_config(_PeerId, _BaseConfig) ->
+    not_dynamic_client.
+
+safe_peer_entry(PeerId, SafeEntries) ->
+    case [Entry || #{id := Id} = Entry <- SafeEntries, Id =:= PeerId] of
+        [Safe] -> {ok, Safe};
+        _ -> {error, dynamic_pair_client_result_missing}
+    end.
 
 
 normalize_authorization_metadata(Config, DesiredFields) ->

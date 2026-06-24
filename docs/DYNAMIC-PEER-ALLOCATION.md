@@ -235,6 +235,12 @@ established unchanged pair does not restart it. A following IAS revisioned
 `upsert` that changes only revision bookkeeping metadata updates the registry
 in place and preserves both peer PIDs and the established handshake; runtime,
 identity, authorization, or transport changes still trigger reconciliation.
+A revisioned `revoke` applied to a dynamic client is pair-aware: the registry
+updates the dedicated gateway and revoked client in one batch, reconciles the
+gateway first, and stops both processes. The gateway is quiesced with
+`enabled => false` but is not itself marked revoked, so an explicit higher-level
+reissue can reconcile the reserved pair again without leaving an orphaned
+handshake timer active after client revocation.
 
 The wait policy is VPN-owned and configurable:
 

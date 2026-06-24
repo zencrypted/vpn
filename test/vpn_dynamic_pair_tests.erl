@@ -112,6 +112,59 @@ revision_only_provisioning_preserves_established_pair_test_() ->
                       end)]
      end}.
 
+pair_aware_revoke_quiesces_gateway_test_() ->
+    {setup,
+     fun setup/0,
+     fun cleanup/1,
+     fun(Context) ->
+             [?_test(begin
+                          DeviceId = <<"device-pair-revoke">>,
+                          {ok, Allocation} = vpn_peer_allocator:ensure(DeviceId),
+                          ok = install_identity_bundle(Allocation, Context),
+                          {ok, _} = vpn_dynamic_pair:ensure(DeviceId,
+                                                            desired(DeviceId)),
+                          ClientId = maps:get(client_peer_id, Allocation),
+                          GatewayId = maps:get(gateway_peer_id, Allocation),
+                          ?assert(vpn_manager:peer_running(ClientId)),
+                          ?assert(vpn_manager:peer_running(GatewayId)),
+
+                          Command = #{peer_id => ClientId,
+                                      revision => 1,
+                                      operation => revoke,
+                                      source => ias,
+                                      desired_state =>
+                                          #{authorization_reason =>
+                                                certificate_revoked}},
+                          ?assertMatch({ok, #{operation := revoke}},
+                                       vpn_provisioning:apply(Command)),
+                          ?assert(wait_until(fun() ->
+                                                    not vpn_manager:peer_running(
+                                                          GatewayId) andalso
+                                                    not vpn_manager:peer_running(
+                                                          ClientId)
+                                            end,
+                                            50)),
+
+                          {ok, ClientEntry} = vpn_peer_registry:get(ClientId),
+                          ?assertEqual(false, maps:get(enabled, ClientEntry)),
+                          ?assertEqual(false, maps:get(authorized, ClientEntry)),
+                          ?assertEqual(true, maps:get(revoked, ClientEntry)),
+                          ?assertEqual(certificate_revoked,
+                                       maps:get(authorization_reason,
+                                                ClientEntry)),
+
+                          {ok, GatewayEntry} = vpn_peer_registry:get(GatewayId),
+                          ?assertEqual(false, maps:get(enabled, GatewayEntry)),
+                          ?assertEqual(true, maps:get(authorized, GatewayEntry)),
+                          ?assertEqual(false, maps:get(revoked, GatewayEntry)),
+
+                          {ok, Status} = vpn_dynamic_pair:status(DeviceId),
+                          ?assertMatch(#{client := #{running := false},
+                                         gateway := #{running := false}},
+                                       Status)
+                      end)]
+     end}.
+
 registry_collision_is_rejected_test_() ->
     {setup,
      fun setup/0,
