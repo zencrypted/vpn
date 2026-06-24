@@ -8,7 +8,7 @@
 -module(vpn_provisioning).
 -behaviour(gen_server).
 
--export([start_link/0, apply/1, status/0, history/1]).
+-export([start_link/0, apply/1, apply_dynamic/2, status/0, history/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2]).
 
 -define(SERVER, ?MODULE).
@@ -19,6 +19,15 @@ start_link() ->
 
 apply(Command) ->
     gen_server:call(?SERVER, {apply, Command}, infinity).
+
+%% @doc Apply a revisioned dynamic-pair upsert as one serialized operation.
+%%
+%% The Device identifier is bound into the command digest. The dynamic pair is
+%% materialized, written with its final revision metadata, and established
+%% before the provisioning head is committed. Ordinary apply/1 remains
+%% available for static peers and compatibility with the former two-step flow.
+apply_dynamic(DeviceId, Command) ->
+    gen_server:call(?SERVER, {apply_dynamic, DeviceId, Command}, infinity).
 
 status() ->
     gen_server:call(?SERVER, status).
@@ -43,10 +52,20 @@ handle_call(status, _From, State) ->
 handle_call({history, PeerId}, _From, State) ->
     {reply, maps:get(PeerId, maps:get(history, State), []), State};
 handle_call({apply, Command}, _From, State0) ->
-    State1 = State0#{commands_received => maps:get(commands_received, State0) + 1},
+    State1 = increment_received(State0),
     case validate_command(Command) of
         {ok, Normalized} ->
             {Reply, State2} = apply_validated(Normalized, State1),
+            {reply, Reply, State2};
+        {error, Reason} ->
+            Result = {error, Reason},
+            {reply, Result, record_rejected(Command, Result, State1)}
+    end;
+handle_call({apply_dynamic, DeviceId, Command}, _From, State0) ->
+    State1 = increment_received(State0),
+    case validate_dynamic_command(DeviceId, Command) of
+        {ok, Normalized} ->
+            {Reply, State2} = apply_dynamic_validated(Normalized, State1),
             {reply, Reply, State2};
         {error, Reason} ->
             Result = {error, Reason},
@@ -58,9 +77,22 @@ handle_call(_Request, _From, State) ->
 handle_cast(_Message, State) -> {noreply, State}.
 handle_info(_Message, State) -> {noreply, State}.
 
-apply_validated(Command = #{peer_id := PeerId, revision := Revision}, State) ->
+increment_received(State) ->
+    State#{commands_received => maps:get(commands_received, State) + 1}.
+
+apply_validated(Command, State) ->
+    apply_validated(Command, State, fun execute/1).
+
+apply_dynamic_validated(Command, State) ->
+    apply_validated(Command, State, fun execute_dynamic/1).
+
+apply_validated(Command = #{peer_id := PeerId, revision := Revision}, State,
+                Executor) ->
     Heads = maps:get(heads, State),
-    Head = maps:get(PeerId, Heads, #{revision => current_registry_revision(PeerId), digest => undefined}),
+    Head = maps:get(PeerId,
+                    Heads,
+                    #{revision => current_registry_revision(PeerId),
+                      digest => undefined}),
     CurrentRevision = maps:get(revision, Head),
     Digest = command_digest(Command),
     case Revision of
@@ -77,7 +109,7 @@ apply_validated(Command = #{peer_id := PeerId, revision := Revision}, State) ->
                     {Result, record_rejected(Command, Result, State)}
             end;
         _ ->
-            case execute(Command) of
+            case Executor(Command) of
                 {ok, Outcome} ->
                     NewHead = #{revision => Revision, digest => Digest},
                     State2 = State#{heads => Heads#{PeerId => NewHead}},
@@ -87,6 +119,38 @@ apply_validated(Command = #{peer_id := PeerId, revision := Revision}, State) ->
                     Result = {error, Reason},
                     {Result, record_rejected(Command, Result, State)}
             end
+    end.
+
+execute_dynamic(#{dynamic_device_id := DeviceId,
+                  operation := upsert,
+                  peer_id := PeerId,
+                  revision := Revision,
+                  source := Source,
+                  desired_state := Desired}) ->
+    case vpn_peer_allocator:lookup(DeviceId) of
+        {ok, Allocation} ->
+            ExpectedPeerId = maps:get(client_peer_id, Allocation),
+            case PeerId =:= ExpectedPeerId of
+                true ->
+                    Metadata = #{revision => Revision,
+                                 source => Source,
+                                 operation => upsert},
+                    case vpn_dynamic_pair:provision(DeviceId, Desired, Metadata) of
+                        {ok, PairStatus} ->
+                            {ok, #{operation => upsert,
+                                   pair => PairStatus}};
+                        {error, _} = Error ->
+                            Error
+                    end;
+                false ->
+                    {error, {dynamic_pair_client_peer_mismatch,
+                             ExpectedPeerId,
+                             PeerId}}
+            end;
+        {error, not_found} ->
+            {error, {dynamic_peer_allocation_required, DeviceId}};
+        {error, _} = Error ->
+            Error
     end.
 
 execute(#{operation := remove, peer_id := PeerId}) ->
@@ -301,6 +365,29 @@ normalize_authorization_metadata(Config, DesiredFields) ->
         false -> Config
     end.
 
+validate_dynamic_command(DeviceId, Command)
+  when is_binary(DeviceId), byte_size(DeviceId) > 0 ->
+    case validate_command(Command) of
+        {ok, #{operation := upsert, revision := Revision,
+               desired_state := Desired} = Normalized}
+          when Revision > 0 ->
+            case maps:get(device_id, Desired, DeviceId) of
+                DeviceId ->
+                    {ok, Normalized#{desired_state => Desired#{device_id => DeviceId},
+                                     dynamic_device_id => DeviceId}};
+                _Other ->
+                    {error, dynamic_peer_device_id_mismatch}
+            end;
+        {ok, #{operation := upsert, revision := 0}} ->
+            {error, dynamic_pair_positive_revision_required};
+        {ok, #{operation := _Other}} ->
+            {error, dynamic_pair_upsert_required};
+        {error, _} = Error ->
+            Error
+    end;
+validate_dynamic_command(_DeviceId, _Command) ->
+    {error, invalid_dynamic_pair_command}.
+
 validate_command(Command) when is_map(Command) ->
     PeerId = maps:get(peer_id, Command, undefined),
     Revision = maps:get(revision, Command, undefined),
@@ -336,7 +423,8 @@ bootstrap_heads() ->
                     || Entry <- vpn_peer_registry:list()]).
 
 command_digest(Command) ->
-    crypto:hash(sha256, term_to_binary(Command, [deterministic])).
+    Canonical = maps:remove(dynamic_device_id, Command),
+    crypto:hash(sha256, term_to_binary(Canonical, [deterministic])).
 
 command_summary(Command) when is_map(Command) ->
     maps:with([peer_id, revision, operation, source], Command);

@@ -3,6 +3,238 @@
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("kernel/include/file.hrl").
 
+atomic_dynamic_provisioning_applies_revision_before_start_test_() ->
+    {setup,
+     fun setup/0,
+     fun cleanup/1,
+     fun(Context) ->
+             [?_test(begin
+                          DeviceId = <<"device-atomic-provision">>,
+                          {ok, Allocation} = vpn_peer_allocator:ensure(DeviceId),
+                          ok = install_identity_bundle(Allocation, Context),
+                          ClientId = maps:get(client_peer_id, Allocation),
+                          GatewayId = maps:get(gateway_peer_id, Allocation),
+                          Command = dynamic_command(Allocation,
+                                                    1,
+                                                    desired(DeviceId)),
+
+                          {ok, First} =
+                              vpn_provisioning:apply_dynamic(DeviceId, Command),
+                          ?assertEqual(upsert, maps:get(operation, First)),
+                          Pair = maps:get(pair, First),
+                          ?assertEqual(reconciled, maps:get(outcome, Pair)),
+                          ?assertNot(contains_key(private_key_path, First)),
+                          ?assertNot(contains_key(ovpn_identity, First)),
+
+                          {ok, ClientEntry1} = vpn_peer_registry:get(ClientId),
+                          {ok, GatewayEntry1} = vpn_peer_registry:get(GatewayId),
+                          lists:foreach(
+                            fun(Entry) ->
+                                    ?assertEqual(1, maps:get(revision, Entry)),
+                                    ?assertEqual(ias,
+                                                 maps:get(provisioning_source,
+                                                          Entry)),
+                                    ?assertEqual(upsert,
+                                                 maps:get(
+                                                   last_provisioning_operation,
+                                                   Entry))
+                            end,
+                            [ClientEntry1, GatewayEntry1]),
+                          ?assert(vpn_manager:peer_running(ClientId)),
+                          ?assert(vpn_manager:peer_running(GatewayId)),
+                          {ok, ClientPid1} = vpn_manager:find_peer(ClientId),
+                          {ok, GatewayPid1} = vpn_manager:find_peer(GatewayId),
+
+                          ?assertEqual(
+                             {ok, unchanged},
+                             vpn_provisioning:apply_dynamic(DeviceId, Command)),
+                          ?assertEqual({ok, ClientPid1},
+                                       vpn_manager:find_peer(ClientId)),
+                          ?assertEqual({ok, GatewayPid1},
+                                       vpn_manager:find_peer(GatewayId)),
+                          Conflict = Command#{desired_state =>
+                                                 (desired(DeviceId))#{
+                                                     profile_id => other_profile}},
+                          ?assertEqual(
+                             {error, revision_conflict},
+                             vpn_provisioning:apply_dynamic(DeviceId, Conflict)),
+
+                          Command2 = dynamic_command(Allocation,
+                                                     2,
+                                                     desired(DeviceId)),
+                          ?assertMatch(
+                             {ok, #{operation := upsert}},
+                             vpn_provisioning:apply_dynamic(DeviceId, Command2)),
+                          {ok, ClientEntry2} = vpn_peer_registry:get(ClientId),
+                          {ok, GatewayEntry2} = vpn_peer_registry:get(GatewayId),
+                          ?assertEqual(2, maps:get(revision, ClientEntry2)),
+                          ?assertEqual(2, maps:get(revision, GatewayEntry2)),
+                          ?assertEqual(
+                             {error, stale_revision},
+                             vpn_provisioning:apply_dynamic(DeviceId, Command)),
+                          ?assertEqual({ok, ClientPid1},
+                                       vpn_manager:find_peer(ClientId)),
+                          ?assertEqual({ok, GatewayPid1},
+                                       vpn_manager:find_peer(GatewayId)),
+
+                          Command3 = dynamic_command(
+                                       Allocation,
+                                       3,
+                                       (desired(DeviceId))#{
+                                           profile_id => other_profile}),
+                          ?assertMatch(
+                             {ok, #{operation := upsert}},
+                             vpn_provisioning:apply_dynamic(DeviceId, Command3)),
+                          {ok, ClientPid3} = vpn_manager:find_peer(ClientId),
+                          {ok, GatewayPid3} = vpn_manager:find_peer(GatewayId),
+                          ?assert(ClientPid3 =/= ClientPid1),
+                          ?assertEqual(GatewayPid1, GatewayPid3),
+                          {ok, ClientEntry3} = vpn_peer_registry:get(ClientId),
+                          {ok, GatewayEntry3} = vpn_peer_registry:get(GatewayId),
+                          ?assertEqual(3, maps:get(revision, ClientEntry3)),
+                          ?assertEqual(3, maps:get(revision, GatewayEntry3)),
+                          ?assertEqual(other_profile,
+                                       maps:get(profile_id, ClientEntry3))
+                      end)]
+     end}.
+
+atomic_dynamic_provisioning_rejects_invalid_bootstrap_test_() ->
+    {setup,
+     fun setup/0,
+     fun cleanup/1,
+     fun(Context) ->
+             [?_test(begin
+                          DeviceId = <<"device-invalid-atomic-provision">>,
+                          {ok, Allocation} = vpn_peer_allocator:ensure(DeviceId),
+                          ok = install_identity_bundle(Allocation, Context),
+                          ClientId = maps:get(client_peer_id, Allocation),
+                          GatewayId = maps:get(gateway_peer_id, Allocation),
+                          Zero = dynamic_command(Allocation,
+                                                 0,
+                                                 desired(DeviceId)),
+                          ?assertEqual(
+                             {error, dynamic_pair_positive_revision_required},
+                             vpn_provisioning:apply_dynamic(DeviceId, Zero)),
+                          Disable = Zero#{revision => 1,
+                                         operation => disable},
+                          ?assertEqual(
+                             {error, dynamic_pair_upsert_required},
+                             vpn_provisioning:apply_dynamic(DeviceId, Disable)),
+                          WrongPeer = (dynamic_command(Allocation,
+                                                       1,
+                                                       desired(DeviceId)))#{
+                                          peer_id => <<"wrong-client">>},
+                          ?assertEqual(
+                             {error,
+                              {dynamic_pair_client_peer_mismatch,
+                               ClientId,
+                               <<"wrong-client">>}},
+                             vpn_provisioning:apply_dynamic(DeviceId,
+                                                            WrongPeer)),
+                          ?assertEqual({error, not_found},
+                                       vpn_peer_registry:get(ClientId)),
+                          ?assertEqual({error, not_found},
+                                       vpn_peer_registry:get(GatewayId)),
+                          ?assertEqual(false,
+                                       vpn_manager:peer_running(ClientId)),
+                          ?assertEqual(false,
+                                       vpn_manager:peer_running(GatewayId))
+                      end)]
+     end}.
+
+atomic_dynamic_provisioning_failure_rolls_back_and_retries_test_() ->
+    {setup,
+     fun setup/0,
+     fun cleanup/1,
+     fun(Context) ->
+             [?_test(begin
+                          DeviceId = <<"device-atomic-rollback">>,
+                          {ok, Allocation} = vpn_peer_allocator:ensure(DeviceId),
+                          ok = install_identity_bundle(Allocation, Context),
+                          {ok, Bundle} = application:get_env(
+                                           vpn,
+                                           dynamic_identity_test_bundle),
+                          application:set_env(
+                            vpn,
+                            dynamic_identity_test_ensure_bundle,
+                            Bundle),
+                          application:unset_env(vpn,
+                                                dynamic_identity_test_bundle),
+                          ClientId = maps:get(client_peer_id, Allocation),
+                          GatewayId = maps:get(gateway_peer_id, Allocation),
+                          Command = dynamic_command(Allocation,
+                                                    1,
+                                                    desired(DeviceId)),
+                          application:set_env(vpn,
+                                              dynamic_pair_test_fail_role,
+                                              client),
+
+                          ?assertMatch(
+                             {error,
+                              {dynamic_pair_establishment_timeout, _}},
+                             vpn_provisioning:apply_dynamic(DeviceId, Command)),
+                          application:unset_env(vpn,
+                                                dynamic_pair_test_fail_role),
+                          ?assertEqual({error, not_found},
+                                       vpn_peer_registry:get(ClientId)),
+                          ?assertEqual({error, not_found},
+                                       vpn_peer_registry:get(GatewayId)),
+                          ?assertEqual(false,
+                                       vpn_manager:peer_running(ClientId)),
+                          ?assertEqual(false,
+                                       vpn_manager:peer_running(GatewayId)),
+                          ?assertEqual(
+                             {error, not_found},
+                             vpn_dynamic_identity_factory_test_provider:lookup(
+                               maps:get(allocation_id, Allocation))),
+
+                          ?assertMatch(
+                             {ok, #{operation := upsert}},
+                             vpn_provisioning:apply_dynamic(DeviceId, Command)),
+                          {ok, ClientEntry} = vpn_peer_registry:get(ClientId),
+                          {ok, GatewayEntry} = vpn_peer_registry:get(GatewayId),
+                          ?assertEqual(1, maps:get(revision, ClientEntry)),
+                          ?assertEqual(1, maps:get(revision, GatewayEntry)),
+                          ?assert(vpn_manager:peer_running(ClientId)),
+                          ?assert(vpn_manager:peer_running(GatewayId)),
+
+                          Update = dynamic_command(
+                                     Allocation,
+                                     2,
+                                     (desired(DeviceId))#{
+                                         profile_id => replacement_profile}),
+                          application:set_env(vpn,
+                                              dynamic_pair_test_fail_profile,
+                                              replacement_profile),
+                          ?assertMatch(
+                             {error,
+                              {dynamic_pair_establishment_timeout, _}},
+                             vpn_provisioning:apply_dynamic(DeviceId, Update)),
+                          application:unset_env(
+                            vpn,
+                            dynamic_pair_test_fail_profile),
+                          {ok, RestoredClient} =
+                              vpn_peer_registry:get(ClientId),
+                          {ok, RestoredGateway} =
+                              vpn_peer_registry:get(GatewayId),
+                          ?assertEqual(1, maps:get(revision, RestoredClient)),
+                          ?assertEqual(1, maps:get(revision, RestoredGateway)),
+                          ?assertEqual(default_user,
+                                       maps:get(profile_id, RestoredClient)),
+                          ?assert(vpn_manager:peer_running(ClientId)),
+                          ?assert(vpn_manager:peer_running(GatewayId)),
+                          ?assertMatch(
+                             {ok, #{operation := upsert}},
+                             vpn_provisioning:apply_dynamic(DeviceId, Update)),
+                          {ok, UpdatedClient} = vpn_peer_registry:get(ClientId),
+                          {ok, UpdatedGateway} = vpn_peer_registry:get(GatewayId),
+                          ?assertEqual(2, maps:get(revision, UpdatedClient)),
+                          ?assertEqual(2, maps:get(revision, UpdatedGateway)),
+                          ?assertEqual(replacement_profile,
+                                       maps:get(profile_id, UpdatedClient))
+                      end)]
+     end}.
+
 pair_is_registered_started_and_idempotent_test_() ->
     {setup,
      fun setup/0,
@@ -532,6 +764,10 @@ failed_pair_start_rolls_registry_back_test_() ->
 invalid_request_test() ->
     ?assertEqual({error, invalid_dynamic_pair_request},
                  vpn_dynamic_pair:ensure(undefined, #{})),
+    ?assertEqual({error, invalid_dynamic_pair_provision_request},
+                 vpn_dynamic_pair:provision(undefined, #{}, #{})),
+    ?assertEqual({error, invalid_dynamic_pair_provision_metadata},
+                 vpn_dynamic_pair:provision(<<"device">>, #{}, #{})),
     ?assertEqual({error, invalid_device_id}, vpn_dynamic_pair:status(undefined)),
     ?assertEqual({error, invalid_dynamic_pair_decommission_request},
                  vpn_dynamic_pair:decommission(undefined, #{})),
@@ -599,11 +835,20 @@ cleanup(#{root := Root, pids := Pids}) ->
                    runtime_config_resolver,
                    dynamic_identity_factory_module,
                    dynamic_identity_test_bundle,
+                   dynamic_identity_test_ensure_bundle,
                    dynamic_runtime_config_defaults,
                    dynamic_pair_reconcile,
-                   dynamic_pair_test_fail_role]),
+                   dynamic_pair_test_fail_role,
+                   dynamic_pair_test_fail_profile]),
     remove_tree(Root),
     ok.
+
+dynamic_command(Allocation, Revision, Desired) ->
+    #{peer_id => maps:get(client_peer_id, Allocation),
+      revision => Revision,
+      operation => upsert,
+      source => ias,
+      desired_state => Desired}.
 
 desired(DeviceId) ->
     #{device_id => DeviceId,

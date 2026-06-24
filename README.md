@@ -161,6 +161,13 @@ produce client and gateway runtime maps together. Identity paths come only from
 `vpn_dynamic_identity_factory`; transport and identity paths supplied through
 IAS desired state or dynamic defaults are rejected/ignored.
 
+`vpn_provisioning:apply_dynamic/2` now provides the preferred single-RPC IAS
+bootstrap for a reserved Device. It validates a positive revision, binds the
+allocated client peer, writes final revision metadata to both sides before
+startup, waits for both handshakes, and commits the provisioning head only after
+success. The older `vpn_dynamic_pair:ensure/2` plus `vpn_provisioning:apply/1`
+sequence remains temporarily available for IAS migration compatibility.
+
 `vpn_dynamic_pair:ensure/2` now consumes that resolved pair, writes both sides
 through one registry batch, reconciles the gateway and client, and waits for
 both certificate-control handshakes to become `established`. Repeated calls for

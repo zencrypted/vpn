@@ -1,16 +1,26 @@
 %%%-------------------------------------------------------------------
-%% @doc Owns runtime reconciliation and decommission for one dynamic pair.
+%% @doc Owns provisioning, runtime reconciliation, and decommission for one
+%% dynamic pair.
 %%
 %% Reservation remains explicit and VPN-owned. This module consumes an active
 %% allocation, ensures its development identity bundle, resolves both runtime
 %% configurations, writes them to the registry as one batch, and waits until
-%% both certificate-control handshakes are established. A separate fail-closed
-%% decommission operation removes only a quiesced pair and releases its
-%% allocator/optional development identity resources.
+%% both certificate-control handshakes are established. The revisioned
+%% provision/3 path performs compensating identity cleanup on failed first
+%% bootstrap. A separate fail-closed decommission operation removes only a
+%% quiesced pair and releases its allocator/optional development identity
+%% resources.
 %%%-------------------------------------------------------------------
 -module(vpn_dynamic_pair).
 
+-define(NON_RESTART_FIELDS,
+        [revision,
+         provisioning_source,
+         last_provisioning_operation,
+         updated_at]).
+
 -export([ensure/2,
+         provision/3,
          status/1,
          await_established/1,
          await_stopped/1,
@@ -29,6 +39,31 @@ ensure(DeviceId, Desired)
     end;
 ensure(_DeviceId, _Desired) ->
     {error, invalid_dynamic_pair_request}.
+
+%% @doc Materialize and establish a dynamic pair with final provisioning metadata.
+%%
+%% Unlike ensure/2, this boundary is intended to run inside vpn_provisioning's
+%% serialized revision transaction. Both registry entries receive the accepted
+%% revision before either peer becomes visible as successfully provisioned.
+-spec provision(binary(), map(), map()) -> {ok, map()} | {error, term()}.
+provision(DeviceId, Desired, Metadata0)
+  when is_binary(DeviceId), byte_size(DeviceId) > 0,
+       is_map(Desired), is_map(Metadata0) ->
+    case validate_provisioning_metadata(Metadata0) of
+        {ok, Metadata} ->
+            case vpn_peer_allocator:lookup(DeviceId) of
+                {ok, Allocation} ->
+                    provision_allocated_pair(Allocation, Desired, Metadata);
+                {error, not_found} ->
+                    {error, {dynamic_peer_allocation_required, DeviceId}};
+                {error, _} = Error ->
+                    Error
+            end;
+        {error, _} = Error ->
+            Error
+    end;
+provision(_DeviceId, _Desired, _Metadata) ->
+    {error, invalid_dynamic_pair_provision_request}.
 
 status(DeviceId) when is_binary(DeviceId), byte_size(DeviceId) > 0 ->
     case vpn_peer_allocator:lookup(DeviceId) of
@@ -106,6 +141,35 @@ ensure_allocated_pair(Allocation, Desired) ->
             Error
     end.
 
+provision_allocated_pair(Allocation, Desired0, Metadata) ->
+    case identity_presence(Allocation) of
+        {ok, Presence} ->
+            case ensure_identity(Allocation) of
+                {ok, _Bundle} ->
+                    Desired = normalize_provisioning_desired(Desired0),
+                    case vpn_runtime_config_resolver:resolve_pair(
+                           maps:get(device_id, Allocation), Desired) of
+                        {ok, Pair} ->
+                            case reconcile_pair(Allocation, Pair, Metadata) of
+                                {ok, _} = Ok ->
+                                    Ok;
+                                {error, _} = Error ->
+                                    rollback_provision_identity(Presence,
+                                                                Allocation,
+                                                                Error)
+                            end;
+                        {error, _} = Error ->
+                            rollback_provision_identity(Presence,
+                                                        Allocation,
+                                                        Error)
+                    end;
+                {error, _} = Error ->
+                    rollback_provision_identity(Presence, Allocation, Error)
+            end;
+        {error, _} = Error ->
+            Error
+    end.
+
 ensure_identity(Allocation) ->
     Provider = application:get_env(vpn,
                                    dynamic_identity_factory_module,
@@ -119,9 +183,91 @@ ensure_identity(Allocation) ->
             {error, {dynamic_identity_factory_failed, Provider, Class, Reason}}
     end.
 
-reconcile_pair(Allocation, #{client := Client0, gateway := Gateway0}) ->
-    Client = Client0#{provisioning_source => dynamic_pair},
-    Gateway = Gateway0#{provisioning_source => dynamic_pair},
+identity_presence(Allocation) ->
+    AllocationId = maps:get(allocation_id, Allocation),
+    Provider = application:get_env(vpn,
+                                   dynamic_identity_factory_module,
+                                   vpn_dynamic_identity_factory),
+    try Provider:lookup(AllocationId) of
+        {ok, _Bundle} -> {ok, present};
+        {error, dynamic_identity_not_found} -> {ok, absent};
+        {error, not_found} -> {ok, absent};
+        {error, Reason} -> {error, {dynamic_identity_lookup_failed, Reason}};
+        Other -> {error, {invalid_dynamic_identity_provider_result, Other}}
+    catch
+        Class:Reason ->
+            {error, {dynamic_identity_provider_failed,
+                     Provider,
+                     Class,
+                     Reason}}
+    end.
+
+rollback_provision_identity(present, _Allocation, Error) ->
+    Error;
+rollback_provision_identity(absent, Allocation, {error, ProvisionReason}) ->
+    case release_identity_after_failed_provision(Allocation) of
+        ok ->
+            {error, ProvisionReason};
+        {error, CleanupReason} ->
+            {error, {dynamic_pair_provision_rollback_failed,
+                     ProvisionReason,
+                     CleanupReason}}
+    end.
+
+release_identity_after_failed_provision(Allocation) ->
+    AllocationId = maps:get(allocation_id, Allocation),
+    Provider = application:get_env(vpn,
+                                   dynamic_identity_factory_module,
+                                   vpn_dynamic_identity_factory),
+    try Provider:release(AllocationId) of
+        {ok, _SafeResult} -> ok;
+        {error, dynamic_identity_not_found} -> ok;
+        {error, not_found} -> ok;
+        {error, Reason} -> {error, {dynamic_identity_cleanup_failed, Reason}};
+        Other -> {error, {invalid_dynamic_identity_release_result, Other}}
+    catch
+        error:undef ->
+            {error, {dynamic_identity_release_unsupported, Provider}};
+        Class:Reason ->
+            {error, {dynamic_identity_release_failed,
+                     Provider,
+                     Class,
+                     Reason}}
+    end.
+
+normalize_provisioning_desired(Desired) ->
+    AuthorizationChanged = maps:is_key(authorization_mode, Desired) orelse
+                           maps:is_key(authorized, Desired),
+    ReasonProvided = maps:is_key(authorization_reason, Desired),
+    case AuthorizationChanged andalso not ReasonProvided of
+        true -> Desired#{authorization_reason => undefined};
+        false -> Desired
+    end.
+
+validate_provisioning_metadata(#{revision := Revision,
+                                 source := Source,
+                                 operation := upsert} = Metadata)
+  when is_integer(Revision), Revision > 0,
+       (is_atom(Source) orelse is_binary(Source)) ->
+    Allowed = [revision, source, operation],
+    case maps:keys(maps:without(Allowed, Metadata)) of
+        [] ->
+            {ok, #{revision => Revision,
+                   provisioning_source => Source,
+                   last_provisioning_operation => upsert,
+                   updated_at => erlang:system_time(second)}};
+        Unknown ->
+            {error, {unknown_dynamic_pair_provision_metadata, Unknown}}
+    end;
+validate_provisioning_metadata(_Metadata) ->
+    {error, invalid_dynamic_pair_provision_metadata}.
+
+reconcile_pair(Allocation, Pair) ->
+    reconcile_pair(Allocation, Pair, #{provisioning_source => dynamic_pair}).
+
+reconcile_pair(Allocation, #{client := Client0, gateway := Gateway0}, Metadata) ->
+    Client = maps:merge(Client0, Metadata),
+    Gateway = maps:merge(Gateway0, Metadata),
     case validate_pair_ownership(Allocation, Client, Gateway) of
         ok ->
             case reconcile_options() of
@@ -137,19 +283,28 @@ reconcile_pair(Allocation, #{client := Client0, gateway := Gateway0}) ->
 register_and_wait(Allocation, Client, Gateway, Options) ->
     ClientId = maps:get(id, Client),
     GatewayId = maps:get(id, Gateway),
-    Previous = registry_snapshot([ClientId, GatewayId]),
+    PeerIds = [ClientId, GatewayId],
+    Previous = registry_snapshot(PeerIds),
+    PreviousRuntime = runtime_snapshot(PeerIds),
     case pair_is_current(Client, Gateway) andalso
          pair_established(ClientId, GatewayId) of
         true ->
             {ok, (pair_status(Allocation))#{outcome => unchanged}};
         false ->
+            Transitions = runtime_transition_expectations(
+                            [Gateway, Client],
+                            Previous,
+                            PreviousRuntime),
             case vpn_peer_registry:put_many([Gateway, Client]) of
                 {ok, _SafeEntries} ->
-                    case wait_for_established(ClientId, GatewayId, Options) of
+                    case wait_for_provisioned_pair(ClientId,
+                                                   GatewayId,
+                                                   Transitions,
+                                                   Options) of
                         ok ->
                             {ok, (pair_status(Allocation))#{outcome => reconciled}};
                         {error, _} = Error ->
-                            rollback_registry([ClientId, GatewayId], Previous),
+                            rollback_registry(PeerIds, Previous),
                             Error
                     end;
                 {error, _} = Error ->
@@ -204,18 +359,99 @@ config_matches(Expected) ->
 registry_snapshot(PeerIds) ->
     [{PeerId, vpn_peer_registry:config(PeerId)} || PeerId <- PeerIds].
 
+runtime_snapshot(PeerIds) ->
+    [{PeerId, vpn_manager:find_peer(PeerId)} || PeerId <- PeerIds].
+
+runtime_transition_expectations(Configs, PreviousRegistry, PreviousRuntime) ->
+    maps:from_list(
+      [{maps:get(id, Config),
+        #{restart_required => restart_required(Config, PreviousRegistry),
+          previous_pid => previous_pid(maps:get(id, Config), PreviousRuntime)}}
+       || Config <- Configs]).
+
+restart_required(Config, PreviousRegistry) ->
+    PeerId = maps:get(id, Config),
+    case lists:keyfind(PeerId, 1, PreviousRegistry) of
+        {PeerId, {ok, PreviousConfig}} ->
+            restart_projection(PreviousConfig) =/= restart_projection(Config);
+        {PeerId, {error, not_found}} ->
+            true;
+        false ->
+            true
+    end.
+
+restart_projection(Config) ->
+    maps:without(?NON_RESTART_FIELDS, Config).
+
+previous_pid(PeerId, PreviousRuntime) ->
+    case lists:keyfind(PeerId, 1, PreviousRuntime) of
+        {PeerId, {ok, Pid}} -> Pid;
+        _ -> undefined
+    end.
+
 rollback_registry(PeerIds, Previous) ->
     _ = vpn_peer_registry:remove_many(PeerIds),
+    _ = vpn_peer_reconciler:reconcile_now(),
     PreviousConfigs = [Config || {_PeerId, {ok, Config}} <- Previous],
     case PreviousConfigs of
-        [] -> ok;
-        _ -> _ = vpn_peer_registry:put_many(PreviousConfigs), ok
-    end,
-    _ = vpn_peer_reconciler:reconcile_now(),
-    ok.
+        [] ->
+            ok;
+        _ ->
+            _ = vpn_peer_registry:put_many(PreviousConfigs),
+            _ = vpn_peer_reconciler:reconcile_now(),
+            ok
+    end.
 
-wait_for_established(ClientId, GatewayId, Options) ->
-    wait_for_pair_state(ClientId, GatewayId, established, Options).
+wait_for_provisioned_pair(ClientId, GatewayId, Transitions,
+                          #{establish_timeout_ms := TimeoutMs,
+                            poll_interval_ms := PollMs}) ->
+    Deadline = erlang:monotonic_time(millisecond) + TimeoutMs,
+    wait_for_provisioned_pair(ClientId,
+                              GatewayId,
+                              Transitions,
+                              Deadline,
+                              PollMs).
+
+wait_for_provisioned_pair(ClientId, GatewayId, Transitions, Deadline, PollMs) ->
+    case pair_established(ClientId, GatewayId) andalso
+         runtime_transitions_complete(Transitions) of
+        true ->
+            ok;
+        false ->
+            case erlang:monotonic_time(millisecond) >= Deadline of
+                true ->
+                    pair_state_timeout(ClientId, GatewayId, established);
+                false ->
+                    timer:sleep(PollMs),
+                    wait_for_provisioned_pair(ClientId,
+                                              GatewayId,
+                                              Transitions,
+                                              Deadline,
+                                              PollMs)
+            end
+    end.
+
+runtime_transitions_complete(Transitions) ->
+    lists:all(
+      fun({PeerId, Expectation}) ->
+              runtime_transition_complete(PeerId, Expectation)
+      end,
+      maps:to_list(Transitions)).
+
+runtime_transition_complete(PeerId,
+                            #{restart_required := false}) ->
+    vpn_manager:peer_running(PeerId);
+runtime_transition_complete(PeerId,
+                            #{restart_required := true,
+                              previous_pid := undefined}) ->
+    vpn_manager:peer_running(PeerId);
+runtime_transition_complete(PeerId,
+                            #{restart_required := true,
+                              previous_pid := PreviousPid}) ->
+    case vpn_manager:find_peer(PeerId) of
+        {ok, CurrentPid} -> CurrentPid =/= PreviousPid;
+        {error, not_found} -> false
+    end.
 
 wait_for_pair_state(ClientId, GatewayId, State,
                     #{establish_timeout_ms := TimeoutMs,

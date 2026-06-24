@@ -288,6 +288,50 @@ Still outstanding before production use:
 - revision and decommission tombstones must survive process/node restart;
 - durable allocation recovery must replace the volatile reservation process.
 
+### Stage 6.5 — single-RPC revisioned dynamic bootstrap (completed in VPN)
+
+`vpn_provisioning:apply_dynamic/2` is the additive provisioning boundary for a
+reserved dynamic pair:
+
+```erlang
+vpn_provisioning:apply_dynamic(DeviceId, Command).
+```
+
+It accepts only a positive-revision `upsert` whose `peer_id` is the client peer
+owned by the Device allocation. The Device identifier is normalized into the
+desired state and bound into the command digest. The provisioning process then
+serializes one operation that:
+
+1. validates revision ordering and idempotency;
+2. verifies the Device-to-client allocation binding;
+3. creates or reuses the dynamic identity bundle;
+4. resolves both client and gateway runtime configurations;
+5. writes both registry entries with the final IAS revision/source/operation
+   metadata in one batch;
+6. waits for any required peer-process replacement and for both
+   certificate-control handshakes to become established;
+7. commits the provisioning head only after the intended runtime generation is
+   established.
+
+A duplicate command returns `unchanged`. Stale or conflicting revisions are
+rejected before runtime mutation. Resolution, registry, startup, or handshake
+failure restores the previous registry/runtime state. If this operation created
+a development identity bundle, it also attempts to remove that bundle on
+rollback. The allocation itself remains reserved so the same revision can be
+retried safely.
+
+The former compatibility path remains available:
+
+```text
+vpn_dynamic_pair:ensure/2
+    -> vpn_provisioning:apply/1
+```
+
+It is retained only so an older IAS release can still operate while IAS is
+migrated. New IAS dynamic `upsert` delivery should use `apply_dynamic/2`; the
+separate allocator reservation remains intentional because a reserved-only
+allocation does not start peers or expose a revision-zero runtime pair.
+
 ### Stage 7 — dynamic pair decommission (completed)
 
 `vpn_dynamic_pair:decommission/1,2` is the explicit resource-removal boundary.
@@ -330,7 +374,7 @@ private-key bodies, session keys, replay windows, ECDH material, or packet state
 Release, tombstone, and migration semantics must be coordinated with the durable
 provisioning projection described in `TECHNICAL-DEBT.md`.
 
-## Current non-goals after Stage 7
+## Current non-goals after the single-RPC bootstrap and Stage 7
 
 The completed dynamic allocation, IAS cutover, synchronized lifecycle, and
 explicit decommission stages do not:

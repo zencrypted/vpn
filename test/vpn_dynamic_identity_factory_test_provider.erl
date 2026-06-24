@@ -7,7 +7,22 @@ ensure(Allocation) when is_map(Allocation) ->
     case application:get_env(vpn, dynamic_identity_test_bundle) of
         {ok, #{allocation_id := AllocationId} = Bundle} -> {ok, Bundle};
         {ok, _Other} -> {error, allocation_mismatch};
-        undefined -> {error, not_found}
+        undefined ->
+            case application:get_env(vpn, dynamic_identity_test_ensure_bundle) of
+                {ok, Bundle0} when is_map(Bundle0) ->
+                    Bundle = Bundle0#{allocation_id => AllocationId,
+                                      device_id => maps:get(device_id, Allocation),
+                                      client => (maps:get(client, Bundle0))#{
+                                          peer_id => maps:get(client_peer_id, Allocation)},
+                                      gateway => (maps:get(gateway, Bundle0))#{
+                                          peer_id => maps:get(gateway_peer_id, Allocation)}},
+                    application:set_env(vpn, dynamic_identity_test_bundle, Bundle),
+                    {ok, Bundle};
+                undefined ->
+                    {error, not_found};
+                {ok, _Other} ->
+                    {error, invalid_ensure_bundle}
+            end
     end;
 ensure(_Allocation) ->
     {error, invalid_allocation}.

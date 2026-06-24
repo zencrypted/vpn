@@ -7,11 +7,17 @@
 
 start_link(Config) ->
     Role = maps:get(allocation_role, Config, undefined),
-    case application:get_env(vpn, dynamic_pair_test_fail_role) of
-        {ok, Role} ->
-            {error, {dynamic_pair_test_start_failed, Role}};
+    ProfileId = maps:get(profile_id, Config, undefined),
+    case application:get_env(vpn, dynamic_pair_test_fail_profile) of
+        {ok, ProfileId} ->
+            {error, {dynamic_pair_test_start_failed, {profile, ProfileId}}};
         _ ->
-            gen_server:start_link(?MODULE, Config, [])
+            case application:get_env(vpn, dynamic_pair_test_fail_role) of
+                {ok, Role} ->
+                    {error, {dynamic_pair_test_start_failed, Role}};
+                _ ->
+                    gen_server:start_link(?MODULE, Config, [])
+            end
     end.
 
 init(Config) ->

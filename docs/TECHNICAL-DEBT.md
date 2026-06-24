@@ -70,13 +70,26 @@ must survive process and node restarts without persisting private or session
 material. See
 [`DYNAMIC-PEER-ALLOCATION.md`](DYNAMIC-PEER-ALLOCATION.md).
 
+## Completed — TD-018 single-RPC revisioned dynamic bootstrap
+
+`vpn_provisioning:apply_dynamic/2` removes the former failure window between
+`vpn_dynamic_pair:ensure/2` and the following revisioned `upsert`. A reserved
+Device is now materialized and established through one serialized provisioning
+call. Both client and gateway registry entries receive the accepted revision
+metadata before startup, and the provisioning head is committed only after
+required process replacement and both handshakes establish. Failures restore previous registry/runtime state and best-effort remove
+identity material created by the failed operation. The old
+two-step APIs remain temporarily available for IAS migration compatibility.
+
 ## Deferred — Durable provisioning and allocation projection
 
 The VPN provisioning registry is currently an in-memory runtime projection. A
 process or node restart rebuilds bootstrap entries from trusted application
-configuration but does not retain IAS-applied revisions, tombstones, revocations,
-or provisioning history. This is intentional until the IAS-to-VPN command format
-and delivery path are exercised end to end.
+configuration but does not retain IAS-applied revisions, tombstones,
+revocations, or provisioning history. The command format and single-RPC
+delivery boundary are now stable enough for the next stage; durability remains
+deferred so the persistent format can be introduced as a separate, reviewable
+recovery change.
 
 The target ownership model is:
 
@@ -88,8 +101,7 @@ identity and policy state -> revisioned desired state
                               -> reconciled processes
 ```
 
-Once IAS command generation and delivery are stable, add a minimal durable
-projection with these constraints:
+The next stage should add a minimal durable projection with these constraints:
 
 - persist the last accepted revision and canonical command identity per peer;
 - persist remove tombstones and revoked state so stale commands cannot resurrect
@@ -125,12 +137,14 @@ Add policy states `disabled`, `optional`, and `required`. A required second fact
 must block session activation until an explicit provider succeeds. Provider
 identity, challenge state, result, and expiry must be auditable.
 
-## TD-007 — IAS revocation and policy synchronization
+## TD-007 — Production authentication for IAS delivery
 
-Connect IAS output to `vpn_provisioning` through an authenticated delivery
-adapter. Synchronize certificate revocation, Device disablement, certificate
-rotation, authorization denial, and identity reissue to configured and active
-VPN peers. Delivery must preserve revision ordering and idempotency semantics.
+IAS lifecycle synchronization, revision ordering, idempotency, dynamic
+provisioning, disable/enable, revoke, and decommission are implemented. The
+remaining item is production authentication and hardening of the delivery
+transport, including node identity, authorization of provisioning callers, and
+operational key/cookie rotation. Durable replay and restart recovery are tracked
+separately by the projection work above.
 
 ## TD-008 — Safe import-root resolution
 
