@@ -77,14 +77,22 @@ resolve_dynamic_allocation(PeerId, Desired) ->
 resolve_dynamic_pair(Allocation, Desired) ->
     case dynamic_runtime_defaults() of
         {ok, Defaults} ->
-            Client = dynamic_runtime_config(client, Allocation, Desired, Defaults),
-            Gateway = dynamic_runtime_config(gateway, Allocation, Desired, Defaults),
-            case validate_dynamic_pair(Client, Gateway, Desired) of
-                ok ->
-                    {ok, #{allocation_id => maps:get(allocation_id, Allocation),
-                           device_id => maps:get(device_id, Allocation),
-                           client => Client,
-                           gateway => Gateway}};
+            case dynamic_identity_bundle(Allocation) of
+                {ok, IdentityBundle} ->
+                    ClientSpec = dynamic_runtime_config(client,
+                                                        Allocation,
+                                                        Desired,
+                                                        Defaults,
+                                                        IdentityBundle),
+                    GatewaySpec = dynamic_runtime_config(gateway,
+                                                         Allocation,
+                                                         Desired,
+                                                         Defaults,
+                                                         IdentityBundle),
+                    materialize_dynamic_pair(Allocation,
+                                             ClientSpec,
+                                             GatewaySpec,
+                                             Desired);
                 {error, _} = Error ->
                     Error
             end;
@@ -92,7 +100,7 @@ resolve_dynamic_pair(Allocation, Desired) ->
             Error
     end.
 
-dynamic_runtime_config(Role, Allocation, Desired, Defaults) ->
+dynamic_runtime_config(Role, Allocation, Desired, Defaults, IdentityBundle) ->
     Endpoint = maps:get(Role, Allocation),
     Common = maps:get(common, Defaults, #{}),
     RoleDefaults = maps:get(Role, Defaults, #{}),
@@ -112,23 +120,106 @@ dynamic_runtime_config(Role, Allocation, Desired, Defaults) ->
           allocation_slot => maps:get(slot, Allocation),
           allocation_generation => maps:get(generation, Allocation),
           allocation_role => Role},
+    Identity = dynamic_identity_refs(Role, IdentityBundle),
     Base = maps:merge(TrustedDefaults,
-                      maps:merge(Transport, AllocationMetadata)),
+                      maps:merge(Transport,
+                                 maps:merge(AllocationMetadata, Identity))),
     case Role of
         client -> maps:merge(Base, dynamic_client_identity(Desired));
         gateway -> Base
     end.
 
-validate_dynamic_pair(Client, Gateway, Desired) ->
-    case validate_direct_runtime(Client) of
-        {ok, _} ->
-            case validate_direct_runtime(Gateway) of
-                {ok, _} -> validate_certificate_fingerprint(Desired, Client);
+materialize_dynamic_pair(Allocation, ClientSpec, GatewaySpec, Desired) ->
+    case vpn_session_config:from_spec(ClientSpec) of
+        {ok, #{peer_config := Client}} ->
+            case validate_direct_runtime(GatewaySpec) of
+                {ok, Gateway} ->
+                    case validate_certificate_fingerprint(Desired, Client) of
+                        ok ->
+                            {ok, #{allocation_id => maps:get(allocation_id, Allocation),
+                                   device_id => maps:get(device_id, Allocation),
+                                   client => Client,
+                                   gateway => Gateway}};
+                        {error, _} = Error -> Error
+                    end;
                 {error, _} = Error -> Error
             end;
-        {error, _} = Error ->
-            Error
+        {error, Reason} ->
+            {error, {dynamic_client_identity_failed, Reason}}
     end.
+
+dynamic_identity_bundle(Allocation) ->
+    AllocationId = maps:get(allocation_id, Allocation),
+    Provider = application:get_env(vpn,
+                                   dynamic_identity_factory_module,
+                                   vpn_dynamic_identity_factory),
+    try Provider:lookup(AllocationId) of
+        {ok, Bundle} -> validate_dynamic_identity_bundle(Allocation, Bundle);
+        {error, LookupReason} ->
+            {error, {dynamic_identity_required, AllocationId, LookupReason}};
+        Other ->
+            {error, {invalid_dynamic_identity_provider_result, Other}}
+    catch
+        Class:CatchReason ->
+            {error, {dynamic_identity_provider_failed,
+                     Provider,
+                     Class,
+                     CatchReason}}
+    end.
+
+validate_dynamic_identity_bundle(
+  Allocation,
+  #{allocation_id := AllocationId,
+    device_id := DeviceId,
+    client := #{peer_id := ClientPeerId,
+                ovpn_path := OvpnPath,
+                ca_certificate_path := ClientCaPath},
+    gateway := #{peer_id := GatewayPeerId,
+                 certificate_path := GatewayCertPath,
+                 private_key_path := GatewayKeyPath,
+                 ca_certificate_path := GatewayCaPath}} = Bundle) ->
+    case {AllocationId =:= maps:get(allocation_id, Allocation),
+          DeviceId =:= maps:get(device_id, Allocation),
+          ClientPeerId =:= maps:get(client_peer_id, Allocation),
+          GatewayPeerId =:= maps:get(gateway_peer_id, Allocation),
+          valid_identity_path(OvpnPath),
+          valid_identity_path(ClientCaPath),
+          valid_identity_path(GatewayCertPath),
+          valid_identity_path(GatewayKeyPath),
+          valid_identity_path(GatewayCaPath)} of
+        {true, true, true, true, true, true, true, true, true} ->
+            {ok, Bundle};
+        {false, _, _, _, _, _, _, _, _} ->
+            {error, dynamic_identity_allocation_mismatch};
+        {_, false, _, _, _, _, _, _, _} ->
+            {error, dynamic_identity_allocation_mismatch};
+        {_, _, false, _, _, _, _, _, _} ->
+            {error, dynamic_identity_allocation_mismatch};
+        {_, _, _, false, _, _, _, _, _} ->
+            {error, dynamic_identity_allocation_mismatch};
+        _ ->
+            {error, invalid_dynamic_identity_bundle}
+    end;
+validate_dynamic_identity_bundle(_Allocation, _Bundle) ->
+    {error, invalid_dynamic_identity_bundle}.
+
+valid_identity_path(Path) when is_list(Path) -> Path =/= [];
+valid_identity_path(Path) when is_binary(Path) -> byte_size(Path) > 0;
+valid_identity_path(_) -> false.
+
+dynamic_identity_refs(client,
+                      #{client := #{ovpn_path := OvpnPath,
+                                    ca_certificate_path := CaPath}}) ->
+    #{ovpn_path => OvpnPath,
+      handshake_remote_ca_certificate_path => CaPath};
+dynamic_identity_refs(gateway,
+                      #{gateway := #{certificate_path := CertPath,
+                                     private_key_path := KeyPath,
+                                     ca_certificate_path := CaPath}}) ->
+    #{certificate_path => CertPath,
+      private_key_path => KeyPath,
+      ca_certificate_path => CaPath,
+      handshake_remote_ca_certificate_path => CaPath}.
 
 dynamic_runtime_defaults() ->
     case application:get_env(vpn, dynamic_runtime_config_defaults) of
@@ -273,10 +364,6 @@ allowed_dynamic_default_keys() ->
      peer_module,
      mode,
      psk,
-     certificate_path,
-     private_key_path,
-     ca_certificate_path,
-     ovpn_path,
      authorization_mode,
      authorized,
      authorization_reason,
@@ -289,7 +376,6 @@ allowed_dynamic_default_keys() ->
      auto_rekey_check_interval_ms,
      auto_rekey_failure_cooldown_ms,
      auto_rekey_jitter_ms,
-     handshake_remote_ca_certificate_path,
      debug_replay_controls,
      profile_id,
      certificate_fingerprint,

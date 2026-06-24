@@ -45,22 +45,27 @@ state changes, and explicit revoke reasons are preserved.
 
 ## In progress — Dynamic peer allocation
 
-The first two stages are complete. `vpn_peer_allocator` reserves a unique
+The first three stages are complete. `vpn_peer_allocator` reserves a unique
 binary client/gateway peer pair and non-overlapping TUN, address, and UDP
 resources for each binary IAS Device ID. Reservations are idempotent while the
 allocator process remains alive and intentionally do not contain identity or
 session secrets.
 
-`vpn_runtime_config_resolver` now has a `dynamic_allocator` mode and a
-lookup-only `resolve_pair/2` API. It converts an existing reservation into
-validated client and gateway runtime maps while rejecting Device mismatches and
-all transport ownership in trusted defaults or IAS desired state. The resolver
-does not yet create identity material or start the pair.
+`vpn_runtime_config_resolver` has a `dynamic_allocator` mode and a lookup-only
+`resolve_pair/2` API. It converts an existing reservation into validated client
+and gateway runtime maps while rejecting Device mismatches and transport or
+identity ownership in trusted defaults or IAS desired state.
+
+`vpn_dynamic_identity_factory` now creates development-only client OVPN and
+gateway RSA identity bundles under the Git-ignored `local/dynamic/` tree. It
+binds certificate CNs to binary allocated peer IDs, validates trust and key
+ownership, rejects partial or unsafe bundles, and exposes only file references
+and public fingerprints. The resolver consumes those references but still does
+not write or start the pair.
 
 The allocator is still volatile. The remaining work is tracked in
 [`DYNAMIC-PEER-ALLOCATION.md`](DYNAMIC-PEER-ALLOCATION.md):
 
-- materialize debug identity and OVPN assets outside the allocator;
 - integrate IAS Device reservation before certificate issuance;
 - reconcile and start both sides of each allocated pair;
 - remove the hard-coded Alice/Bob slot mapping from the normal path;

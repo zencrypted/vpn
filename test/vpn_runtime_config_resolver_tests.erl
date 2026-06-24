@@ -1,6 +1,7 @@
 -module(vpn_runtime_config_resolver_tests).
 
 -include_lib("eunit/include/eunit.hrl").
+-include_lib("kernel/include/file.hrl").
 
 dynamic_allocation_resolver_test_() ->
     {setup,
@@ -10,6 +11,7 @@ dynamic_allocation_resolver_test_() ->
              [?_test(begin
                           DeviceId = <<"device-runtime-a">>,
                           {ok, Allocation} = vpn_peer_allocator:ensure(DeviceId),
+                          ok = install_identity_bundle(Allocation),
                           ClientPeerId = maps:get(client_peer_id, Allocation),
                           GatewayPeerId = maps:get(gateway_peer_id, Allocation),
                           Desired = #{device_id => DeviceId,
@@ -55,6 +57,10 @@ dynamic_allocation_resolver_test_() ->
                                        maps:get(authorization_mode, Gateway)),
                           ?assertEqual(undefined,
                                        maps:get(profile_id, Gateway, undefined)),
+                          ?assertMatch(#{ovpn_identity := #{identity_ready := true}},
+                                       Client),
+                          ?assertEqual(fixture_path("peer_b.crt"),
+                                       maps:get(certificate_path, Gateway)),
                           ?assertEqual(ok, vpn_peer:validate_runtime_config(Client)),
                           ?assertEqual(ok, vpn_peer:validate_runtime_config(Gateway)),
                           ?assertEqual({ok, Client},
@@ -76,9 +82,21 @@ dynamic_allocation_resolver_errors_test_() ->
      fun setup/0,
      fun cleanup/1,
      fun(_Allocator) ->
+             MissingIdentityDevice = <<"device-missing-identity">>,
+             {ok, MissingIdentityAllocation} =
+                 vpn_peer_allocator:ensure(MissingIdentityDevice),
+             MissingAllocationId = maps:get(allocation_id,
+                                            MissingIdentityAllocation),
              [?_assertEqual({error, dynamic_peer_device_id_required},
                             vpn_runtime_config_resolver:resolve(
                               <<"client_dyn_missing">>, #{})),
+              ?_assertEqual({error,
+                             {dynamic_identity_required,
+                              MissingAllocationId,
+                              not_found}},
+                            vpn_runtime_config_resolver:resolve_pair(
+                              MissingIdentityDevice,
+                              #{device_id => MissingIdentityDevice})),
               ?_assertEqual({error,
                              {dynamic_peer_allocation_required,
                               <<"device-not-reserved">>}},
@@ -106,6 +124,23 @@ dynamic_defaults_reject_transport_ownership_test_() ->
                               DeviceId, #{device_id => DeviceId}))]
      end}.
 
+dynamic_defaults_reject_identity_ownership_test_() ->
+    {setup,
+     fun setup/0,
+     fun cleanup/1,
+     fun(_Allocator) ->
+             DeviceId = <<"device-invalid-identity-defaults">>,
+             {ok, _} = vpn_peer_allocator:ensure(DeviceId),
+             application:set_env(vpn,
+                                 dynamic_runtime_config_defaults,
+                                 #{common => (runtime_common_defaults())#{certificate_path => "bad.crt"}}),
+             [?_assertEqual({error,
+                             {dynamic_runtime_transport_or_unknown_key,
+                              certificate_path}},
+                            vpn_runtime_config_resolver:resolve_pair(
+                              DeviceId, #{device_id => DeviceId}))]
+     end}.
+
 binary_dynamic_mode_test() ->
     application:set_env(vpn, runtime_config_resolver, <<"dynamic_allocator">>),
     try
@@ -125,6 +160,9 @@ setup() ->
                           client_udp_port_base => 24000,
                           gateway_udp_port_base => 25000}),
     application:set_env(vpn, runtime_config_resolver, dynamic_allocator),
+    application:set_env(vpn,
+                        dynamic_identity_factory_module,
+                        vpn_dynamic_identity_factory_test_provider),
     application:set_env(vpn,
                         dynamic_runtime_config_defaults,
                         #{common => runtime_common_defaults(),
@@ -148,18 +186,88 @@ cleanup(Pid) ->
     application:unset_env(vpn, dynamic_peer_allocator),
     application:unset_env(vpn, runtime_config_resolver),
     application:unset_env(vpn, dynamic_runtime_config_defaults),
+    application:unset_env(vpn, dynamic_identity_factory_module),
+    case application:get_env(vpn, dynamic_identity_test_root) of
+        {ok, Root} -> remove_tree(Root);
+        undefined -> ok
+    end,
+    application:unset_env(vpn, dynamic_identity_test_bundle),
+    application:unset_env(vpn, dynamic_identity_test_root),
     ok.
 
 runtime_common_defaults() ->
     #{peer_module => vpn_peer,
       mode => tun,
       psk => <<"dynamic-resolver-test-psk">>,
-      certificate_path => "test-dynamic.crt",
-      private_key_path => "test-dynamic.key",
-      ca_certificate_path => "test-ca.crt",
       authorization_mode => development_bypass,
       authorized => true,
       authorization_reason => dynamic_allocator_test}.
+
+install_identity_bundle(Allocation) ->
+    Root = filename:join(os:getenv("TMPDIR", "/tmp"),
+                         lists:flatten(io_lib:format("vpn-dynamic-resolver-~p",
+                                                     [erlang:unique_integer([positive,
+                                                                             monotonic])]))),
+    Keys = filename:join(Root, "keys"),
+    ok = file:make_dir(Root),
+    ok = file:make_dir(Keys),
+    ClientKey = filename:join(Keys, "client.key"),
+    ok = copy_fixture("peer_a.key", ClientKey),
+    ok = file:change_mode(ClientKey, 8#600),
+    OvpnPath = filename:join(Root, "client.ovpn"),
+    {ok, CaPem} = file:read_file(fixture_path("ca.crt")),
+    {ok, CertPem} = file:read_file(fixture_path("peer_a.crt")),
+    Gateway = maps:get(gateway, Allocation),
+    RemotePort = integer_to_binary(maps:get(local_udp_port, Gateway)),
+    Ovpn = iolist_to_binary([
+        "client\n",
+        "dev tun\n",
+        "proto udp\n",
+        "remote 127.0.0.1 ", RemotePort, "\n",
+        "nobind\n",
+        "persist-key\n",
+        "persist-tun\n",
+        "remote-cert-tls server\n",
+        "<ca>\n", CaPem, "</ca>\n",
+        "<cert>\n", CertPem, "</cert>\n",
+        "key keys/client.key\n"
+    ]),
+    ok = file:write_file(OvpnPath, Ovpn),
+    Bundle = #{allocation_id => maps:get(allocation_id, Allocation),
+               device_id => maps:get(device_id, Allocation),
+               client => #{peer_id => maps:get(client_peer_id, Allocation),
+                           ovpn_path => OvpnPath,
+                           ca_certificate_path => fixture_path("ca.crt")},
+               gateway => #{peer_id => maps:get(gateway_peer_id, Allocation),
+                            certificate_path => fixture_path("peer_b.crt"),
+                            private_key_path => fixture_path("peer_b.key"),
+                            ca_certificate_path => fixture_path("ca.crt")}},
+    application:set_env(vpn, dynamic_identity_test_root, Root),
+    application:set_env(vpn, dynamic_identity_test_bundle, Bundle),
+    ok.
+
+fixture_path(Name) ->
+    filename:join([code:priv_dir(vpn), "certs", Name]).
+
+copy_fixture(Name, Destination) ->
+    {ok, Binary} = file:read_file(fixture_path(Name)),
+    file:write_file(Destination, Binary).
+
+remove_tree(Path) ->
+    case file:read_link_info(Path) of
+        {ok, #file_info{type = directory}} ->
+            case file:list_dir(Path) of
+                {ok, Entries} ->
+                    lists:foreach(fun(Entry) ->
+                                          remove_tree(filename:join(Path, Entry))
+                                  end,
+                                  Entries),
+                    file:del_dir(Path);
+                {error, _} -> ok
+            end;
+        {ok, _} -> file:delete(Path);
+        {error, _} -> ok
+    end.
 
 stop_registered(Name) ->
     case whereis(Name) of

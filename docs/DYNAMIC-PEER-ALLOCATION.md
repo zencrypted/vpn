@@ -131,42 +131,69 @@ provided by IAS or trusted defaults:
 - client/gateway pairing.
 
 IAS desired state contributes only client profile, certificate fingerprint,
-authorization, enabled, and revoked metadata. Trusted VPN configuration supplies
-non-transport defaults through:
+authorization, enabled, and revoked metadata. Trusted VPN configuration supplies non-transport and non-identity defaults
+through:
 
 ```erlang
 {dynamic_runtime_config_defaults, #{
   common => #{
     mode => tun,
     peer_module => vpn_peer,
-    %% Identity fields remain development placeholders until Stage 3.
-    certificate_path => "...",
-    private_key_path => "...",
-    ca_certificate_path => "...",
-    psk => <<"...">>
-  },
-  client => #{name => <<"Dynamic client">>},
-  gateway => #{
-    name => <<"Dynamic gateway">>,
+    handshake_mode => certificate_control,
     authorization_mode => development_bypass,
     authorized => true
-  }
+  },
+  client => #{name => <<"Dynamic client">>},
+  gateway => #{name => <<"Dynamic gateway">>}
 }}.
 ```
 
-Transport or unknown keys in these defaults fail closed. The resolver validates
-both generated maps with `vpn_peer:validate_runtime_config/1`, but it neither
-writes them to `vpn_peer_registry` nor starts the pair. Stage 3 must replace
-development identity placeholders with peer-specific certificate and OVPN
-material before the dynamic pair becomes runnable.
+Transport, OVPN, certificate, private-key, CA, or unknown keys in these defaults
+fail closed. The resolver consumes peer-specific identity paths only from the
+dynamic identity provider. It materializes the client through
+`vpn_session_config:from_spec/1`, validates the gateway direct runtime map, and
+still neither writes the pair to `vpn_peer_registry` nor starts it.
 
-### Stage 3 — development identity factory
+### Stage 3 — development identity factory (completed)
 
-Create debug-only certificate and OVPN material for both peer IDs in a reserved
-pair. Certificate subjects and handshake peer IDs must match the binary runtime
-IDs. CA and private-key generation remain outside the allocator itself.
-Production identity issuance will continue to belong to the configured CA/IAS
-workflow.
+`vpn_dynamic_identity_factory` provides:
+
+```erlang
+vpn_dynamic_identity_factory:ensure(Allocation).
+vpn_dynamic_identity_factory:lookup(AllocationId).
+vpn_dynamic_identity_factory:release(AllocationId).
+```
+
+The factory is development-only and requires explicit configuration:
+
+```erlang
+{dynamic_identity_factory, #{
+  mode => development,
+  root_dir => "local/dynamic",
+  ca_dir => "local/ca",
+  tool_path => "tools/ensure-dynamic-identity.sh",
+  command_module => vpn_dynamic_identity_command
+}}.
+```
+
+For each allocation it creates or reuses:
+
+- an EC P-384 client key, CSR, CA-signed certificate, and canonical OVPN
+  envelope whose CN equals the allocated client peer ID;
+- an RSA gateway key, CSR, and CA-signed certificate whose CN equals the
+  allocated gateway peer ID;
+- a small versioned manifest containing only allocation/peer metadata.
+
+The factory validates chain trust, key ownership, file type, private-key
+permissions, OVPN key containment, certificate-file/OVPN fingerprint equality,
+and exact CN-to-peer-ID binding. A partial, symlinked, mismatched, or damaged
+bundle fails closed rather than being silently trusted. `release/1` explicitly
+erases the bundle directory; allocator release remains a separate operation.
+
+Returned maps contain file references and certificate fingerprints only. PEM
+bodies and private-key contents are never stored in allocator state, the
+manifest, or public factory results. Production identity issuance still belongs
+to IAS/the configured CA workflow.
 
 ### Stage 4 — IAS reservation integration
 
@@ -206,14 +233,13 @@ private-key bodies, session keys, replay windows, ECDH material, or packet state
 Release, tombstone, and migration semantics must be coordinated with the durable
 provisioning projection described in `TECHNICAL-DEBT.md`.
 
-## Current non-goals after Stage 2
+## Current non-goals after Stage 3
 
-The completed allocator and resolver stages do not:
+The completed allocator, resolver, and development identity stages do not:
 
 - replace `client_a/client_b` in the existing two-user demo;
 - automatically reserve a Device during provisioning;
 - mutate `vpn_peer_registry` with both sides of the pair;
-- generate certificates, OVPN bundles, or private keys;
 - start TUN/UDP processes;
 - survive a VPN application or node restart;
 - accept allocator resource choices from IAS, trusted defaults, or an OVPN file.

@@ -67,6 +67,7 @@ private-key body is never returned or logged.
 - `vpn_manager` - management API for supervised peers.
 - `vpn_peer_registry` - ETS-backed runtime registry bootstrapped from trusted application configuration.
 - `vpn_peer_allocator` - VPN-owned volatile reservations for dynamic client/gateway peer resources.
+- `vpn_dynamic_identity_factory` - development-only dynamic client OVPN and gateway certificate materialization.
 - `vpn_provisioning` - revisioned, idempotent IAS-to-VPN desired-state command contract.
 - `vpn_trust_store` - development CA certificate trust store.
 - `vpn_ovpn_envelope` - canonical OVPN subset constants and value validators.
@@ -153,11 +154,13 @@ compatible gateway-side peer. Unknown slot IDs fail closed. This pool is for a
 two-user demo and is not dynamic production allocation.
 
 Dynamic resolution is lookup-only and fails closed until the Device has an
-active allocation and `dynamic_runtime_config_defaults` supplies trusted
-non-transport runtime defaults. The resolver exposes
-`vpn_runtime_config_resolver:resolve_pair/2` to produce client and gateway
-runtime maps together. It does not generate identity material or start either
-peer; those remain later dynamic-allocation stages.
+active allocation, a validated development identity bundle, and
+`dynamic_runtime_config_defaults` supplies trusted non-transport runtime
+defaults. The resolver exposes `vpn_runtime_config_resolver:resolve_pair/2` to
+produce client and gateway runtime maps together. Identity paths come only from
+`vpn_dynamic_identity_factory`; transport and identity paths supplied through
+IAS desired state or dynamic defaults are rejected/ignored. The resolver still
+does not write the pair to the registry or start either peer.
 
 Use `vpn_provisioning:status/0` for counters and
 `vpn_provisioning:history/1` for bounded per-peer audit history.
@@ -172,6 +175,7 @@ rebar3 compile
 
 ```sh
 rebar3 eunit
+./tools/test-dynamic-identity.sh
 ```
 
 ## Validate an IAS-generated OVPN identity
@@ -370,13 +374,51 @@ vpn_admin:summary().
 
 This is intentionally a bounded demo pool, not a general dynamic allocator.
 
-The first dynamic-allocation stage is now available through
-`vpn_peer_allocator`. It can idempotently reserve a unique binary client/gateway
-peer pair, TUN names, tunnel addresses, and UDP ports for a binary Device ID.
-Reservations are currently volatile and are not yet connected to provisioning,
-certificate generation, or runtime peer startup. The ownership model and staged
-integration plan are documented in
+The first three dynamic-allocation stages are now available through
+`vpn_peer_allocator`, `vpn_runtime_config_resolver`, and
+`vpn_dynamic_identity_factory`. A reserved Device can receive peer-specific
+client OVPN and gateway RSA identity material beneath `local/dynamic/`, and the
+resolver consumes only those validated file references. Reservations and
+identity manifests remain local development state and are not yet connected to
+IAS reservation, registry mutation, peer startup, or durable recovery. The
+ownership model and staged integration plan are documented in
 [`docs/DYNAMIC-PEER-ALLOCATION.md`](docs/DYNAMIC-PEER-ALLOCATION.md).
+
+## Materialize a dynamic development identity bundle
+
+The development identity factory is explicit and disabled outside configured
+debug environments. With `config/sys.debug.config`, reserve a Device and then
+materialize its client/gateway identities:
+
+```erlang
+{ok, Allocation} = vpn_peer_allocator:ensure(<<"device-a">>).
+{ok, Bundle} = vpn_dynamic_identity_factory:ensure(Allocation).
+vpn_dynamic_identity_factory:lookup(maps:get(allocation_id, Allocation)).
+```
+
+The resulting Git-ignored tree is:
+
+```text
+local/dynamic/<allocation-id>/
+├── <client-peer-id>.ovpn
+├── keys/
+├── csr/
+├── certs/
+└── identity.manifest
+```
+
+The client uses a canonical OVPN envelope with a Device-local EC P-384 key. The
+gateway uses a directly configured RSA key/certificate pair compatible with
+`vpn_identity`. Certificate CN values must exactly match the allocated binary
+peer IDs. `ensure/1` reuses a complete valid bundle and rejects partial,
+symlinked, mismatched, or insecure material. To erase one bundle explicitly:
+
+```erlang
+vpn_dynamic_identity_factory:release(maps:get(allocation_id, Allocation)).
+```
+
+Allocator release and identity release are deliberately separate operations.
+Neither public result contains PEM bodies or private-key contents.
 
 ## Demo Guide
 
@@ -538,13 +580,16 @@ Authenticated rekey and replay protection operational
 IAS revisioned runtime provisioning operational
 Two simultaneous trusted IAS client slots operational
 Volatile dynamic peer reservation allocator operational
+Allocator-backed runtime pair resolution operational
+Development dynamic identity factory operational
 ```
 
 The current two-user topology is a bounded development milestone. It proves
 that two distinct IAS Users and Devices can be provisioned into separate trusted
-VPN slots and exchange encrypted payloads concurrently. The allocator core now
-reserves dynamic resources, but allocator-backed runtime resolution, identity
-materialization, IAS integration, and durable assignments remain future stages.
+VPN slots and exchange encrypted payloads concurrently. Dynamic reservation,
+runtime-pair resolution, and development identity materialization now work as
+isolated VPN-owned stages. IAS reservation, registry reconciliation/startup, and
+durable assignments remain future stages.
 See [`docs/DYNAMIC-PEER-ALLOCATION.md`](docs/DYNAMIC-PEER-ALLOCATION.md) and
 [`docs/TECHNICAL-DEBT.md`](docs/TECHNICAL-DEBT.md). Production Device-lock
 enforcement and a real 2FA provider also remain future work.
