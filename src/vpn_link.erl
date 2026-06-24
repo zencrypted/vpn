@@ -70,8 +70,9 @@ start_link(TunName,
 
 start_link(TunName, TunIp, Mode, LocalUdpPort, RemoteIp, RemoteUdpPort,
            PeerId, RemotePeerId, Psk, HandshakeOptions) ->
-    Args = {TunName, TunIp, Mode, LocalUdpPort, RemoteIp, RemoteUdpPort,
-            PeerId, RemotePeerId, Psk, HandshakeOptions},
+    OwnerPid = self(),
+    Args = {OwnerPid, TunName, TunIp, Mode, LocalUdpPort, RemoteIp,
+            RemoteUdpPort, PeerId, RemotePeerId, Psk, HandshakeOptions},
     gen_server:start_link(?MODULE, Args, []).
 
 stop(Pid) ->
@@ -114,11 +115,15 @@ init({psk_required, _TunName, _TunIp, _Mode, _LocalUdpPort, _RemoteIp, _RemoteUd
     {stop, psk_required};
 init({psk_required, _TunName, _TunIp, _Mode, _LocalUdpPort, _RemoteIp, _RemoteUdpPort, _PeerId, _RemotePeerId}) ->
     {stop, psk_required};
-init({TunName, TunIp, Mode, LocalUdpPort, RemoteIp, RemoteUdpPort, PeerId, RemotePeerId, Psk, HandshakeOptions}) ->
+init({OwnerPid, TunName, TunIp, Mode, LocalUdpPort, RemoteIp,
+      RemoteUdpPort, PeerId, RemotePeerId, Psk, HandshakeOptions})
+  when is_pid(OwnerPid) ->
     process_flag(trap_exit, true),
     case vpn_udp:start_link(LocalUdpPort, self()) of
         {ok, UdpPid} ->
-            init_tun(UdpPid, TunName, TunIp, Mode, RemoteIp, RemoteUdpPort, PeerId, RemotePeerId, Psk, HandshakeOptions);
+            init_tun(OwnerPid, UdpPid, TunName, TunIp, Mode, RemoteIp,
+                     RemoteUdpPort, PeerId, RemotePeerId, Psk,
+                     HandshakeOptions);
         {error, Reason} ->
             {stop, Reason}
     end.
@@ -246,11 +251,18 @@ handle_info({'EXIT', TunPid, Reason}, State = #{tun_pid := TunPid}) ->
     {stop, {tun_exit, Reason}, State};
 handle_info({'EXIT', UdpPid, Reason}, State = #{udp_pid := UdpPid}) ->
     {stop, {udp_exit, Reason}, State};
-handle_info({'EXIT', LinkedPid, Reason}, State) ->
+handle_info({'EXIT', OwnerPid, Reason}, State = #{owner_pid := OwnerPid}) ->
     %% vpn_link traps exits so it can close TUN/UDP workers in terminate/2.
-    %% The remaining linked process is its vpn_peer owner. Ignoring that EXIT
-    %% leaves an orphan link holding the UDP port after an abrupt peer death.
-    {stop, {owner_exit, LinkedPid, Reason}, State};
+    %% Only the process that called start_link/10 owns this link. Ports and
+    %% other linked resources may terminate normally during test/runtime
+    %% cleanup and must not be mistaken for the owner.
+    {stop, {owner_exit, OwnerPid, Reason}, State};
+handle_info({'EXIT', LinkedTerm, normal}, State) ->
+    logger:debug("vpn_link ignored normal exit from non-owner ~p",
+                 [LinkedTerm]),
+    {noreply, State};
+handle_info({'EXIT', LinkedTerm, Reason}, State) ->
+    {stop, {linked_resource_exit, LinkedTerm, Reason}, State};
 handle_info(_Message, State) ->
     {noreply, State}.
 
@@ -260,11 +272,13 @@ terminate(_Reason, State) ->
     stop_worker(maps:get(udp_pid, State, undefined), fun vpn_udp:stop/1),
     ok.
 
-init_tun(UdpPid, TunName, TunIp, Mode, RemoteIp, RemoteUdpPort, PeerId, RemotePeerId, Psk, HandshakeOptions) ->
+init_tun(OwnerPid, UdpPid, TunName, TunIp, Mode, RemoteIp,
+         RemoteUdpPort, PeerId, RemotePeerId, Psk, HandshakeOptions) ->
     case vpn_tun:start_link(TunName, TunIp, self(), Mode) of
         {ok, TunPid} ->
             Handshake = vpn_handshake:new(PeerId, RemotePeerId, HandshakeOptions),
-            State = maps:merge(#{udp_pid => UdpPid,
+            State = maps:merge(#{owner_pid => OwnerPid,
+                                 udp_pid => UdpPid,
                                  tun_pid => TunPid,
                                  mode => Mode,
                                  peer_id => normalize_peer_id(PeerId),

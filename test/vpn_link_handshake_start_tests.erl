@@ -71,6 +71,11 @@ link_stops_and_releases_udp_port_when_owner_is_killed_test_() ->
                        after 3000 ->
                            erlang:error(vpn_link_start_timeout)
                        end,
+             Unrelated = spawn(fun() -> receive stop -> ok end end),
+             LinkPid ! {'EXIT', Unrelated, normal},
+             timer:sleep(20),
+             ?assert(is_process_alive(LinkPid)),
+             Unrelated ! stop,
              Monitor = erlang:monitor(process, LinkPid),
              exit(Owner, kill),
              receive
