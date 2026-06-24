@@ -178,8 +178,12 @@ stop_registered(Name) ->
 stop_pid(Pid) when is_pid(Pid) ->
     case is_process_alive(Pid) of
         true ->
-            unlink(Pid),
-            exit(Pid, shutdown),
+            %% The projection may have been started by the EUnit fixture owner
+            %% rather than the current test worker. A shutdown exit would then
+            %% propagate over that link and cancel the remaining fixture tests.
+            %% A normal OTP stop preserves the restart assertion without
+            %% terminating the fixture process.
+            ok = gen_server:stop(Pid, normal, 5000),
             wait_until_stopped(Pid, 50);
         false ->
             ok
