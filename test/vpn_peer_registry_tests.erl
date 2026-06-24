@@ -26,6 +26,7 @@ registry_lifecycle_test_() ->
                                        vpn_peer_registry:get(unknown_peer)),
 
                           RuntimePeer = (peer_config(peer_b))#{device_id => <<"device-b">>,
+                                                            profile_id => default_user,
                                                             authorization_mode => policy,
                                                             authorized => true,
                                                             authorization_reason => profile_allows_vpn},
@@ -34,6 +35,7 @@ registry_lifecycle_test_() ->
                                          enabled := true,
                                          provisioning_source := runtime_api,
                                          device_id := <<"device-b">>,
+                                         profile_id := default_user,
                                          authorized := true},
                                        Added),
                           ?assertNot(contains_key(psk, Added)),

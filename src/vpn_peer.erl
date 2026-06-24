@@ -350,6 +350,7 @@ runtime_config(Config) ->
                remote_udp_port,
                remote_peer_id,
                ovpn_path,
+               profile_id,
                authorization_mode,
                authorized,
                authorization_reason,

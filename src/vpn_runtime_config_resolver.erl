@@ -77,6 +77,7 @@ actual_certificate_fingerprint(PeerConfig) ->
 template_with_identity(PeerId, Desired, Template) ->
     Base = maps:remove(id, Template),
     Identity = maps:with([device_id,
+                          profile_id,
                           certificate_fingerprint,
                           authorization_mode,
                           authorized,
@@ -118,4 +119,5 @@ allowed_template_keys() ->
      handshake_remote_ca_certificate_path,
      debug_replay_controls,
      device_id,
+     profile_id,
      certificate_fingerprint].
