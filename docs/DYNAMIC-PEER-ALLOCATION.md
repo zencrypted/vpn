@@ -50,8 +50,9 @@ vpn_peer_allocator:status().
 `ensure/1` is idempotent for a non-empty binary Device ID while the allocator
 process remains alive. Distinct active Devices receive distinct peer IDs, TUN
 names, tunnel addresses, and UDP ports. `release/1` makes the numeric transport
-slot reusable, but a later allocation receives a fresh peer-ID generation so a
-different Device does not inherit the released peer identifiers.
+slot reusable, returns a snapshot marked `state => released`, and a later
+allocation receives a fresh peer-ID generation so a different Device does not
+inherit the released peer identifiers.
 
 An allocation contains only resource metadata, for example:
 
@@ -77,8 +78,9 @@ An allocation contains only resource metadata, for example:
                remote_udp_port => 20000}}.
 ```
 
-The allocator is not yet connected to `vpn_provisioning`, does not create
-certificate material, and does not start peer processes.
+The allocator does not create certificate material and does not start peer
+processes. Stage 2 can consume an existing reservation, but reservation itself
+remains an explicit operation.
 
 ### Configuration
 
@@ -108,13 +110,55 @@ gateway UDP ranges overlap, or generated interface names can exceed Linux's
 
 ## Planned stages
 
-### Stage 2 — dynamic runtime resolver
+### Stage 2 — dynamic runtime resolver (completed)
 
-Add an allocator-backed resolver mode. A provisioning command for a reserved
-client peer will resolve trusted transport configuration from its allocation
-instead of requiring a predeclared `runtime_config_templates` entry. The
-resolver will create both client-side and gateway-side desired runtime configs
-without accepting transport internals from IAS.
+`vpn_runtime_config_resolver` now supports `dynamic_allocator` and exposes:
+
+```erlang
+vpn_runtime_config_resolver:resolve(PeerId, Desired).
+vpn_runtime_config_resolver:resolve_pair(DeviceId, Desired).
+```
+
+Resolution is lookup-only: the Device must already have an active reservation.
+`resolve_pair/2` returns validated client-side and gateway-side runtime maps.
+The following fields always come from `vpn_peer_allocator` and cannot be
+provided by IAS or trusted defaults:
+
+- runtime peer IDs;
+- TUN interface names;
+- tunnel addresses;
+- local and remote UDP endpoints;
+- client/gateway pairing.
+
+IAS desired state contributes only client profile, certificate fingerprint,
+authorization, enabled, and revoked metadata. Trusted VPN configuration supplies
+non-transport defaults through:
+
+```erlang
+{dynamic_runtime_config_defaults, #{
+  common => #{
+    mode => tun,
+    peer_module => vpn_peer,
+    %% Identity fields remain development placeholders until Stage 3.
+    certificate_path => "...",
+    private_key_path => "...",
+    ca_certificate_path => "...",
+    psk => <<"...">>
+  },
+  client => #{name => <<"Dynamic client">>},
+  gateway => #{
+    name => <<"Dynamic gateway">>,
+    authorization_mode => development_bypass,
+    authorized => true
+  }
+}}.
+```
+
+Transport or unknown keys in these defaults fail closed. The resolver validates
+both generated maps with `vpn_peer:validate_runtime_config/1`, but it neither
+writes them to `vpn_peer_registry` nor starts the pair. Stage 3 must replace
+development identity placeholders with peer-specific certificate and OVPN
+material before the dynamic pair becomes runnable.
 
 ### Stage 3 — development identity factory
 
@@ -162,13 +206,14 @@ private-key bodies, session keys, replay windows, ECDH material, or packet state
 Release, tombstone, and migration semantics must be coordinated with the durable
 provisioning projection described in `TECHNICAL-DEBT.md`.
 
-## Non-goals of Stage 1
+## Current non-goals after Stage 2
 
-Stage 1 does not:
+The completed allocator and resolver stages do not:
 
 - replace `client_a/client_b` in the existing two-user demo;
-- mutate `vpn_peer_registry`;
-- generate certificates or private keys;
+- automatically reserve a Device during provisioning;
+- mutate `vpn_peer_registry` with both sides of the pair;
+- generate certificates, OVPN bundles, or private keys;
 - start TUN/UDP processes;
 - survive a VPN application or node restart;
-- accept allocator resource choices from IAS or an OVPN file.
+- accept allocator resource choices from IAS, trusted defaults, or an OVPN file.

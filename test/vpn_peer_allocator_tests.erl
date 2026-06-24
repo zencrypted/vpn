@@ -52,7 +52,11 @@ allocation_lifecycle_test_() ->
                                        vpn_peer_allocator:ensure(DeviceC)),
 
                           {ok, ReleasedA} = vpn_peer_allocator:release(DeviceA),
-                          ?assertEqual(AllocationA1, ReleasedA),
+                          ?assertEqual(released, maps:get(state, ReleasedA)),
+                          ?assert(is_integer(maps:get(released_at, ReleasedA))),
+                          ?assertEqual(maps:remove(state, AllocationA1),
+                                       maps:remove(released_at,
+                                                   maps:remove(state, ReleasedA))),
                           ?assertEqual({error, not_found},
                                        vpn_peer_allocator:lookup(DeviceA)),
                           ?assertEqual({error, not_found},

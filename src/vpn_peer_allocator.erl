@@ -86,7 +86,9 @@ handle_call({release, DeviceId}, _From,
         {Allocation, RemainingByDevice} ->
             Slot = maps:get(slot, Allocation),
             RemainingBySlot = maps:remove(Slot, BySlot),
-            {reply, {ok, Allocation},
+            Released = Allocation#{state => released,
+                                     released_at => erlang:system_time(second)},
+            {reply, {ok, Released},
              State#{by_device => RemainingByDevice,
                     by_slot => RemainingBySlot}};
         error ->

@@ -134,7 +134,11 @@ new IAS peer has no stored runtime config, VPN may resolve it locally through
 - `disabled` keeps the default fail-closed behavior and returns
   `{error, runtime_config_required}`;
 - `static_template` derives runtime config from trusted VPN application
-  configuration.
+  configuration;
+- `dynamic_allocator` resolves both sides of an existing
+  `vpn_peer_allocator` reservation. IAS supplies only the Device ID and client
+  identity/policy metadata; peer IDs, interfaces, addresses, and UDP ports are
+  taken exclusively from the VPN-owned allocation.
 
 `static_template` is for development and integration flows. It may reuse
 explicit configured local key, certificate, or OVPN references, but it does not
@@ -147,6 +151,13 @@ pool keyed by runtime peer ID. The shipped debug profile provides `client_a`
 and `client_b`; each slot has its own OVPN identity, TUN/UDP resources, and a
 compatible gateway-side peer. Unknown slot IDs fail closed. This pool is for a
 two-user demo and is not dynamic production allocation.
+
+Dynamic resolution is lookup-only and fails closed until the Device has an
+active allocation and `dynamic_runtime_config_defaults` supplies trusted
+non-transport runtime defaults. The resolver exposes
+`vpn_runtime_config_resolver:resolve_pair/2` to produce client and gateway
+runtime maps together. It does not generate identity material or start either
+peer; those remain later dynamic-allocation stages.
 
 Use `vpn_provisioning:status/0` for counters and
 `vpn_provisioning:history/1` for bounded per-peer audit history.

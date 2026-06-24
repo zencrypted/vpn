@@ -1,6 +1,9 @@
 -module(vpn_runtime_config_resolver).
 
--export([resolve/2, mode/0, validate_certificate_fingerprint/2]).
+-export([resolve/2,
+         resolve_pair/2,
+         mode/0,
+         validate_certificate_fingerprint/2]).
 
 resolve(PeerId, Desired) when is_map(Desired) ->
     case mode() of
@@ -8,14 +11,41 @@ resolve(PeerId, Desired) when is_map(Desired) ->
             {error, runtime_config_required};
         static_template ->
             resolve_static_template(PeerId, Desired);
+        dynamic_allocator ->
+            resolve_dynamic_allocation(PeerId, Desired);
         Resolver ->
             {error, {unsupported_runtime_config_resolver, Resolver}}
     end.
+
+%% @doc Resolve both sides of an existing allocator reservation.
+%%
+%% This function is deliberately lookup-only. Reservation ownership remains
+%% explicit: callers must invoke vpn_peer_allocator:ensure/1 before identity
+%% issuance or provisioning. Transport fields always come from the allocator;
+%% Desired contributes only client identity and authorization metadata.
+resolve_pair(DeviceId, Desired)
+  when is_binary(DeviceId), byte_size(DeviceId) > 0, is_map(Desired) ->
+    case desired_device_matches(DeviceId, Desired) of
+        ok ->
+            case vpn_peer_allocator:lookup(DeviceId) of
+                {ok, Allocation} ->
+                    resolve_dynamic_pair(Allocation, Desired);
+                {error, not_found} ->
+                    {error, {dynamic_peer_allocation_required, DeviceId}};
+                {error, _} = Error ->
+                    Error
+            end;
+        {error, _} = Error ->
+            Error
+    end;
+resolve_pair(_DeviceId, _Desired) ->
+    {error, invalid_device_id}.
 
 mode() ->
     case application:get_env(vpn, runtime_config_resolver, disabled) of
         <<"disabled">> -> disabled;
         <<"static_template">> -> static_template;
+        <<"dynamic_allocator">> -> dynamic_allocator;
         Value -> Value
     end.
 
@@ -25,6 +55,121 @@ resolve_static_template(PeerId, Desired) ->
             resolve_template(PeerId, Desired, sanitize_template(Template));
         {error, _} = Error ->
             Error
+    end.
+
+resolve_dynamic_allocation(PeerId, Desired) ->
+    case maps:get(device_id, Desired, undefined) of
+        DeviceId when is_binary(DeviceId), byte_size(DeviceId) > 0 ->
+            case resolve_pair(DeviceId, Desired) of
+                {ok, #{client := #{id := PeerId} = Client}} ->
+                    {ok, Client};
+                {ok, #{gateway := #{id := PeerId} = Gateway}} ->
+                    {ok, Gateway};
+                {ok, _Pair} ->
+                    {error, {dynamic_peer_not_in_allocation, PeerId}};
+                {error, _} = Error ->
+                    Error
+            end;
+        _ ->
+            {error, dynamic_peer_device_id_required}
+    end.
+
+resolve_dynamic_pair(Allocation, Desired) ->
+    case dynamic_runtime_defaults() of
+        {ok, Defaults} ->
+            Client = dynamic_runtime_config(client, Allocation, Desired, Defaults),
+            Gateway = dynamic_runtime_config(gateway, Allocation, Desired, Defaults),
+            case validate_dynamic_pair(Client, Gateway, Desired) of
+                ok ->
+                    {ok, #{allocation_id => maps:get(allocation_id, Allocation),
+                           device_id => maps:get(device_id, Allocation),
+                           client => Client,
+                           gateway => Gateway}};
+                {error, _} = Error ->
+                    Error
+            end;
+        {error, _} = Error ->
+            Error
+    end.
+
+dynamic_runtime_config(Role, Allocation, Desired, Defaults) ->
+    Endpoint = maps:get(Role, Allocation),
+    Common = maps:get(common, Defaults, #{}),
+    RoleDefaults = maps:get(Role, Defaults, #{}),
+    TrustedDefaults = maps:merge(Common, RoleDefaults),
+    Transport = maps:with([ifname,
+                           ip,
+                           local_udp_port,
+                           remote_ip,
+                           remote_udp_port,
+                           remote_peer_id],
+                          Endpoint),
+    PeerId = maps:get(peer_id, Endpoint),
+    AllocationMetadata =
+        #{id => PeerId,
+          device_id => maps:get(device_id, Allocation),
+          allocation_id => maps:get(allocation_id, Allocation),
+          allocation_slot => maps:get(slot, Allocation),
+          allocation_generation => maps:get(generation, Allocation),
+          allocation_role => Role},
+    Base = maps:merge(TrustedDefaults,
+                      maps:merge(Transport, AllocationMetadata)),
+    case Role of
+        client -> maps:merge(Base, dynamic_client_identity(Desired));
+        gateway -> Base
+    end.
+
+validate_dynamic_pair(Client, Gateway, Desired) ->
+    case validate_direct_runtime(Client) of
+        {ok, _} ->
+            case validate_direct_runtime(Gateway) of
+                {ok, _} -> validate_certificate_fingerprint(Desired, Client);
+                {error, _} = Error -> Error
+            end;
+        {error, _} = Error ->
+            Error
+    end.
+
+dynamic_runtime_defaults() ->
+    case application:get_env(vpn, dynamic_runtime_config_defaults) of
+        {ok, Defaults} when is_map(Defaults) ->
+            validate_dynamic_runtime_defaults(Defaults);
+        {ok, _Other} ->
+            {error, invalid_dynamic_runtime_config_defaults};
+        undefined ->
+            {error, dynamic_runtime_config_defaults_required}
+    end.
+
+validate_dynamic_runtime_defaults(Defaults) ->
+    AllowedSections = [common, client, gateway],
+    case [Key || Key <- maps:keys(Defaults),
+                 not lists:member(Key, AllowedSections)] of
+        [InvalidSection | _] ->
+            {error, {invalid_dynamic_runtime_config_section, InvalidSection}};
+        [] ->
+            validate_dynamic_runtime_default_sections(AllowedSections, Defaults)
+    end.
+
+validate_dynamic_runtime_default_sections([], Defaults) ->
+    {ok, Defaults};
+validate_dynamic_runtime_default_sections([Section | Rest], Defaults) ->
+    case maps:get(Section, Defaults, #{}) of
+        SectionDefaults when is_map(SectionDefaults) ->
+            case validate_dynamic_runtime_default_keys(SectionDefaults) of
+                ok -> validate_dynamic_runtime_default_sections(Rest, Defaults);
+                {error, _} = Error -> Error
+            end;
+        _Other ->
+            {error, {invalid_dynamic_runtime_config_section, Section}}
+    end.
+
+validate_dynamic_runtime_default_keys(Defaults) ->
+    Allowed = allowed_dynamic_default_keys(),
+    case [Key || Key <- maps:keys(Defaults), not lists:member(Key, Allowed)] of
+        [InvalidKey | _] ->
+            {error, {dynamic_runtime_transport_or_unknown_key, InvalidKey}};
+        [] ->
+            ok
     end.
 
 static_template(PeerId) ->
@@ -93,6 +238,22 @@ actual_certificate_fingerprint(PeerConfig) ->
             maps:get(certificate_fingerprint, PeerConfig, undefined)
     end.
 
+desired_device_matches(DeviceId, Desired) ->
+    case maps:get(device_id, Desired, DeviceId) of
+        DeviceId -> ok;
+        _Other -> {error, dynamic_peer_device_id_mismatch}
+    end.
+
+dynamic_client_identity(Desired) ->
+    maps:with([profile_id,
+               certificate_fingerprint,
+               authorization_mode,
+               authorized,
+               authorization_reason,
+               enabled,
+               revoked],
+              Desired).
+
 template_with_identity(PeerId, Desired, Template) ->
     Base = maps:remove(id, Template),
     Identity = maps:with([device_id,
@@ -106,6 +267,34 @@ template_with_identity(PeerId, Desired, Template) ->
 
 sanitize_template(Template) ->
     maps:with(allowed_template_keys(), Template).
+
+allowed_dynamic_default_keys() ->
+    [name,
+     peer_module,
+     mode,
+     psk,
+     certificate_path,
+     private_key_path,
+     ca_certificate_path,
+     ovpn_path,
+     authorization_mode,
+     authorized,
+     authorization_reason,
+     handshake_mode,
+     handshake_retry_interval,
+     handshake_max_retries,
+     previous_epoch_grace_ms,
+     auto_rekey_after_seconds,
+     auto_rekey_after_packets,
+     auto_rekey_check_interval_ms,
+     auto_rekey_failure_cooldown_ms,
+     auto_rekey_jitter_ms,
+     handshake_remote_ca_certificate_path,
+     debug_replay_controls,
+     profile_id,
+     certificate_fingerprint,
+     enabled,
+     revoked].
 
 allowed_template_keys() ->
     [id,
