@@ -316,12 +316,15 @@ tracked as technical debt.
 
 ## Stable debug producer
 
-`tools/ensure-debug-ovpn.sh` is the idempotent local debug producer. By default
-it maintains `local/debug/client_a.ovpn` and its relative `keys/client_a.key`.
-A complete bundle is reused, an incomplete bundle fails closed, and `--force`
-performs an explicit Device identity rotation without rotating the development
-CA. `tools/run-debug.sh` prepares this envelope before launching the debug
-Rebar3 profile.
+`tools/ensure-debug-ovpn.sh` is the idempotent producer for one local debug
+identity. `tools/prepare-debug-topology.sh` invokes it for `client_a`,
+`client_b`, and `peer_c`, verifies the required OVPN, certificate, and key
+files, and can be run without starting Erlang. A complete bundle is reused, an
+incomplete bundle fails closed, and `--force` performs an explicit identity
+rotation without rotating the development CA. `tools/run-debug.sh` is the
+supported two-slot entry point: it prepares the full topology and only then
+launches the debug Rebar3 profile. A raw `rebar3 as debug shell` requires the
+same files to have been prepared already.
 
 ## Certificate-authenticated control plane
 

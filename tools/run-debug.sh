@@ -10,25 +10,26 @@ case "${1:-}" in
     --force) FORCE_ARG="--force" ;;
     -h|--help)
         echo "Usage: $0 [--force]"
-        echo "Ensures the two client slots and their gateway identity, then starts rebar3 with config/sys.debug.config."
+        echo "Prepares the complete two-slot debug topology, then starts the named VPN node."
         exit 0
         ;;
     *) echo "Unknown option: $1" >&2; exit 64 ;;
 esac
 
-ensure_identity() {
-    name="$1"
-    port="$2"
-    if [ -n "$FORCE_ARG" ]; then
-        "$SCRIPT_DIR/ensure-debug-ovpn.sh" "$FORCE_ARG" --name "$name" --port "$port"
-    else
-        "$SCRIPT_DIR/ensure-debug-ovpn.sh" --name "$name" --port "$port"
-    fi
-}
-
 cd "$REPO_DIR"
-ensure_identity client_a 5556
-ensure_identity client_b 5557
-ensure_identity peer_c 5562
+if [ -n "$FORCE_ARG" ]; then
+    "$SCRIPT_DIR/prepare-debug-topology.sh" "$FORCE_ARG"
+else
+    "$SCRIPT_DIR/prepare-debug-topology.sh"
+fi
+
+if [ -z "${ERL_FLAGS:-}" ]; then
+    ERL_FLAGS="-name vpn@127.0.0.1 -setcookie node_runner"
+    export ERL_FLAGS
+fi
+
+printf '%s\n' \
+    "Starting VPN debug node with prepared local identities." \
+    "ERL_FLAGS=$ERL_FLAGS"
 
 exec rebar3 as debug shell

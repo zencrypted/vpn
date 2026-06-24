@@ -49,3 +49,7 @@ KEY_FORCED=$(sha256sum "$OUT/keys/client_a.key")
 grep -q 'previous_epoch_grace_ms => 15000' "$REPO_DIR/config/sys.debug.config"
 
 echo "Debug OVPN bootstrap tests passed."
+
+grep -q 'prepare-debug-topology.sh' "$REPO_DIR/tools/run-debug.sh"
+grep -q 'vpn@127.0.0.1 -setcookie node_runner' "$REPO_DIR/tools/run-debug.sh"
+[ -x "$REPO_DIR/tools/prepare-debug-topology.sh" ]

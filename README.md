@@ -259,17 +259,30 @@ Run the local provisioning smoke tests with:
 
 ## One-command debug startup
 
-The debug bootstrap keeps a stable local Device identity at
-`local/debug/client_a.ovpn`. It creates the development CA and bundle only when
-they are missing, then reuses them on later starts:
+The debug bootstrap keeps stable local identities for both trusted client
+slots and the second gateway peer. It creates the development CA and the
+`client_a`, `client_b`, and `peer_c` bundles only when they are missing, then
+reuses them on later starts:
 
 ```sh
 ./tools/run-debug.sh
 ```
 
-This command runs `rebar3 as debug shell` with `config/sys.debug.config`. The
-debug configuration pairs the OVPN-backed `client_a` session with local
-`peer_b`. Use an explicit rotation only when needed:
+This is the supported entry point for the two-slot debug topology. It prepares
+all required files before starting `rebar3 as debug shell` with
+`config/sys.debug.config`. When `ERL_FLAGS` is not already set, it starts the
+node as `vpn@127.0.0.1` with cookie `node_runner`. The configured pairs are
+`client_a <-> peer_b` and `client_b <-> peer_c`.
+
+Do not use a raw `rebar3 as debug shell` on a fresh checkout: the application
+fails closed when a configured OVPN identity is missing. To prepare files
+without starting Erlang, run:
+
+```sh
+./tools/prepare-debug-topology.sh
+```
+
+Use an explicit rotation only when needed:
 
 ```sh
 ./tools/run-debug.sh --force
