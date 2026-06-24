@@ -66,6 +66,7 @@ private-key body is never returned or logged.
 - `vpn_peer` - public runtime peer abstraction.
 - `vpn_manager` - management API for supervised peers.
 - `vpn_peer_registry` - ETS-backed runtime registry bootstrapped from trusted application configuration.
+- `vpn_peer_allocator` - VPN-owned volatile reservations for dynamic client/gateway peer resources.
 - `vpn_provisioning` - revisioned, idempotent IAS-to-VPN desired-state command contract.
 - `vpn_trust_store` - development CA certificate trust store.
 - `vpn_ovpn_envelope` - canonical OVPN subset constants and value validators.
@@ -356,10 +357,15 @@ vpn_peer_registry:get(client_b).
 vpn_admin:summary().
 ```
 
-This is intentionally a bounded demo pool, not a general dynamic allocator. A
-future milestone must allocate peer IDs, TUN interfaces, addresses, ports, and
-gateway-side sessions dynamically and persist those assignments across VPN
-restarts.
+This is intentionally a bounded demo pool, not a general dynamic allocator.
+
+The first dynamic-allocation stage is now available through
+`vpn_peer_allocator`. It can idempotently reserve a unique binary client/gateway
+peer pair, TUN names, tunnel addresses, and UDP ports for a binary Device ID.
+Reservations are currently volatile and are not yet connected to provisioning,
+certificate generation, or runtime peer startup. The ownership model and staged
+integration plan are documented in
+[`docs/DYNAMIC-PEER-ALLOCATION.md`](docs/DYNAMIC-PEER-ALLOCATION.md).
 
 ## Demo Guide
 
@@ -520,14 +526,17 @@ Ephemeral ECDH/HKDF traffic keys operational
 Authenticated rekey and replay protection operational
 IAS revisioned runtime provisioning operational
 Two simultaneous trusted IAS client slots operational
+Volatile dynamic peer reservation allocator operational
 ```
 
 The current two-user topology is a bounded development milestone. It proves
 that two distinct IAS Users and Devices can be provisioned into separate trusted
-VPN slots and exchange encrypted payloads concurrently. Dynamic slot allocation,
-durable provisioning projection, production Device-lock enforcement, and a real
-2FA provider remain future work and are tracked in
-[`docs/TECHNICAL-DEBT.md`](docs/TECHNICAL-DEBT.md).
+VPN slots and exchange encrypted payloads concurrently. The allocator core now
+reserves dynamic resources, but allocator-backed runtime resolution, identity
+materialization, IAS integration, and durable assignments remain future stages.
+See [`docs/DYNAMIC-PEER-ALLOCATION.md`](docs/DYNAMIC-PEER-ALLOCATION.md) and
+[`docs/TECHNICAL-DEBT.md`](docs/TECHNICAL-DEBT.md). Production Device-lock
+enforcement and a real 2FA provider also remain future work.
 
 ## VPN Management API
 

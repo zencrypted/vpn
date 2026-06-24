@@ -43,6 +43,29 @@ Accepted, unchanged, stale, conflicting, and revoked commands are represented in
 bounded per-peer audit history. Authorization metadata is normalized when policy
 state changes, and explicit revoke reasons are preserved.
 
+## In progress — Dynamic peer allocation
+
+The first allocator stage is complete. `vpn_peer_allocator` reserves a unique
+binary client/gateway peer pair and non-overlapping TUN, address, and UDP
+resources for each binary IAS Device ID. Reservations are idempotent while the
+allocator process remains alive and intentionally do not contain identity or
+session secrets.
+
+The allocator is currently a volatile reservation service only. The remaining
+work is tracked in [`DYNAMIC-PEER-ALLOCATION.md`](DYNAMIC-PEER-ALLOCATION.md):
+
+- add an allocator-backed trusted runtime config resolver;
+- materialize debug identity and OVPN assets outside the allocator;
+- integrate IAS Device reservation before certificate issuance;
+- reconcile and start both sides of each allocated pair;
+- remove the hard-coded Alice/Bob slot mapping from the normal path;
+- persist and restore assignments before provisioning reconciliation;
+- coordinate release and reuse with revision, revoke, and tombstone barriers.
+
+Until those stages are complete, `client_a/client_b` remain the supported
+two-user integration topology and dynamic allocations must not be treated as
+runnable peers.
+
 ## Deferred until IAS integration — Durable provisioning projection
 
 The VPN provisioning registry is currently an in-memory runtime projection. A
