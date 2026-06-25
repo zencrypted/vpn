@@ -461,9 +461,15 @@ recovery_runtime_template() ->
       remote_udp_port => 40102,
       remote_peer_id => peer_a,
       psk => <<"recovery-test-secret-psk">>,
+      certificate_path => fixture_path("peer_b.crt"),
+      private_key_path => fixture_path("peer_b.key"),
+      ca_certificate_path => fixture_path("ca.crt"),
       authorization_mode => policy,
       authorized => true,
       authorization_reason => recovery_template_allows}.
+
+fixture_path(Name) ->
+    filename:join([code:priv_dir(vpn), "certs", Name]).
 
 config_ids(Configs) ->
     lists:sort([maps:get(id, Config) || Config <- Configs]).
