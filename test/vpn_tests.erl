@@ -92,6 +92,14 @@ vpn_http_exports_test() ->
     ?assertMatch({module, vpn_reload_http}, code:ensure_loaded(vpn_reload_http)),
     ?assert(erlang:function_exported(vpn_reload_http, init, 2)).
 
+vpn_event_bus_exports_test() ->
+    ?assertMatch({module, vpn_event_bus}, code:ensure_loaded(vpn_event_bus)),
+    ?assert(erlang:function_exported(vpn_event_bus, start_link, 0)),
+    ?assert(erlang:function_exported(vpn_event_bus, subscribe, 1)),
+    ?assert(erlang:function_exported(vpn_event_bus, unsubscribe, 1)),
+    ?assert(erlang:function_exported(vpn_event_bus, publish, 1)),
+    ?assert(erlang:function_exported(vpn_event_bus, status, 0)).
+
 vpn_peer_sup_exports_test() ->
     ?assertMatch({module, vpn_peer_sup}, code:ensure_loaded(vpn_peer_sup)),
     ?assert(erlang:function_exported(vpn_peer_sup, start_link, 0)),
@@ -121,6 +129,7 @@ vpn_supervisor_recovery_order_test() ->
                   vpn_peer_registry,
                   vpn_provisioning,
                   vpn_peer_sup,
+                  vpn_event_bus,
                   vpn_peer_reconciler,
                   vpn_http],
                  [maps:get(id, Spec) || Spec <- ChildSpecs]).

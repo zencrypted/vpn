@@ -151,7 +151,13 @@ vpn_peer_registry:remove(PeerId).
 ```
 
 `vpn_manager:reload_config/0` reconciles supervised peers against the enabled
-registry entries. Live automatic reconciliation and IAS synchronization remain
+registry entries. Completed reconciliations are also published through
+`vpn_event_bus`. A connected Erlang process may subscribe with
+`vpn_event_bus:subscribe/1` and receives `{vpn_event, Event}` notifications with
+an event-stream identifier and monotonically increasing sequence. These events
+contain only sanitized completion metadata and are wake-up signals: subscribers
+must re-read current VPN state through the normal management APIs. Live automatic
+reconciliation and IAS synchronization remain
 separate follow-up stages.
 
 ## Revisioned provisioning commands

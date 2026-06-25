@@ -256,6 +256,34 @@ automatic_manager_reconcile_test_() ->
                       end)]
      end}.
 
+
+runtime_reconciled_event_is_published_after_application_test_() ->
+    {setup,
+     fun setup_with_event_bus_and_reconciler/0,
+     fun cleanup_with_event_bus_and_reconciler/1,
+     fun({_RegistryPid, _PeerSupPid, _EventBusPid, _ReconcilerPid}) ->
+             [?_test(begin
+                          {ok, _Subscription} = vpn_event_bus:subscribe(self()),
+                          {ok, _} = vpn_peer_registry:put(peer_config(peer_b)),
+                          Event = receive_vpn_event(),
+                          ?assertMatch(#{schema_version := 1,
+                                         type := runtime_reconciled,
+                                         cause := #{action := put,
+                                                    peer_id := peer_b},
+                                         result := #{outcome := ok,
+                                                     started := 1,
+                                                     failed := 0,
+                                                     peer_ids := [peer_b]}},
+                                       Event),
+                          %% Receiving the event is a completion signal: the
+                          %% runtime mutation has already been applied.
+                          ?assertEqual(true, vpn_manager:peer_running(peer_b)),
+                          ?assertNot(contains_key(config, Event)),
+                          ?assertNot(contains_key(psk, Event)),
+                          ?assertNot(contains_key(private_key_path, Event))
+                      end)]
+     end}.
+
 manager_reconcile_test_() ->
     {setup,
      fun setup_with_peer_sup/0,
@@ -386,6 +414,37 @@ contains_key(Key, Term) when is_list(Term) ->
 contains_key(_Key, _Term) ->
     false.
 
+
+
+setup_with_event_bus_and_reconciler() ->
+    {RegistryPid, PeerSupPid} = setup_with_peer_sup(),
+    stop_registered(vpn_event_bus),
+    stop_registered(vpn_peer_reconciler),
+    {ok, EventBusPid} = vpn_event_bus:start_link(),
+    {ok, ReconcilerPid} = vpn_peer_reconciler:start_link(),
+    {RegistryPid, PeerSupPid, EventBusPid, ReconcilerPid}.
+
+cleanup_with_event_bus_and_reconciler(
+  {RegistryPid, PeerSupPid, EventBusPid, ReconcilerPid}) ->
+    stop_if_alive(ReconcilerPid),
+    stop_if_alive(EventBusPid),
+    cleanup_with_peer_sup({RegistryPid, PeerSupPid}).
+
+stop_if_alive(Pid) ->
+    case is_process_alive(Pid) of
+        true ->
+            unlink(Pid),
+            exit(Pid, shutdown),
+            wait_until_stopped(Pid, 20);
+        false -> ok
+    end.
+
+receive_vpn_event() ->
+    receive
+        {vpn_event, Event} -> Event
+    after 1000 ->
+        error(vpn_event_timeout)
+    end.
 
 setup_with_reconciler() ->
     {RegistryPid, PeerSupPid} = setup_with_peer_sup(),

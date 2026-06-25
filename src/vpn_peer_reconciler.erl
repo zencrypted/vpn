@@ -39,12 +39,14 @@ handle_call(status, _From, State) ->
     {reply, State, State};
 handle_call(reconcile_now, _From, State) ->
     Result = vpn_manager:reload_config(),
+    _ = publish_runtime_reconciled(manual_reload, Result),
     {reply, Result, record_result(manual_reload, Result, State)};
 handle_call(_Request, _From, State) ->
     {reply, {error, unsupported_operation}, State}.
 
 handle_cast({registry_event, Event}, State0) ->
     Result = reconcile_event(Event),
+    _ = publish_runtime_reconciled(Event, Result),
     State1 = State0#{events_received => maps:get(events_received, State0) + 1},
     {noreply, record_result(Event, Result, State1)};
 handle_cast(_Message, State) ->
@@ -143,3 +145,65 @@ record_result(Event, Result, State) ->
            failures => FailureCount,
            last_event => Event,
            last_result => Result}.
+
+publish_runtime_reconciled(Cause, Result) ->
+    vpn_event_bus:publish(
+      #{type => runtime_reconciled,
+        cause => safe_cause(Cause),
+        result => safe_result(Result)}).
+
+safe_cause(manual_reload) ->
+    #{action => manual_reload};
+safe_cause(Event) when is_map(Event) ->
+    Base = maps:with([action,
+                      peer_id,
+                      peer_ids,
+                      enabled,
+                      restart_required],
+                     Event),
+    case maps:find(peer_changes, Event) of
+        {ok, PeerChanges} when is_list(PeerChanges) ->
+            Base#{peer_changes =>
+                      [maps:with([peer_id, restart_required], PeerChange)
+                       || PeerChange <- PeerChanges,
+                          is_map(PeerChange)]};
+        _ ->
+            Base
+    end;
+safe_cause(_Cause) ->
+    #{action => unknown}.
+
+safe_result(Result) when is_map(Result) ->
+    Started = maps:get(started, Result, []),
+    Stopped = maps:get(stopped, Result, []),
+    Failed = maps:get(failed, Result, []),
+    Unchanged = maps:get(unchanged, Result, []),
+    PeerIds = lists:usort(peer_ids(Started) ++
+                          peer_ids(Stopped) ++
+                          peer_ids(Failed) ++
+                          peer_ids(Unchanged)),
+    #{outcome => result_outcome(Failed),
+      started => length(Started),
+      stopped => length(Stopped),
+      failed => length(Failed),
+      unchanged => length(Unchanged),
+      peer_ids => PeerIds};
+safe_result(_Result) ->
+    #{outcome => invalid_result,
+      started => 0,
+      stopped => 0,
+      failed => 0,
+      unchanged => 0,
+      peer_ids => []}.
+
+result_outcome([]) -> ok;
+result_outcome(_Failed) -> partial_failure.
+
+peer_ids(Values) when is_list(Values) ->
+    [peer_id(Value) || Value <- Values, peer_id(Value) =/= undefined];
+peer_ids(_Values) ->
+    [].
+
+peer_id({PeerId, _Reason}) -> PeerId;
+peer_id(PeerId) when is_atom(PeerId); is_binary(PeerId) -> PeerId;
+peer_id(_Value) -> undefined.
