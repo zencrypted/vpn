@@ -162,6 +162,51 @@ durable_registry_recovery_enforces_lifecycle_barriers_test_() ->
      end}.
 
 
+revoked_durable_runtime_recovers_stopped_test_() ->
+    {setup,
+     fun setup/0,
+     fun cleanup/1,
+     fun(_Pid) ->
+             [?_test(begin
+                          application:set_env(vpn,
+                                              runtime_config_resolver,
+                                              static_template),
+                          application:set_env(vpn,
+                                              runtime_config_template,
+                                              recovery_runtime_template()),
+                          Revoked = durable_head(
+                                      4,
+                                      applied,
+                                      revoke,
+                                      revoked,
+                                      #{device_id => <<"revoked-device">>,
+                                        profile_id => default_user,
+                                        authorization_mode => policy,
+                                        authorized => false,
+                                        authorization_reason => certificate_revoked,
+                                        enabled => false,
+                                        revoked => true}),
+                          ok = persist_heads(#{peer_b => Revoked}),
+                          {ok, _Registry} = restart_registry(),
+
+                          {ok, Entry} = vpn_peer_registry:get(peer_b),
+                          ?assertEqual(false, maps:get(enabled, Entry)),
+                          ?assertEqual(false, maps:get(authorized, Entry)),
+                          ?assertEqual(true, maps:get(revoked, Entry)),
+                          ?assertEqual(certificate_revoked,
+                                       maps:get(authorization_reason, Entry)),
+                          ?assertNot(lists:member(
+                                       peer_b,
+                                       config_ids(
+                                         vpn_peer_registry:enabled_configs()))),
+                          Recovery = vpn_peer_registry:recovery_status(),
+                          ?assert(lists:member(
+                                    peer_b,
+                                    maps:get(restored_peers, Recovery)))
+                      end)]
+     end}.
+
+
 unrecoverable_active_runtime_fails_closed_test_() ->
     {setup,
      fun setup/0,
@@ -330,6 +375,8 @@ cleanup(_Pid) ->
     application:unset_env(vpn, peers),
     application:unset_env(vpn, ovpn_sessions),
     application:unset_env(vpn, runtime_config_resolver),
+    application:unset_env(vpn, runtime_config_template),
+    application:unset_env(vpn, runtime_config_templates),
     ok.
 
 stop_named_normal(Name) ->
@@ -402,6 +449,21 @@ peer_config(PeerId) ->
       psk => <<"test-secret-psk">>,
       private_key_path => "local/private.key",
       certificate_path => "local/certificate.crt"}.
+
+recovery_runtime_template() ->
+    #{id => recovery_template,
+      peer_module => ?MODULE,
+      mode => tun,
+      ifname => "peer_recovery",
+      ip => "10.20.20.2",
+      local_udp_port => 40101,
+      remote_ip => {127, 0, 0, 1},
+      remote_udp_port => 40102,
+      remote_peer_id => peer_a,
+      psk => <<"recovery-test-secret-psk">>,
+      authorization_mode => policy,
+      authorized => true,
+      authorization_reason => recovery_template_allows}.
 
 config_ids(Configs) ->
     lists:sort([maps:get(id, Config) || Config <- Configs]).

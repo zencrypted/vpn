@@ -83,7 +83,8 @@ restore_static_head(PeerId, Head, State0) ->
         Mode ->
             Configs = maps:get(configs, State0),
             Desired = maps:get(desired_state, Head, #{}),
-            case static_base_config(PeerId, Desired, Configs) of
+            ResolutionDesired = runtime_resolution_desired(Mode, Desired),
+            case static_base_config(PeerId, ResolutionDesired, Configs) of
                 {ok, Base} ->
                     Config0 = maps:merge(Base, Desired),
                     Config1 = maps:merge(Config0#{id => PeerId}, head_metadata(Head)),
@@ -192,7 +193,9 @@ restore_dynamic_allocation(Allocation, Head, State0) ->
                 Mode ->
                     DeviceId = maps:get(device_id, Allocation),
                     Desired = maps:get(desired_state, Head, #{}),
-                    case vpn_runtime_config_resolver:resolve_pair(DeviceId, Desired) of
+                    ResolutionDesired = runtime_resolution_desired(Mode, Desired),
+                    case vpn_runtime_config_resolver:resolve_pair(DeviceId,
+                                                                   ResolutionDesired) of
                         {ok, #{client := Client0, gateway := Gateway0}} ->
                             Metadata = head_metadata(Head),
                             Client1 = maps:merge(Client0, Metadata),
@@ -245,6 +248,26 @@ recovery_mode(#{lifecycle_state := revoked}) ->
     revoked;
 recovery_mode(#{lifecycle_state := removed}) ->
     suppress.
+
+%% Runtime resolvers validate configs as if they were about to be started and
+%% therefore reject policy-denied desired state. Disabled and revoked durable
+%% heads still have to be materialized so the registry can restore them in a
+%% stopped state. Use an ephemeral permissive authorization only while resolving
+%% trusted transport/identity fields; the original desired state is merged back
+%% and its restrictive lifecycle is applied before the config is exposed.
+%% Active heads keep their original authorization and continue to fail closed.
+runtime_resolution_desired(active, Desired) ->
+    Desired;
+runtime_resolution_desired(disabled, Desired) ->
+    stopped_runtime_resolution_desired(Desired);
+runtime_resolution_desired(revoked, Desired) ->
+    stopped_runtime_resolution_desired(Desired).
+
+stopped_runtime_resolution_desired(Desired) ->
+    Desired#{authorized => true,
+             authorization_reason => durable_recovery_materialization,
+             enabled => true,
+             revoked => false}.
 
 head_metadata(Head) ->
     #{revision => maps:get(revision, Head),
