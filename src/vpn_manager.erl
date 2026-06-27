@@ -66,12 +66,30 @@ peer_status(PeerId) ->
 peer_info(PeerId) ->
     case find_peer(PeerId) of
         {ok, Pid} ->
-            #{id => PeerId,
-              identity => vpn_peer:identity_info(Pid),
-              config => vpn_peer:config(Pid)};
+            try
+                #{id => PeerId,
+                  identity => vpn_peer:identity_info(Pid),
+                  config => vpn_peer:config(Pid)}
+            catch
+                exit:Reason:Stacktrace ->
+                    case peer_disappeared_during_call(Reason) of
+                        true -> {error, not_found};
+                        false -> erlang:raise(exit, Reason, Stacktrace)
+                    end
+            end;
         {error, not_found} ->
             {error, not_found}
     end.
+
+peer_disappeared_during_call(noproc) -> true;
+peer_disappeared_during_call(normal) -> true;
+peer_disappeared_during_call(shutdown) -> true;
+peer_disappeared_during_call(killed) -> true;
+peer_disappeared_during_call({noproc, _Call}) -> true;
+peer_disappeared_during_call({normal, _Call}) -> true;
+peer_disappeared_during_call({shutdown, _Call}) -> true;
+peer_disappeared_during_call({killed, _Call}) -> true;
+peer_disappeared_during_call(_Reason) -> false.
 
 peer_stats(PeerId) ->
     case find_peer(PeerId) of
