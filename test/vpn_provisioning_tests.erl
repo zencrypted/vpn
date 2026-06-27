@@ -448,8 +448,11 @@ invalid_durable_recovery_manifest_fails_closed_test_() ->
                                         Desired0 = maps:get(desired_state, Entry0),
                                         Manifest0 = maps:get(recovery_manifest,
                                                              Desired0),
-                                        Invalid = Manifest0#{private_key =>
-                                                                <<"secret">>},
+                                        %% Keep the envelope secret-free so the
+                                        %% provisioning restore boundary owns
+                                        %% the fail-closed verdict.
+                                        Invalid = Manifest0#{schema_version =>
+                                                                99},
                                         Entry = Entry0#{desired_state =>
                                                            Desired0#{
                                                              recovery_manifest =>
