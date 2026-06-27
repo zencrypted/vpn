@@ -98,8 +98,9 @@ children with
 Bounded provisioning history remains volatile operational telemetry.
 
 Stage 8A.1 now provides the separate durable foundation: a replaceable
-`vpn_projection_store` behaviour, a KVS/Mnesia synchronous compare-and-set backend, one
-versioned and checksummed projection record, fail-closed schema/checksum
+`vpn_projection_store` behaviour, a KVS compare-and-set backend with a
+configurable transaction provider, one versioned and checksummed projection
+record, fail-closed schema/checksum
 validation, and a serialized `vpn_projection` process started before allocator
 and provisioning workers. Known secret-bearing fields are rejected before
 commit.
@@ -145,9 +146,12 @@ authority when local desired state is absent or when an interrupted command must
 be completed.
 
 The storage boundary is now fixed while the backend remains replaceable. The
-first backend uses `zencrypted/kvs` with local Mnesia `disc_copies` and an
-explicit transaction rather than the KVS default dirty context. Allocator state
-and provisioning heads/tombstones are connected. Stage 8A.4 reconstructs the
+first backend uses `zencrypted/kvs` with local Mnesia `disc_copies`.
+Compare-and-set is opened through `vpn_kvs_transaction`; projection code performs
+only KVS reads and writes, while the default provider supplies the synchronous
+Mnesia transaction. A different KVS backend must configure a provider with
+equivalent atomicity or startup fails closed. Allocator state and provisioning
+heads/tombstones are connected. Stage 8A.4 reconstructs the
 registry and eligible peer processes only after projection validation. The
 remaining local durability gap is an atomic allocator-plus-provisioning
 decommission barrier.

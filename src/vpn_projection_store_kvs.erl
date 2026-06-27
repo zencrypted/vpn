@@ -1,9 +1,9 @@
 %%%-------------------------------------------------------------------
-%% @doc KVS/Mnesia backend for the durable VPN projection.
+%% @doc KVS backend for the durable VPN projection.
 %%
-%% KVS owns schema registration while this adapter uses an explicit Mnesia
-%% transaction to provide compare-and-set semantics for the single projection
-%% record.
+%% KVS owns schema registration and record access. The configured VPN
+%% transaction provider owns the compare-and-set boundary, so this store does
+%% not depend on a concrete database backend.
 %%%-------------------------------------------------------------------
 -module(vpn_projection_store_kvs).
 
@@ -14,37 +14,23 @@
 -include("vpn_projection.hrl").
 
 load() ->
-    case mnesia:transaction(
-           fun() ->
-                   mnesia:read(vpn_projection, current, read)
-           end) of
-        {atomic, []} ->
-            not_found;
-        {atomic, [Record = #vpn_projection{}]} ->
-            Envelope = record_to_envelope(Record),
-            {ok, Record#vpn_projection.projection_version, Envelope};
-        {atomic, [_InvalidRecord]} ->
-            {error, invalid_projection_record};
-        {atomic, Records} ->
-            {error, {invalid_projection_record_count, length(Records)}};
-        {aborted, Reason} ->
-            {error, {mnesia_load_failed, Reason}}
+    case vpn_kvs_transaction:ensure() of
+        ok -> load_record();
+        {error, _} = Error -> Error
     end.
 
 commit(ExpectedVersion, Envelope)
   when is_integer(ExpectedVersion), ExpectedVersion >= 0, is_map(Envelope) ->
     case envelope_to_record(ExpectedVersion, Envelope) of
         {ok, Record = #vpn_projection{projection_version = NewVersion}} ->
-            case mnesia:sync_transaction(
-                   fun() ->
-                           commit_record(ExpectedVersion, Record)
-                   end) of
-                {atomic, ok} ->
+            case vpn_kvs_transaction:run(
+                   fun() -> commit_record(ExpectedVersion, Record) end) of
+                {ok, ok} ->
                     {ok, NewVersion};
-                {aborted, conflict} ->
+                {error, conflict} ->
                     {error, conflict};
-                {aborted, Reason} ->
-                    {error, {mnesia_commit_failed, Reason}}
+                {error, Reason} ->
+                    {error, {kvs_commit_failed, Reason}}
             end;
         {error, Reason} ->
             {error, Reason}
@@ -52,21 +38,66 @@ commit(ExpectedVersion, Envelope)
 commit(_ExpectedVersion, _Envelope) ->
     {error, invalid_commit_arguments}.
 
+load_record() ->
+    case catch kvs:get(vpn_projection, current) of
+        {error, not_found} ->
+            not_found;
+        {ok, Record = #vpn_projection{}} ->
+            Envelope = record_to_envelope(Record),
+            {ok, Record#vpn_projection.projection_version, Envelope};
+        {ok, _InvalidRecord} ->
+            {error, invalid_projection_record};
+        {error, Reason} ->
+            {error, {kvs_load_failed, Reason}};
+        {'EXIT', Reason} ->
+            {error, {kvs_load_failed, Reason}};
+        Other ->
+            {error, {invalid_projection_load_result, Other}}
+    end.
+
 commit_record(0, Record) ->
-    case mnesia:read(vpn_projection, current, write) of
-        [] ->
-            mnesia:write(Record),
-            ok;
-        [_] ->
-            mnesia:abort(conflict)
+    case get_record_in_transaction() of
+        not_found ->
+            put_record_in_transaction(Record);
+        {ok, #vpn_projection{}} ->
+            vpn_kvs_transaction:abort(conflict);
+        {error, Reason} ->
+            vpn_kvs_transaction:abort(Reason)
     end;
 commit_record(ExpectedVersion, Record) ->
-    case mnesia:read(vpn_projection, current, write) of
-        [#vpn_projection{projection_version = ExpectedVersion}] ->
-            mnesia:write(Record),
-            ok;
-        _ ->
-            mnesia:abort(conflict)
+    case get_record_in_transaction() of
+        {ok, #vpn_projection{projection_version = ExpectedVersion}} ->
+            put_record_in_transaction(Record);
+        not_found ->
+            vpn_kvs_transaction:abort(conflict);
+        {ok, #vpn_projection{}} ->
+            vpn_kvs_transaction:abort(conflict);
+        {error, Reason} ->
+            vpn_kvs_transaction:abort(Reason)
+    end.
+
+get_record_in_transaction() ->
+    case catch kvs:get(vpn_projection, current) of
+        {ok, Record = #vpn_projection{}} -> {ok, Record};
+        {ok, Invalid} -> {error, {invalid_projection_record, Invalid}};
+        {error, not_found} -> not_found;
+        {error, Reason} -> {error, {kvs_projection_read_failed, Reason}};
+        {'EXIT', Reason} -> {error, {kvs_projection_read_failed, Reason}};
+        Other -> {error, {invalid_projection_read_result, Other}}
+    end.
+
+put_record_in_transaction(Record) ->
+    case catch kvs:put(Record) of
+        ok -> ok;
+        {error, Reason} ->
+            vpn_kvs_transaction:abort(
+              {kvs_projection_write_failed, Reason});
+        {'EXIT', Reason} ->
+            vpn_kvs_transaction:abort(
+              {kvs_projection_write_failed, Reason});
+        Other ->
+            vpn_kvs_transaction:abort(
+              {invalid_projection_write_result, Other})
     end.
 
 envelope_to_record(ExpectedVersion,

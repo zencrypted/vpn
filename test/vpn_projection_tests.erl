@@ -158,16 +158,19 @@ setup_store_only() ->
     application:set_env(vpn,
                         projection_store_backend,
                         vpn_projection_store_kvs),
+    PreviousProvider = application:get_env(vpn, kvs_transaction_provider),
+    application:unset_env(vpn, kvs_transaction_provider),
     {ok, _CryptoStarted} = application:ensure_all_started(crypto),
     {ok, _Started} = application:ensure_all_started(kvs),
     ok = vpn_kvs:ensure_started(),
-    #{root => Root}.
+    #{root => Root, previous_provider => PreviousProvider}.
 
 cleanup(Context) ->
     stop_registered(vpn_projection),
     _ = application:stop(kvs),
     _ = application:stop(mnesia),
     application:unset_env(vpn, projection_store_backend),
+    restore_provider(maps:get(previous_provider, Context)),
     application:unset_env(kvs, dba),
     application:unset_env(kvs, dba_seq),
     application:unset_env(kvs, dba_st),
@@ -195,9 +198,9 @@ start_projection_fail_closed(ExpectedReason) ->
     end.
 
 write_raw(Record) ->
-    case mnesia:transaction(fun() -> mnesia:write(Record) end) of
-        {atomic, ok} -> ok;
-        {aborted, Reason} -> erlang:error({raw_projection_write_failed, Reason})
+    case kvs:put(Record) of
+        ok -> ok;
+        {error, Reason} -> erlang:error({raw_projection_write_failed, Reason})
     end.
 
 stop_registered(Name) ->
@@ -229,6 +232,11 @@ wait_until_stopped(Pid, Attempts) ->
             timer:sleep(10),
             wait_until_stopped(Pid, Attempts - 1)
     end.
+
+restore_provider({ok, Provider}) ->
+    application:set_env(vpn, kvs_transaction_provider, Provider);
+restore_provider(undefined) ->
+    application:unset_env(vpn, kvs_transaction_provider).
 
 remove_tree(Path) ->
     case filelib:is_dir(Path) of
