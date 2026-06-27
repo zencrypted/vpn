@@ -20,6 +20,7 @@
          enable/1,
          remove/1,
          remove_many/1,
+         remove_many_if_owned/3,
          config/1,
          enabled_configs/0,
          recovery_status/0]).
@@ -59,6 +60,18 @@ remove(PeerId) ->
 
 remove_many(PeerIds) ->
     gen_server:call(?SERVER, {remove_many, PeerIds}).
+
+%% @doc Idempotently remove only entries owned by the expected IAS Device.
+%%
+%% Missing entries are accepted for saga retry. Any present peer with a
+%% different Device or provisioning source aborts the whole batch before a
+%% mutation is made.
+remove_many_if_owned(DeviceId, PeerIds, ias)
+  when is_binary(DeviceId), byte_size(DeviceId) > 0,
+       is_list(PeerIds), PeerIds =/= [] ->
+    gen_server:call(?SERVER, {remove_many_if_owned, DeviceId, PeerIds, ias});
+remove_many_if_owned(_DeviceId, _PeerIds, _Source) ->
+    {error, invalid_owned_peer_removal_request}.
 
 %% Internal runtime access. Never expose the returned configuration through
 %% HTTP, JSON, logs, or administration status.
@@ -177,6 +190,23 @@ handle_call({remove_many, PeerIds}, _From, State) ->
         false ->
             {reply, {error, invalid_peer_ids}, State}
     end;
+handle_call({remove_many_if_owned, DeviceId, PeerIds, ias}, _From, State) ->
+    case valid_peer_ids(PeerIds) of
+        false ->
+            {reply, {error, invalid_peer_ids}, State};
+        true ->
+            case validate_owned_peer_removal(DeviceId, PeerIds) of
+                ok ->
+                    lists:foreach(
+                      fun(PeerId) -> true = ets:delete(?TABLE, PeerId) end,
+                      PeerIds),
+                    notify_reconciler(#{action => remove_many,
+                                        peer_ids => PeerIds}),
+                    {reply, ok, State};
+                {error, _} = Error ->
+                    {reply, Error, State}
+            end
+    end;
 handle_call(_Request, _From, State) ->
     {reply, {error, unsupported_operation}, State}.
 
@@ -185,6 +215,23 @@ handle_cast(_Message, State) ->
 
 handle_info(_Message, State) ->
     {noreply, State}.
+
+validate_owned_peer_removal(DeviceId, PeerIds) ->
+    lists:foldl(
+      fun(_PeerId, {error, _} = Error) -> Error;
+         (PeerId, ok) ->
+              case ets:lookup(?TABLE, PeerId) of
+                  [] -> ok;
+                  [{PeerId, Entry}] ->
+                      case {maps:get(device_id, Entry, undefined),
+                            maps:get(provisioning_source, Entry, undefined)} of
+                          {DeviceId, ias} -> ok;
+                          _ -> {error, {peer_ownership_conflict, PeerId}}
+                      end
+              end
+      end,
+      ok,
+      PeerIds).
 
 lookup(PeerId) ->
     case ets:lookup(?TABLE, PeerId) of

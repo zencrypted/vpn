@@ -59,6 +59,36 @@ registry_lifecycle_test_() ->
                       end)]
      end}.
 
+owned_batch_removal_is_fail_closed_and_idempotent_test_() ->
+    {setup,
+     fun setup/0,
+     fun cleanup/1,
+     fun(_Pid) ->
+             [?_test(begin
+                          Owned = (peer_config(peer_b))#{
+                                    device_id => <<"owned-device">>,
+                                    provisioning_source => ias},
+                          {ok, _} = vpn_peer_registry:put(Owned),
+                          ?assertEqual(
+                             {error, {peer_ownership_conflict, peer_a}},
+                             vpn_peer_registry:remove_many_if_owned(
+                               <<"owned-device">>, [peer_a, peer_b], ias)),
+                          ?assertMatch({ok, _}, vpn_peer_registry:get(peer_b)),
+                          ?assertEqual(ok,
+                                       vpn_peer_registry:remove_many_if_owned(
+                                         <<"owned-device">>,
+                                         [peer_b, missing_owned_peer],
+                                         ias)),
+                          ?assertEqual({error, not_found},
+                                       vpn_peer_registry:get(peer_b)),
+                          ?assertEqual(ok,
+                                       vpn_peer_registry:remove_many_if_owned(
+                                         <<"owned-device">>,
+                                         [peer_b, missing_owned_peer],
+                                         ias))
+                      end)]
+     end}.
+
 invalid_put_test_() ->
     {setup,
      fun setup/0,

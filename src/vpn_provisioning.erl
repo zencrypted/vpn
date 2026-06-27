@@ -10,8 +10,8 @@
 -module(vpn_provisioning).
 -behaviour(gen_server).
 
--export([start_link/0, apply/1, apply_dynamic/2, status/0, history/1,
-         recovery_heads/0]).
+-export([start_link/0, apply/1, apply_dynamic/2, decommission_orphan/1,
+         status/0, history/1, recovery_heads/0]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2]).
 
 -define(SERVER, ?MODULE).
@@ -32,6 +32,18 @@ apply(Command) ->
 %% two-step flow.
 apply_dynamic(DeviceId, Command) ->
     gen_server:call(?SERVER, {apply_dynamic, DeviceId, Command}, infinity).
+
+%% @doc Compare and remove an IAS-owned orphan from VPN.
+%%
+%% The caller supplies a fresh, non-secret snapshot selector. The operation
+%% fails closed when the durable heads, registry ownership, peer set, or
+%% allocator identity changed after that snapshot was produced. Successful
+%% retries are idempotent.
+-spec decommission_orphan(map()) -> {ok, map()} | {error, term()}.
+decommission_orphan(Request) when is_map(Request) ->
+    gen_server:call(?SERVER, {decommission_orphan, Request}, infinity);
+decommission_orphan(_Request) ->
+    {error, invalid_orphan_decommission_request}.
 
 status() ->
     gen_server:call(?SERVER, status).
@@ -79,6 +91,14 @@ handle_call({apply_dynamic, DeviceId, Command}, _From, State0) ->
         {error, Reason} ->
             Result = {error, Reason},
             {reply, Result, record_rejected(Command, Result, State1)}
+    end;
+handle_call({decommission_orphan, Request}, _From, State0) ->
+    case normalize_orphan_decommission_request(Request) of
+        {ok, Normalized} ->
+            {Reply, State1} = decommission_orphan_validated(Normalized, State0),
+            {reply, Reply, State1};
+        {error, Reason} ->
+            {reply, {error, Reason}, State0}
     end;
 handle_call(_Request, _From, State) ->
     {reply, {error, unsupported_operation}, State}.
@@ -757,6 +777,458 @@ durable_desired_state(Desired) when is_map(Desired) ->
               Desired);
 durable_desired_state(_Desired) ->
     #{}.
+
+
+%% ------------------------------------------------------------------
+%% Stage 7B orphan decommission boundary
+%% ------------------------------------------------------------------
+
+normalize_orphan_decommission_request(Request) when is_map(Request) ->
+    Allowed = [device_id,
+               expected_heads,
+               expected_peer_ids,
+               expected_source,
+               expected_allocation_id,
+               remove_identity],
+    Unknown = maps:keys(maps:without(Allowed, Request)),
+    DeviceId = maps:get(device_id, Request, undefined),
+    ExpectedHeads0 = maps:get(expected_heads, Request, undefined),
+    ExpectedPeerIds0 = maps:get(expected_peer_ids, Request, undefined),
+    ExpectedSource0 = maps:get(expected_source, Request, undefined),
+    ExpectedAllocationId = maps:get(expected_allocation_id,
+                                    Request,
+                                    undefined),
+    RemoveIdentity = maps:get(remove_identity, Request, false),
+    case {Unknown,
+          valid_orphan_device_id(DeviceId),
+          normalize_ias_source(ExpectedSource0),
+          normalize_expected_orphan_heads(ExpectedHeads0),
+          normalize_expected_peer_ids(ExpectedPeerIds0),
+          valid_optional_allocation_id(ExpectedAllocationId),
+          is_boolean(RemoveIdentity)} of
+        {[], true, {ok, ias}, {ok, ExpectedHeads}, {ok, ExpectedPeerIds},
+         true, true} ->
+            HeadPeerIds = [maps:get(peer_id, Head) || Head <- ExpectedHeads],
+            case lists:all(fun(PeerId) -> lists:member(PeerId, ExpectedPeerIds) end,
+                           HeadPeerIds) of
+                true ->
+                    {ok, #{device_id => DeviceId,
+                           expected_heads => ExpectedHeads,
+                           expected_peer_ids => ExpectedPeerIds,
+                           expected_source => ias,
+                           expected_allocation_id => ExpectedAllocationId,
+                           remove_identity => RemoveIdentity}};
+                false ->
+                    {error, orphan_snapshot_peer_set_mismatch}
+            end;
+        {[_ | _], _, _, _, _, _, _} ->
+            {error, {unknown_orphan_decommission_fields, Unknown}};
+        _ ->
+            {error, invalid_orphan_decommission_request}
+    end;
+normalize_orphan_decommission_request(_Request) ->
+    {error, invalid_orphan_decommission_request}.
+
+normalize_expected_orphan_heads(Heads) when is_list(Heads) ->
+    normalize_expected_orphan_heads(Heads, []);
+normalize_expected_orphan_heads(_Heads) ->
+    {error, invalid_expected_orphan_heads}.
+
+normalize_expected_orphan_heads([], Acc) ->
+    Normalized = sort_orphan_heads(Acc),
+    PeerIds = [maps:get(peer_id, Head) || Head <- Normalized],
+    case length(PeerIds) =:= length(lists:usort(PeerIds)) of
+        true -> {ok, Normalized};
+        false -> {error, duplicate_expected_orphan_head}
+    end;
+normalize_expected_orphan_heads([Head | Rest], Acc) when is_map(Head) ->
+    case normalize_expected_orphan_head(Head) of
+        {ok, Normalized} ->
+            normalize_expected_orphan_heads(Rest, [Normalized | Acc]);
+        {error, _} = Error -> Error
+    end;
+normalize_expected_orphan_heads([_Invalid | _Rest], _Acc) ->
+    {error, invalid_expected_orphan_head}.
+
+normalize_expected_orphan_head(Head) ->
+    PeerId = maps:get(peer_id, Head, undefined),
+    Revision = maps:get(revision, Head, undefined),
+    Digest = maps:get(digest, Head, undefined),
+    Phase = maps:get(phase, Head, undefined),
+    Source0 = maps:get(source, Head, undefined),
+    case valid_orphan_peer_id(PeerId) andalso
+         is_integer(Revision) andalso Revision >= 0 andalso
+         is_binary(Digest) andalso byte_size(Digest) =:= 32 andalso
+         lists:member(Phase, [pending, applied]) of
+        false -> {error, invalid_expected_orphan_head};
+        true ->
+            case normalize_ias_source(Source0) of
+                {ok, ias} ->
+                    {ok, #{peer_id => PeerId,
+                           revision => Revision,
+                           digest => Digest,
+                           phase => Phase,
+                           source => ias}};
+                error -> {error, invalid_expected_orphan_source}
+            end
+    end.
+
+normalize_expected_peer_ids(PeerIds) when is_list(PeerIds) ->
+    case lists:all(fun valid_orphan_peer_id/1, PeerIds) of
+        true -> {ok, sort_terms(lists:usort(PeerIds))};
+        false -> {error, invalid_expected_orphan_peer_ids}
+    end;
+normalize_expected_peer_ids(_PeerIds) ->
+    {error, invalid_expected_orphan_peer_ids}.
+
+normalize_ias_source(ias) -> {ok, ias};
+normalize_ias_source(<<"ias">>) -> {ok, ias};
+normalize_ias_source("ias") -> {ok, ias};
+normalize_ias_source(_) -> error.
+
+valid_orphan_device_id(Value) when is_binary(Value) -> byte_size(Value) > 0;
+valid_orphan_device_id(_) -> false.
+
+valid_orphan_peer_id(Value) when is_atom(Value) -> Value =/= undefined;
+valid_orphan_peer_id(Value) when is_binary(Value) -> byte_size(Value) > 0;
+valid_orphan_peer_id(_) -> false.
+
+valid_optional_allocation_id(undefined) -> true;
+valid_optional_allocation_id(Value) when is_binary(Value) -> byte_size(Value) > 0;
+valid_optional_allocation_id(_) -> false.
+
+decommission_orphan_validated(Request, State0) ->
+    DeviceId = maps:get(device_id, Request),
+    case current_orphan_snapshot(DeviceId, State0) of
+        {error, Reason} ->
+            {{error, Reason}, State0};
+        {ok, Snapshot} ->
+            case compare_orphan_snapshot(Request, Snapshot) of
+                already_absent ->
+                    {{ok, #{outcome => already_absent,
+                            device_id => DeviceId,
+                            completed_at => erlang:system_time(second)}},
+                     State0};
+                ok ->
+                    execute_orphan_decommission(Request, Snapshot, State0);
+                {error, Reason} ->
+                    {{error, Reason}, State0}
+            end
+    end.
+
+current_orphan_snapshot(DeviceId, State) ->
+    Heads0 = [{PeerId, Head}
+              || {PeerId, Head} <- maps:to_list(maps:get(heads, State)),
+                 maps:get(durable, Head, false) =:= true,
+                 orphan_head_device_id(Head) =:= DeviceId],
+    case lists:all(fun({_PeerId, Head}) ->
+                           normalize_ias_source(maps:get(source,
+                                                         Head,
+                                                         undefined)) =:=
+                               {ok, ias}
+                   end,
+                   Heads0) of
+        false -> {error, orphan_state_not_owned_by_ias};
+        true ->
+            case current_orphan_registry(DeviceId) of
+                {ok, RegistryEntries} ->
+                    case current_orphan_allocation(DeviceId) of
+                        {error, Reason} ->
+                            {error, {orphan_allocator_read_failed, Reason}};
+                        Allocation ->
+                            {ok, #{heads => Heads0,
+                                   head_summaries => sort_orphan_heads(
+                                                       [orphan_head_summary(PeerId, Head)
+                                                        || {PeerId, Head} <- Heads0]),
+                                   registry => RegistryEntries,
+                                   registry_peer_ids => sort_terms(
+                                                          [maps:get(id, Entry)
+                                                           || Entry <- RegistryEntries]),
+                                   allocation => Allocation}}
+                    end;
+                {error, _} = Error -> Error
+            end
+    end.
+
+current_orphan_registry(DeviceId) ->
+    case whereis(vpn_peer_registry) of
+        undefined -> {error, vpn_peer_registry_unavailable};
+        _Pid ->
+            Entries = [Entry || Entry <- vpn_peer_registry:list(),
+                                maps:get(device_id, Entry, undefined) =:= DeviceId],
+            case lists:all(fun(Entry) ->
+                                   normalize_ias_source(
+                                     maps:get(provisioning_source,
+                                              Entry,
+                                              undefined)) =:= {ok, ias}
+                           end,
+                           Entries) of
+                true -> {ok, Entries};
+                false -> {error, orphan_registry_not_owned_by_ias}
+            end
+    end.
+
+current_orphan_allocation(DeviceId) ->
+    case whereis(vpn_peer_allocator) of
+        undefined -> none;
+        _Pid ->
+            case vpn_peer_allocator:lookup(DeviceId) of
+                {ok, Allocation} -> {active, Allocation};
+                {error, not_found} ->
+                    case vpn_peer_allocator:released(DeviceId) of
+                        {ok, Released} -> {released, Released};
+                        {error, not_found} -> none;
+                        {error, Reason} -> {error, Reason}
+                    end;
+                {error, Reason} -> {error, Reason}
+            end
+    end.
+
+orphan_head_device_id(Head) ->
+    Desired = maps:get(desired_state, Head, #{}),
+    case maps:get(dynamic_device_id, Head, undefined) of
+        undefined -> maps:get(device_id, Desired, undefined);
+        DeviceId -> DeviceId
+    end.
+
+orphan_head_summary(PeerId, Head) ->
+    #{peer_id => PeerId,
+      revision => maps:get(revision, Head, undefined),
+      digest => maps:get(digest, Head, undefined),
+      phase => maps:get(phase, Head, applied),
+      source => ias}.
+
+compare_orphan_snapshot(Request, Snapshot) ->
+    ExpectedHeads = maps:get(expected_heads, Request),
+    CurrentHeads = maps:get(head_summaries, Snapshot),
+    ExpectedPeerIds = maps:get(expected_peer_ids, Request),
+    CurrentRegistryIds = maps:get(registry_peer_ids, Snapshot),
+    Allocation = maps:get(allocation, Snapshot),
+    CurrentStatePresent = CurrentHeads =/= [] orelse
+        CurrentRegistryIds =/= [] orelse allocation_active(Allocation),
+    case CurrentStatePresent of
+        false -> already_absent;
+        true ->
+            case CurrentHeads =:= ExpectedHeads of
+                false -> {error, orphan_snapshot_conflict};
+                true ->
+                    case lists:all(fun(PeerId) ->
+                                           lists:member(PeerId, ExpectedPeerIds)
+                                   end,
+                                   CurrentRegistryIds) andalso
+                         allocation_matches_snapshot(
+                           maps:get(expected_allocation_id, Request),
+                           Allocation,
+                           ExpectedPeerIds) of
+                        true -> ok;
+                        false -> {error, orphan_snapshot_conflict}
+                    end
+            end
+    end.
+
+allocation_active({active, _Allocation}) -> true;
+allocation_active(_) -> false.
+
+allocation_matches_snapshot(undefined, none, _ExpectedPeerIds) -> true;
+allocation_matches_snapshot(undefined, {error, _Reason}, _ExpectedPeerIds) -> false;
+allocation_matches_snapshot(undefined, {_State, _Allocation}, _ExpectedPeerIds) ->
+    false;
+allocation_matches_snapshot(ExpectedAllocationId, {State, Allocation}, ExpectedPeerIds)
+  when State =:= active; State =:= released ->
+    AllocationId = maps:get(allocation_id, Allocation, undefined),
+    AllocationPeers = [maps:get(client_peer_id, Allocation, undefined),
+                       maps:get(gateway_peer_id, Allocation, undefined)],
+    AllocationId =:= ExpectedAllocationId andalso
+    lists:all(fun(PeerId) -> lists:member(PeerId, ExpectedPeerIds) end,
+              AllocationPeers);
+allocation_matches_snapshot(_ExpectedAllocationId, _Allocation, _ExpectedPeerIds) ->
+    false.
+
+execute_orphan_decommission(Request, Snapshot, State0) ->
+    PeerIds = decommission_peer_ids(Request, Snapshot),
+    case remove_orphan_registry(maps:get(device_id, Request), PeerIds) of
+        ok ->
+            case release_orphan_allocation(Request, maps:get(allocation, Snapshot)) of
+                {ok, AllocationResult, IdentityState} ->
+                    case remove_orphan_heads(maps:get(heads, Snapshot), State0) of
+                        {ok, State1} ->
+                            {{ok, #{outcome => decommissioned,
+                                    device_id => maps:get(device_id, Request),
+                                    removed_peer_ids => PeerIds,
+                                    removed_head_ids =>
+                                        [PeerId || {PeerId, _Head} <-
+                                                       maps:get(heads, Snapshot)],
+                                    allocation => AllocationResult,
+                                    identity_state => IdentityState,
+                                    completed_at => erlang:system_time(second)}},
+                             State1};
+                        {error, Reason} -> {{error, Reason}, State0}
+                    end;
+                {error, Reason} -> {{error, Reason}, State0}
+            end;
+        {error, Reason} -> {{error, Reason}, State0}
+    end.
+
+decommission_peer_ids(Request, Snapshot) ->
+    HeadIds = [PeerId || {PeerId, _Head} <- maps:get(heads, Snapshot)],
+    RegistryIds = maps:get(registry_peer_ids, Snapshot),
+    AllocationIds = case maps:get(allocation, Snapshot) of
+                        {_State, Allocation} when is_map(Allocation) ->
+                            [maps:get(client_peer_id, Allocation, undefined),
+                             maps:get(gateway_peer_id, Allocation, undefined)];
+                        _ -> []
+                    end,
+    sort_terms(lists:usort([PeerId
+                            || PeerId <- maps:get(expected_peer_ids, Request) ++
+                                         HeadIds ++ RegistryIds ++ AllocationIds,
+                               valid_orphan_peer_id(PeerId)])).
+
+remove_orphan_registry(_DeviceId, []) -> ok;
+remove_orphan_registry(DeviceId, PeerIds) ->
+    case whereis(vpn_peer_registry) of
+        undefined -> {error, vpn_peer_registry_unavailable};
+        _Pid ->
+            case vpn_peer_registry:remove_many_if_owned(DeviceId,
+                                                         PeerIds,
+                                                         ias) of
+                ok -> reconcile_orphan_runtime(PeerIds);
+                {error, Reason} ->
+                    {error, {orphan_registry_removal_failed, Reason}}
+            end
+    end.
+
+reconcile_orphan_runtime(PeerIds) ->
+    Result = case whereis(vpn_peer_reconciler) of
+                 undefined ->
+                     lists:foldl(
+                       fun(PeerId, Acc) ->
+                               case vpn_manager:peer_running(PeerId) of
+                                   true ->
+                                       case vpn_manager:stop_peer(PeerId) of
+                                           ok -> Acc;
+                                           {error, not_found} -> Acc;
+                                           {error, Reason} -> [{PeerId, Reason} | Acc]
+                                       end;
+                                   false -> Acc
+                               end
+                       end,
+                       [],
+                       PeerIds);
+                 _Pid ->
+                     case vpn_peer_reconciler:reconcile_now() of
+                         #{failed := Failed} -> Failed;
+                         {error, Reason} -> [{runtime_reconcile, Reason}];
+                         _ -> []
+                     end
+             end,
+    case Result of
+        [] -> ok;
+        _ -> {error, {orphan_runtime_removal_failed, Result}}
+    end.
+
+release_orphan_allocation(_Request, none) ->
+    {ok, none, not_applicable};
+release_orphan_allocation(_Request, {error, Reason}) ->
+    {error, {orphan_allocator_read_failed, Reason}};
+release_orphan_allocation(Request, {_State, _Allocation}) ->
+    DeviceId = maps:get(device_id, Request),
+    ExpectedAllocationId = maps:get(expected_allocation_id, Request),
+    case vpn_peer_allocator:release_if(DeviceId, ExpectedAllocationId) of
+        {ok, Released} -> finish_orphan_allocation(Request, Released);
+        {error, allocation_snapshot_conflict} ->
+            {error, orphan_snapshot_conflict};
+        {error, Reason} -> {error, {orphan_allocation_release_failed, Reason}}
+    end.
+
+finish_orphan_allocation(Request, Allocation) ->
+    case maybe_release_orphan_identity(maps:get(remove_identity, Request),
+                                       Allocation) of
+        {ok, IdentityState} ->
+            {ok, maps:with([allocation_id,
+                            allocator_instance_id,
+                            slot,
+                            generation,
+                            client_peer_id,
+                            gateway_peer_id,
+                            state,
+                            released_at],
+                           Allocation),
+             IdentityState};
+        {error, Reason} ->
+            {error, {orphan_identity_release_failed, Reason}}
+    end.
+
+maybe_release_orphan_identity(false, _Allocation) -> {ok, retained};
+maybe_release_orphan_identity(true, Allocation) ->
+    AllocationId = maps:get(allocation_id, Allocation, undefined),
+    Provider = application:get_env(vpn,
+                                   dynamic_identity_factory_module,
+                                   vpn_dynamic_identity_factory),
+    try Provider:release(AllocationId) of
+        {ok, _SafeResult} -> {ok, removed};
+        {error, dynamic_identity_not_found} -> {ok, absent};
+        {error, not_found} -> {ok, absent};
+        {error, Reason} -> {error, Reason};
+        Other -> {error, {invalid_dynamic_identity_release_result, Other}}
+    catch
+        error:undef -> {error, {dynamic_identity_release_unsupported, Provider}};
+        Class:Reason ->
+            {error, {dynamic_identity_release_failed, Provider, Class, Reason}}
+    end.
+
+remove_orphan_heads([], State) -> {ok, State};
+remove_orphan_heads(Heads, State) ->
+    Expected = maps:from_list(
+                 [{PeerId, maps:remove(durable, Head)}
+                  || {PeerId, Head} <- Heads]),
+    PeerIds = maps:keys(Expected),
+    Update = fun(Section0) ->
+                     case normalize_provisioning_section(Section0) of
+                         {ok, Entries0} ->
+                             case lists:all(
+                                    fun(PeerId) ->
+                                            maps:get(PeerId,
+                                                     Entries0,
+                                                     undefined) =:=
+                                                maps:get(PeerId, Expected)
+                                    end,
+                                    PeerIds) of
+                                 true ->
+                                     {ok, #{schema_version => 1,
+                                            entries =>
+                                                lists:foldl(fun maps:remove/2,
+                                                            Entries0,
+                                                            PeerIds)}};
+                                 false ->
+                                     {error, orphan_snapshot_conflict}
+                             end;
+                         {error, _} = Error -> Error
+                     end
+             end,
+    case vpn_projection:update(provisioning, Update) of
+        {ok, _Version, _Projection} ->
+            {ok, remove_heads_from_state(PeerIds, State)};
+        {ok, unchanged, _Version, _Projection} ->
+            {ok, remove_heads_from_state(PeerIds, State)};
+        {error, Reason} -> {error, {orphan_head_removal_failed, Reason}};
+        Other -> {error, {invalid_orphan_head_removal_result, Other}}
+    end.
+
+remove_heads_from_state(PeerIds, State) ->
+    Heads0 = maps:get(heads, State),
+    Heads = lists:foldl(fun maps:remove/2, Heads0, PeerIds),
+    State#{heads => Heads}.
+
+sort_orphan_heads(Heads) ->
+    lists:sort(fun(A, B) ->
+                       term_to_binary(maps:get(peer_id, A)) =<
+                           term_to_binary(maps:get(peer_id, B))
+               end,
+               Heads).
+
+sort_terms(Terms) ->
+    lists:sort(fun(A, B) -> term_to_binary(A) =< term_to_binary(B) end,
+               Terms).
 
 provisioning_status(State) ->
     Heads = maps:get(heads, State),

@@ -56,7 +56,14 @@ allocation_lifecycle_test_() ->
                           ?assertEqual({error, exhausted},
                                        vpn_peer_allocator:ensure(DeviceC)),
 
-                          {ok, ReleasedA} = vpn_peer_allocator:release(DeviceA),
+                          AllocationAId = maps:get(allocation_id, AllocationA1),
+                          ?assertEqual({error, allocation_snapshot_conflict},
+                                       vpn_peer_allocator:release_if(
+                                         DeviceA, <<"stale-allocation">>)),
+                          ?assertEqual({ok, AllocationA1},
+                                       vpn_peer_allocator:lookup(DeviceA)),
+                          {ok, ReleasedA} = vpn_peer_allocator:release_if(
+                                               DeviceA, AllocationAId),
                           ?assertEqual(released, maps:get(state, ReleasedA)),
                           ?assertEqual(durable,
                                        maps:get(persistence, ReleasedA)),
@@ -69,7 +76,11 @@ allocation_lifecycle_test_() ->
                           ?assertEqual({ok, ReleasedA},
                                        vpn_peer_allocator:released(DeviceA)),
                           ?assertEqual({ok, ReleasedA},
-                                       vpn_peer_allocator:release(DeviceA)),
+                                       vpn_peer_allocator:release_if(
+                                         DeviceA, AllocationAId)),
+                          ?assertEqual({error, allocation_snapshot_conflict},
+                                       vpn_peer_allocator:release_if(
+                                         DeviceA, <<"other-allocation">>)),
 
                           {ok, AllocationC} = vpn_peer_allocator:ensure(DeviceC),
                           ?assertEqual(1, maps:get(slot, AllocationC)),

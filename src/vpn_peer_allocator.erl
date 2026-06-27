@@ -19,6 +19,7 @@
          lookup/1,
          released/1,
          release/1,
+         release_if/2,
          list/0,
          status/0]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2]).
@@ -56,6 +57,15 @@ release(DeviceId) when is_binary(DeviceId), byte_size(DeviceId) > 0 ->
     gen_server:call(?SERVER, {release, DeviceId});
 release(_DeviceId) ->
     {error, invalid_device_id}.
+
+%% @doc Release only the allocation identified by the caller snapshot.
+%% A previously released matching allocation is returned idempotently.
+release_if(DeviceId, AllocationId)
+  when is_binary(DeviceId), byte_size(DeviceId) > 0,
+       is_binary(AllocationId), byte_size(AllocationId) > 0 ->
+    gen_server:call(?SERVER, {release_if, DeviceId, AllocationId});
+release_if(_DeviceId, _AllocationId) ->
+    {error, invalid_allocation_release_request}.
 
 -spec list() -> [allocation()].
 list() ->
@@ -102,36 +112,10 @@ handle_call({released, DeviceId}, _From,
                 error -> {error, not_found}
             end,
     {reply, Reply, State};
-handle_call({release, DeviceId}, _From,
-            State = #{by_device := ByDevice,
-                      by_slot := BySlot,
-                      released_by_device := ReleasedByDevice}) ->
-    case maps:take(DeviceId, ByDevice) of
-        {Allocation, RemainingByDevice} ->
-            Slot = maps:get(slot, Allocation),
-            RemainingBySlot = maps:remove(Slot, BySlot),
-            Released = Allocation#{state => released,
-                                     released_at =>
-                                         erlang:system_time(second)},
-            NewReleasedByDevice = ReleasedByDevice#{DeviceId => Released},
-            NewSection = allocator_section(State,
-                                           RemainingByDevice,
-                                           NewReleasedByDevice,
-                                           maps:get(next_generation, State)),
-            case commit_allocator_section(NewSection, State) of
-                {ok, CommittedState} ->
-                    {reply, {ok, Released},
-                     CommittedState#{by_slot => RemainingBySlot}};
-                {error, Reason} ->
-                    {reply, {error, {allocator_persistence_failed, Reason}},
-                     State}
-            end;
-        error ->
-            case maps:find(DeviceId, ReleasedByDevice) of
-                {ok, Released} -> {reply, {ok, Released}, State};
-                error -> {reply, {error, not_found}, State}
-            end
-    end;
+handle_call({release, DeviceId}, _From, State) ->
+    release_allocation(DeviceId, any, State);
+handle_call({release_if, DeviceId, AllocationId}, _From, State) ->
+    release_allocation(DeviceId, {expected, AllocationId}, State);
 handle_call(list, _From, State = #{by_device := ByDevice}) ->
     Allocations = maps:values(ByDevice),
     Sorted = lists:sort(fun compare_allocations/2, Allocations),
@@ -153,6 +137,54 @@ handle_cast(_Message, State) ->
 
 handle_info(_Message, State) ->
     {noreply, State}.
+
+release_allocation(DeviceId,
+                   Expected,
+                   State = #{by_device := ByDevice,
+                             by_slot := BySlot,
+                             released_by_device := ReleasedByDevice}) ->
+    case maps:take(DeviceId, ByDevice) of
+        {Allocation, RemainingByDevice} ->
+            case allocation_matches_expected(Allocation, Expected) of
+                false ->
+                    {reply, {error, allocation_snapshot_conflict}, State};
+                true ->
+                    Slot = maps:get(slot, Allocation),
+                    RemainingBySlot = maps:remove(Slot, BySlot),
+                    Released = Allocation#{state => released,
+                                           released_at =>
+                                               erlang:system_time(second)},
+                    NewReleasedByDevice = ReleasedByDevice#{DeviceId => Released},
+                    NewSection = allocator_section(
+                                   State,
+                                   RemainingByDevice,
+                                   NewReleasedByDevice,
+                                   maps:get(next_generation, State)),
+                    case commit_allocator_section(NewSection, State) of
+                        {ok, CommittedState} ->
+                            {reply, {ok, Released},
+                             CommittedState#{by_slot => RemainingBySlot}};
+                        {error, Reason} ->
+                            {reply,
+                             {error, {allocator_persistence_failed, Reason}},
+                             State}
+                    end
+            end;
+        error ->
+            case maps:find(DeviceId, ReleasedByDevice) of
+                {ok, Released} ->
+                    case allocation_matches_expected(Released, Expected) of
+                        true -> {reply, {ok, Released}, State};
+                        false ->
+                            {reply, {error, allocation_snapshot_conflict}, State}
+                    end;
+                error -> {reply, {error, not_found}, State}
+            end
+    end.
+
+allocation_matches_expected(_Allocation, any) -> true;
+allocation_matches_expected(Allocation, {expected, AllocationId}) ->
+    maps:get(allocation_id, Allocation, undefined) =:= AllocationId.
 
 reserve(DeviceId,
         State = #{config := Config,

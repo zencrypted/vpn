@@ -67,6 +67,70 @@ provisioning_contract_test_() ->
                       end)]
      end}.
 
+
+orphan_decommission_compare_and_remove_test_() ->
+    {setup,
+     fun setup/0,
+     fun cleanup/1,
+     fun({_Registry, _Provisioning}) ->
+             [?_test(begin
+                          Command = command(
+                                      1,
+                                      upsert,
+                                      #{device_id => <<"safe-device">>,
+                                        enabled => false,
+                                        authorized => true,
+                                        recovery_manifest =>
+                                            valid_recovery_manifest()}),
+                          ?assertMatch({ok, #{operation := upsert}},
+                                       vpn_provisioning:apply(Command)),
+                          Request = orphan_decommission_request(
+                                      <<"safe-device">>),
+                          Foreign = (peer_config(peer_b))#{
+                                      device_id => <<"foreign-device">>,
+                                      provisioning_source => ias},
+                          {ok, _} = vpn_peer_registry:put(Foreign),
+                          Unsafe = Request#{expected_peer_ids =>
+                                               [peer_a, peer_b]},
+                          ?assertEqual(
+                             {error,
+                              {orphan_registry_removal_failed,
+                               {peer_ownership_conflict, peer_b}}},
+                             vpn_provisioning:decommission_orphan(Unsafe)),
+                          ?assertMatch({ok, _},
+                                       vpn_peer_registry:get(peer_a)),
+                          ?assertMatch({ok, _},
+                                       vpn_peer_registry:get(peer_b)),
+                          ok = vpn_peer_registry:remove(peer_b),
+                          [ExpectedHead] = maps:get(expected_heads, Request),
+                          Stale = Request#{expected_heads =>
+                                              [ExpectedHead#{digest =>
+                                                   crypto:strong_rand_bytes(32)}]},
+                          ?assertEqual({error, orphan_snapshot_conflict},
+                                       vpn_provisioning:decommission_orphan(Stale)),
+                          ?assertMatch({ok, #{outcome := decommissioned,
+                                             device_id := <<"safe-device">>}},
+                                       vpn_provisioning:decommission_orphan(Request)),
+                          ?assertEqual({error, not_found},
+                                       vpn_peer_registry:get(peer_a)),
+                          {ok, HeadsAfter} = vpn_provisioning:recovery_heads(),
+                          ?assertEqual(false, maps:is_key(peer_a, HeadsAfter)),
+                          ?assertMatch({ok, #{outcome := already_absent}},
+                                       vpn_provisioning:decommission_orphan(Request))
+                      end)]
+     end}.
+
+orphan_decommission_request_validation_test_() ->
+    {setup,
+     fun setup/0,
+     fun cleanup/1,
+     fun({_Registry, _Provisioning}) ->
+             [?_assertEqual({error, invalid_orphan_decommission_request},
+                            vpn_provisioning:decommission_orphan(#{})),
+              ?_assertEqual({error, invalid_orphan_decommission_request},
+                            vpn_provisioning:decommission_orphan(not_a_map))]
+     end}.
+
 authorization_metadata_normalization_test_() ->
     {setup,
      fun setup/0,
@@ -569,6 +633,30 @@ invalid_command_test_() ->
                             vpn_provisioning:apply(command(-1, disable, #{}))),
               ?_assertEqual({error, invalid_command}, vpn_provisioning:apply(not_a_map))]
      end}.
+
+
+orphan_decommission_request(DeviceId) ->
+    {ok, Heads} = vpn_provisioning:recovery_heads(),
+    ExpectedHeads = lists:sort(
+                      [#{peer_id => PeerId,
+                         revision => maps:get(revision, Head),
+                         digest => maps:get(digest, Head),
+                         phase => maps:get(phase, Head),
+                         source => ias}
+                       || {PeerId, Head} <- maps:to_list(Heads),
+                          maps:get(device_id,
+                                   maps:get(desired_state, Head, #{}),
+                                   undefined) =:= DeviceId]),
+    RegistryPeerIds = [maps:get(id, Entry)
+                       || Entry <- vpn_peer_registry:list(),
+                          maps:get(device_id, Entry, undefined) =:= DeviceId],
+    HeadPeerIds = [maps:get(peer_id, Head) || Head <- ExpectedHeads],
+    #{device_id => DeviceId,
+      expected_heads => ExpectedHeads,
+      expected_peer_ids => lists:usort(HeadPeerIds ++ RegistryPeerIds),
+      expected_source => ias,
+      expected_allocation_id => undefined,
+      remove_identity => false}.
 
 command(Revision, Operation, Desired) ->
     #{peer_id => peer_a,
