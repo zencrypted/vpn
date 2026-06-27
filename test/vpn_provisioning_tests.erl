@@ -151,7 +151,8 @@ runtime_secret_material_is_not_persisted_test_() ->
                                       #{runtime_config => peer_config(peer_b),
                                         device_id => <<"safe-device">>,
                                         enabled => false,
-                                        authorized => true}),
+                                        authorized => true,
+                                        recovery_manifest => valid_recovery_manifest()}),
                           ?assertMatch({ok, #{operation := upsert}},
                                        vpn_provisioning:apply(Command)),
                           {ok, _Version,
@@ -165,7 +166,13 @@ runtime_secret_material_is_not_persisted_test_() ->
                           ?assertEqual(false,
                                        maps:is_key(private_key_path, Desired)),
                           ?assertEqual(<<"safe-device">>,
-                                       maps:get(device_id, Desired))
+                                       maps:get(device_id, Desired)),
+                          ?assertEqual(valid_recovery_manifest(),
+                                       maps:get(recovery_manifest, Desired)),
+                          {ok, RuntimeConfig} = vpn_peer_registry:config(peer_b),
+                          ?assertEqual(false,
+                                       maps:is_key(recovery_manifest,
+                                                   RuntimeConfig))
                       end)]
      end}.
 
@@ -418,6 +425,48 @@ unsupported_provisioning_schema_fails_closed_test_() ->
      end}.
 
 
+invalid_durable_recovery_manifest_fails_closed_test_() ->
+    {setup,
+     fun setup/0,
+     fun cleanup/1,
+     fun({_Registry, Provisioning}) ->
+             [?_test(begin
+                          Command = command(1, upsert,
+                                            #{device_id => <<"safe-device">>,
+                                              enabled => true,
+                                              authorized => true,
+                                              recovery_manifest =>
+                                                  valid_recovery_manifest()}),
+                          ?assertMatch({ok, #{operation := upsert}},
+                                       vpn_provisioning:apply(Command)),
+                          {ok, _Version, _Projection} =
+                              vpn_projection:update(
+                                provisioning,
+                                fun(Section) ->
+                                        Entries0 = maps:get(entries, Section),
+                                        Entry0 = maps:get(peer_a, Entries0),
+                                        Desired0 = maps:get(desired_state, Entry0),
+                                        Manifest0 = maps:get(recovery_manifest,
+                                                             Desired0),
+                                        Invalid = Manifest0#{private_key =>
+                                                                <<"secret">>},
+                                        Entry = Entry0#{desired_state =>
+                                                           Desired0#{
+                                                             recovery_manifest =>
+                                                                 Invalid}},
+                                        Section#{entries => Entries0#{peer_a =>
+                                                                         Entry}}
+                                end),
+                          stop_pid_normal(Provisioning),
+                          Expected =
+                              {provisioning_projection_restore_failed,
+                               {invalid_provisioning_entry, peer_a}},
+                          ?assertEqual({error, Expected},
+                                       start_provisioning_fail_closed(Expected))
+                      end)]
+     end}.
+
+
 certificate_fingerprint_validation_test() ->
     Actual = <<"ACTUAL-FINGERPRINT">>,
     Matching = #{certificate_fingerprint => Actual,
@@ -493,6 +542,18 @@ invalid_static_template_fails_closed_test_() ->
                             vpn_provisioning:apply(new_peer_command(1, upsert,
                                                                     #{enabled => true,
                                                                       authorized => true})))]
+     end}.
+
+invalid_recovery_manifest_is_rejected_test_() ->
+    {setup,
+     fun setup/0,
+     fun cleanup/1,
+     fun({_Registry, _Provisioning}) ->
+             Invalid = (valid_recovery_manifest())#{private_key => <<"secret">>},
+             [?_assertEqual({error, invalid_recovery_manifest},
+                            vpn_provisioning:apply(
+                              command(1, upsert,
+                                      #{recovery_manifest => Invalid}))) ]
      end}.
 
 invalid_command_test_() ->
@@ -615,6 +676,35 @@ static_template() ->
       replay_window => #{counter => 1},
       link_pid => self()}.
 
+
+valid_recovery_manifest() ->
+    #{schema_version => 1,
+      provisioning_transaction_id => <<"ovpn_provisioning_vpn_test">>,
+      wizard_id => <<"wizard_vpn_test">>,
+      device => #{kind => device, id => <<"safe-device">>},
+      certificate => #{kind => certificate, id => <<"safe-certificate">>,
+                       fingerprint_sha256 => <<"SAFE-FINGERPRINT">>},
+      vpn_service => #{kind => vpn_service, id => <<"safe-service">>,
+                       remote_host => <<"vpn.example.test">>,
+                       remote_port => 1194,
+                       protocol => udp},
+      objects => [#{kind => device, id => <<"safe-device">>},
+                  #{kind => certificate, id => <<"safe-certificate">>,
+                    fingerprint_sha256 => <<"SAFE-FINGERPRINT">>},
+                  #{kind => vpn_service, id => <<"safe-service">>,
+                    remote_host => <<"vpn.example.test">>,
+                    remote_port => 1194,
+                    protocol => udp}],
+      relationships => [#{relation_type => uses_certificate,
+                          source_kind => device,
+                          source_id => <<"safe-device">>,
+                          target_kind => certificate,
+                          target_id => <<"safe-certificate">>},
+                        #{relation_type => uses_service,
+                          source_kind => device,
+                          source_id => <<"safe-device">>,
+                          target_kind => vpn_service,
+                          target_id => <<"safe-service">>}]}.
 
 start_provisioning_fail_closed(ExpectedReason) ->
     PreviousTrapExit = process_flag(trap_exit, true),

@@ -208,7 +208,8 @@ prepare_dynamic_command(#{dynamic_device_id := DeviceId,
                     Metadata = #{revision => Revision,
                                  source => Source,
                                  operation => upsert},
-                    {ok, {dynamic_upsert, DeviceId, Desired, Metadata}};
+                    RuntimeDesired = maps:remove(recovery_manifest, Desired),
+                    {ok, {dynamic_upsert, DeviceId, RuntimeDesired, Metadata}};
                 false ->
                     {error, {dynamic_pair_client_peer_mismatch,
                              ExpectedPeerId,
@@ -227,9 +228,10 @@ prepare_command(Command = #{operation := Operation,
                             revision := Revision,
                             source := Source}) ->
     Desired = maps:get(desired_state, Command, #{}),
-    case base_config(PeerId, Desired) of
+    RuntimeDesired = maps:remove(recovery_manifest, Desired),
+    case base_config(PeerId, RuntimeDesired) of
         {ok, BaseConfig} ->
-            case next_config(Operation, BaseConfig, Desired) of
+            case next_config(Operation, BaseConfig, RuntimeDesired) of
                 {ok, Next0} ->
                     Now = erlang:system_time(second),
                     Next = Next0#{id => PeerId,
@@ -475,17 +477,29 @@ validate_command(Command) when is_map(Command) ->
     Desired = maps:get(desired_state, Command, #{}),
     case {valid_peer_id(PeerId), is_integer(Revision) andalso Revision >= 0,
           lists:member(Operation, [upsert, enable, disable, revoke, remove]),
-          valid_source(Source), is_map(Desired)} of
-        {true, true, true, true, true} ->
+          valid_source(Source), is_map(Desired),
+          validate_recovery_manifest(Desired)} of
+        {true, true, true, true, true, ok} ->
             {ok, #{peer_id => PeerId,
                    revision => Revision,
                    operation => Operation,
                    source => Source,
                    desired_state => Desired}};
+        {true, true, true, true, true, {error, Reason}} ->
+            {error, Reason};
         _ -> {error, invalid_command}
     end;
 validate_command(_) ->
     {error, invalid_command}.
+
+
+validate_recovery_manifest(Desired) when is_map(Desired) ->
+    case maps:get(recovery_manifest, Desired, undefined) of
+        undefined -> ok;
+        Manifest -> vpn_recovery_manifest:validate(Manifest)
+    end;
+validate_recovery_manifest(_Desired) ->
+    {error, invalid_recovery_manifest}.
 
 valid_peer_id(Value) when is_atom(Value) -> Value =/= undefined;
 valid_peer_id(Value) when is_binary(Value) -> byte_size(Value) > 0;
@@ -621,6 +635,7 @@ valid_provisioning_entry(Entry) when is_map(Entry) ->
     valid_source(Source) andalso
     lists:member(Lifecycle, [active, disabled, revoked, removed]) andalso
     is_map(Desired) andalso
+    validate_recovery_manifest(Desired) =:= ok andalso
     is_integer(UpdatedAt) andalso UpdatedAt >= 0 andalso
     (DynamicDeviceId =:= undefined orelse
      (is_binary(DynamicDeviceId) andalso byte_size(DynamicDeviceId) > 0));
@@ -737,7 +752,8 @@ durable_desired_state(Desired) when is_map(Desired) ->
                allocation_slot,
                allocation_generation,
                allocation_role,
-               remote_peer_id],
+               remote_peer_id,
+               recovery_manifest],
               Desired);
 durable_desired_state(_Desired) ->
     #{}.
