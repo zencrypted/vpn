@@ -668,44 +668,6 @@ peer table visible
 counts visible
 ```
 
-### Verify N2O dashboard
-
-Open:
-
-```text
-http://localhost:8080/admin/n2o
-```
-
-Expected:
-
-```text
-Reload Config button
-peer table
-Start / Stop actions
-```
-
-### Interactive demo
-
-Stop `peer_a` from the N2O dashboard. Expected result:
-
-```text
-Running Peers: 1
-Stopped Peers: 1
-```
-
-Start `peer_a` again. Expected result:
-
-```text
-Running Peers: 2
-Stopped Peers: 0
-```
-
-Click `Reload Config`. Expected result:
-
-```text
-Configuration reloaded
-```
-
 ### Current Milestone
 
 ```text
@@ -987,67 +949,7 @@ POST /admin/reload
 
 Each action redirects back to `/admin` with `HTTP 303 See Other`. The controls
 delegate to the existing `vpn_manager` functions and do not add JavaScript,
-N2O, WebSockets, authentication, authorization, or certificate management.
-
-## N2O Dashboard
-
-A read-only N2O/Nitro dashboard page is available separately from the plain
-Cowboy dashboard:
-
-```text
-http://localhost:8080/admin/n2o
-```
-
-It renders `VPN Dashboard (N2O)`, peer counts, and the peer table from
-`vpn_admin:summary_view/0`. It does not include start/stop/reload actions, live
-updates, WebSockets, authentication, authorization, or certificate actions.
-
-Both dashboard paths use the same UI model:
-
-```text
-vpn_manager
-    ↓
-vpn_admin
-    ↓
-summary_view
-    ↓
-Cowboy UI
-
-vpn_manager
-    ↓
-vpn_admin
-    ↓
-summary_view
-    ↓
-N2O UI
-```
-
-Runtime validation:
-
-```bash
-curl -i http://localhost:8080/admin/n2o
-```
-
-Expected:
-
-```text
-HTTP/1.1 200 OK
-content-type: text/html
-```
-
-## Interactive N2O Dashboard
-
-The N2O dashboard includes interactive controls that update the counts and peer
-table without a browser page reload:
-
-```text
-Start peer
-Stop peer
-Reload config
-```
-
-The controls use N2O events and Nitro DOM updates. Displayed state still comes
-from `vpn_admin:summary_view/0`.
+WebSockets, authentication, authorization, or certificate management.
 
 ## Certificate Inventory
 
