@@ -611,6 +611,71 @@ invalid_static_template_fails_closed_test_() ->
                                                                       authorized => true})))]
      end}.
 
+legacy_head_is_migrated_on_startup_without_replay_test_() ->
+    {setup,
+     fun setup/0,
+     fun cleanup/1,
+     fun({_Registry, Provisioning}) ->
+             [?_test(begin
+                          stop_pid_normal(Provisioning),
+                          Desired = #{device_id => <<"legacy-device">>,
+                                      enabled => true,
+                                      revoked => false,
+                                      authorized => true,
+                                      authorization_mode => policy,
+                                      authorization_reason =>
+                                          profile_allows_vpn},
+                          LegacyEntry =
+                              #{revision => 4,
+                                digest => crypto:strong_rand_bytes(32),
+                                digest_version => 1,
+                                phase => applied,
+                                operation => upsert,
+                                source => ias,
+                                lifecycle_state => active,
+                                desired_state => Desired,
+                                dynamic_device_id => <<"legacy-device">>,
+                                updated_at => 1234},
+                          {ok, _Version1, _Projection1} =
+                              vpn_projection:update(
+                                provisioning,
+                                fun(_Section) ->
+                                        {ok, #{schema_version => 2,
+                                               entries =>
+                                                   #{peer_a => LegacyEntry}}}
+                                end),
+                          Command = #{peer_id => peer_a,
+                                      revision => 4,
+                                      operation => upsert,
+                                      source => ias,
+                                      desired_state =>
+                                          maps:remove(revoked, Desired)},
+                          ExpectedDigest =
+                              vpn_provisioning_command_digest:digest(Command),
+
+                          {ok, _Restarted} = vpn_provisioning:start_link(),
+                          {ok, Version2,
+                           #{provisioning :=
+                                 #{schema_version := 2,
+                                   entries := #{peer_a := Migrated}}}} =
+                              vpn_projection:get(),
+                          ?assertEqual(2,
+                                       maps:get(digest_version, Migrated)),
+                          ?assertEqual(ExpectedDigest,
+                                       maps:get(digest, Migrated)),
+                          ?assertEqual(Desired,
+                                       maps:get(desired_state, Migrated)),
+                          ?assertEqual(4, maps:get(revision, Migrated)),
+                          ?assertEqual(applied, maps:get(phase, Migrated)),
+
+                          {ok, Heads} = vpn_provisioning:recovery_heads(),
+                          Head = maps:get(peer_a, Heads),
+                          ?assertEqual(ExpectedDigest, maps:get(digest, Head)),
+                          ?assertEqual(2, maps:get(digest_version, Head)),
+                          {ok, Version2, _Projection2} = vpn_projection:get()
+                      end)]
+     end}.
+
 invalid_recovery_manifest_is_rejected_test_() ->
     {setup,
      fun setup/0,

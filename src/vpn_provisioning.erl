@@ -564,7 +564,7 @@ restore_heads() ->
 recovery_heads() ->
     case vpn_projection:get() of
         {ok, _ProjectionVersion, #{provisioning := Section}} ->
-            case normalize_provisioning_section(Section) of
+            case migrate_loaded_provisioning_section(Section) of
                 {ok, Entries} ->
                     {ok,
                      maps:map(
@@ -628,6 +628,80 @@ bootstrap_head_from_entry(Entry) ->
 lifecycle_from_safe_entry(#{revoked := true}) -> revoked;
 lifecycle_from_safe_entry(#{enabled := false}) -> disabled;
 lifecycle_from_safe_entry(_) -> active.
+
+
+
+migrate_loaded_provisioning_section(Section) ->
+    case normalize_provisioning_section(Section) of
+        {ok, Entries0} ->
+            {Entries, Changed} = migrate_loaded_provisioning_entries(Entries0),
+            case Changed of
+                false ->
+                    {ok, Entries};
+                true ->
+                    persist_loaded_provisioning_migration(Entries0, Entries)
+            end;
+        {error, _} = Error ->
+            Error
+    end.
+
+migrate_loaded_provisioning_entries(Entries0) ->
+    maps:fold(
+      fun(PeerId, Entry0, {Acc, Changed0}) ->
+              case maps:get(digest_version, Entry0, 1) of
+                  1 ->
+                      Entry = migrate_loaded_provisioning_entry(PeerId, Entry0),
+                      {Acc#{PeerId => Entry}, true};
+                  _ ->
+                      {Acc#{PeerId => Entry0}, Changed0}
+              end
+      end,
+      {#{}, false},
+      Entries0).
+
+migrate_loaded_provisioning_entry(PeerId, Entry0) ->
+    Command = #{peer_id => PeerId,
+                revision => maps:get(revision, Entry0),
+                operation => maps:get(operation, Entry0),
+                source => maps:get(source, Entry0),
+                desired_state =>
+                    normalize_legacy_projection_desired_state(
+                      maps:get(desired_state, Entry0))},
+    Entry0#{digest => vpn_provisioning_command_digest:digest(Command),
+            digest_version =>
+                vpn_provisioning_command_digest:schema_version()}.
+
+%% Legacy heads persisted registry projection defaults rather than the exact
+%% IAS command desired_state. A non-revoked registry row always contributed
+%% revoked => false, so it must be removed when reconstructing the command.
+normalize_legacy_projection_desired_state(#{revoked := false} = Desired) ->
+    maps:remove(revoked, Desired);
+normalize_legacy_projection_desired_state(Desired) ->
+    Desired.
+
+persist_loaded_provisioning_migration(ExpectedEntries, MigratedEntries) ->
+    Update =
+        fun(Section0) ->
+                case normalize_provisioning_section(Section0) of
+                    {ok, ExpectedEntries} ->
+                        {ok, #{schema_version => ?PROVISIONING_SCHEMA_VERSION,
+                               entries => MigratedEntries}};
+                    {ok, _OtherEntries} ->
+                        {error, provisioning_projection_conflict};
+                    {error, _} = Error ->
+                        Error
+                end
+        end,
+    case vpn_projection:update(provisioning, Update) of
+        {ok, _Version, _Projection} ->
+            {ok, MigratedEntries};
+        {ok, unchanged, _Version, _Projection} ->
+            {ok, MigratedEntries};
+        {error, Reason} ->
+            {error, {provisioning_digest_migration_failed, Reason}};
+        Other ->
+            {error, {invalid_provisioning_digest_migration_result, Other}}
+    end.
 
 normalize_provisioning_section(Section) when map_size(Section) =:= 0 ->
     {ok, #{}};
