@@ -59,3 +59,11 @@ checksum, so it must never be run as an automatic boot fallback.
   produces `conflict` rather than overwriting newer state.
 - Application startup never ignores an invalid checksum and never migrates
   records automatically.
+## Separate provisioning-head migration
+
+This document covers only the outer checksum of the complete projection record.
+IAS provisioning heads stored inside the projection have their own command
+digest and schema version. Legacy provisioning-head digests are migrated
+automatically during normal VPN recovery after the outer projection checksum has
+been accepted. See `OTP-28-MIGRATION.md` for the complete upgrade order and
+verification procedure.
