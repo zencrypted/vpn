@@ -32,11 +32,12 @@ summary_view() ->
 
 summary_json() ->
     try
-        jiffy:encode(summary_view())
+        iolist_to_binary(json:encode(summary_view()))
     catch
         _:Reason ->
-            jiffy:encode(#{error => <<"summary_generation_failed">>,
-                           reason => iolist_to_binary(io_lib:format("~p", [Reason]))})
+            iolist_to_binary(
+              json:encode(#{error => <<"summary_generation_failed">>,
+                            reason => iolist_to_binary(io_lib:format("~p", [Reason]))}))
     end.
 
 summary_json_pretty() ->

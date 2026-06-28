@@ -263,7 +263,7 @@ admin_facade_test_() ->
                                                                     not_after => {utcTime, "270606000000Z"}})),
                           Json = vpn_admin:summary_json(),
                           ?assert(is_binary(Json)),
-                          Decoded = jiffy:decode(Json, [return_maps]),
+                          Decoded = json:decode(Json),
                           ?assert(maps:is_key(<<"counts">>, Decoded)),
                           ?assert(maps:is_key(<<"peers">>, Decoded)),
                           JsonCounts = maps:get(<<"counts">>, Decoded),

@@ -911,7 +911,7 @@ Shell validation:
 Json = vpn_admin:summary_json().
 is_binary(Json).
 
-Decoded = jiffy:decode(Json, [return_maps]).
+Decoded = json:decode(Json).
 maps:get(<<"counts">>, Decoded).
 maps:get(<<"peers">>, Decoded).
 ```
