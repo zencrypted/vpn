@@ -16,6 +16,7 @@
 
 -define(SERVER, ?MODULE).
 -define(HISTORY_LIMIT, 50).
+-define(PROVISIONING_SCHEMA_VERSION, 2).
 
 start_link() ->
     gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
@@ -121,12 +122,13 @@ apply_validated(Command = #{peer_id := PeerId, revision := Revision}, State,
     Head = maps:get(PeerId, Heads, bootstrap_head(PeerId)),
     CurrentRevision = maps:get(revision, Head),
     Digest = command_digest(Command),
+    LegacyDigest = legacy_command_digest(Command),
     case Revision of
         R when R < CurrentRevision ->
             Result = {error, stale_revision},
             {Result, record_stale(Command, Result, State)};
         R when R =:= CurrentRevision ->
-            apply_current_revision(Command, Digest, Head, State, Preparer);
+            apply_current_revision(Command, Digest, LegacyDigest, Head, State, Preparer);
         _ ->
             case validate_transition(Command, Head) of
                 ok -> prepare_new_revision(Command, Digest, Head, State, Preparer);
@@ -136,15 +138,32 @@ apply_validated(Command = #{peer_id := PeerId, revision := Revision}, State,
             end
     end.
 
-apply_current_revision(Command, Digest, Head, State, Preparer) ->
-    case {maps:get(digest, Head, undefined),
-          maps:get(phase, Head, applied)} of
-        {Digest, applied} ->
+apply_current_revision(Command, Digest, LegacyDigest, Head, State, Preparer) ->
+    DigestVersion = maps:get(digest_version, Head, 1),
+    HeadDigest = maps:get(digest, Head, undefined),
+    Phase = maps:get(phase, Head, applied),
+    SchemaVer = vpn_provisioning_command_digest:schema_version(),
+    case {DigestVersion, HeadDigest, Phase} of
+        {Version, Digest, applied}
+          when Version =:= SchemaVer ->
             Result = {ok, unchanged},
             {Result, record_unchanged(Command, Result, State)};
-        {Digest, pending} ->
+        {Version, Digest, pending}
+          when Version =:= SchemaVer ->
             resume_pending(Command, Digest, Head, State, Preparer);
-        {_OtherDigest, _Phase} ->
+        {1, LegacyDigest, LegacyPhase} ->
+            case migrate_legacy_head(Command, Digest, Head, State) of
+                {ok, MigratedState, _MigratedHead} when LegacyPhase =:= applied ->
+                    Result = {ok, unchanged},
+                    {Result, record_unchanged(Command, Result, MigratedState)};
+                {ok, MigratedState, MigratedHead} when LegacyPhase =:= pending ->
+                    resume_pending(Command, Digest, MigratedHead,
+                                   MigratedState, Preparer);
+                {error, Reason} ->
+                    Result = {error, Reason},
+                    {Result, record_rejected(Command, Result, State)}
+            end;
+        {_OtherVersion, _OtherDigest, _Phase} ->
             Result = {error, revision_conflict},
             {Result, record_rejected(Command, Result, State)}
     end.
@@ -575,6 +594,7 @@ bootstrap_head(PeerId) ->
         {error, not_found} ->
             #{revision => 0,
               digest => undefined,
+              digest_version => vpn_provisioning_command_digest:schema_version(),
               phase => applied,
               operation => bootstrap,
               source => bootstrap_sys_config,
@@ -587,6 +607,7 @@ bootstrap_head(PeerId) ->
 bootstrap_head_from_entry(Entry) ->
     Base = #{revision => maps:get(revision, Entry, 0),
              digest => undefined,
+             digest_version => vpn_provisioning_command_digest:schema_version(),
              phase => applied,
              operation => bootstrap,
              source => maps:get(provisioning_source,
@@ -610,26 +631,33 @@ lifecycle_from_safe_entry(_) -> active.
 
 normalize_provisioning_section(Section) when map_size(Section) =:= 0 ->
     {ok, #{}};
-normalize_provisioning_section(#{schema_version := 1,
+normalize_provisioning_section(#{schema_version := Version,
                                  entries := Entries} = Section)
-  when is_map(Entries), map_size(Section) =:= 2 ->
-    validate_provisioning_entries(maps:to_list(Entries), #{});
+  when (Version =:= 1 orelse Version =:= ?PROVISIONING_SCHEMA_VERSION),
+       is_map(Entries), map_size(Section) =:= 2 ->
+    validate_provisioning_entries(maps:to_list(Entries), #{}, Version);
 normalize_provisioning_section(#{schema_version := Version}) ->
     {error, {unsupported_provisioning_schema_version, Version}};
 normalize_provisioning_section(_Section) ->
     {error, invalid_provisioning_projection}.
 
-validate_provisioning_entries([], Acc) ->
+validate_provisioning_entries([], Acc, _SectionVersion) ->
     {ok, Acc};
-validate_provisioning_entries([{PeerId, Entry} | Rest], Acc) ->
+validate_provisioning_entries([{PeerId, Entry0} | Rest], Acc, SectionVersion) ->
+    Entry = case SectionVersion of
+                1 -> Entry0#{digest_version => 1};
+                _ -> Entry0
+            end,
     case valid_peer_id(PeerId) andalso valid_provisioning_entry(Entry) of
-        true -> validate_provisioning_entries(Rest, Acc#{PeerId => Entry});
+        true -> validate_provisioning_entries(Rest, Acc#{PeerId => Entry},
+                                              SectionVersion);
         false -> {error, {invalid_provisioning_entry, PeerId}}
     end.
 
 valid_provisioning_entry(Entry) when is_map(Entry) ->
     Allowed = [revision,
                digest,
+               digest_version,
                phase,
                operation,
                source,
@@ -640,6 +668,7 @@ valid_provisioning_entry(Entry) when is_map(Entry) ->
     Unknown = maps:keys(maps:without(Allowed, Entry)),
     Revision = maps:get(revision, Entry, undefined),
     Digest = maps:get(digest, Entry, undefined),
+    DigestVersion = maps:get(digest_version, Entry, undefined),
     Phase = maps:get(phase, Entry, undefined),
     Operation = maps:get(operation, Entry, undefined),
     Source = maps:get(source, Entry, undefined),
@@ -650,6 +679,7 @@ valid_provisioning_entry(Entry) when is_map(Entry) ->
     Unknown =:= [] andalso
     is_integer(Revision) andalso Revision >= 0 andalso
     is_binary(Digest) andalso byte_size(Digest) =:= 32 andalso
+    lists:member(DigestVersion, [1, vpn_provisioning_command_digest:schema_version()]) andalso
     lists:member(Phase, [pending, applied]) andalso
     lists:member(Operation, [upsert, enable, disable, revoke, remove]) andalso
     valid_source(Source) andalso
@@ -671,7 +701,7 @@ persist_command_phase(Command, Digest, Phase, PreviousHead, State) ->
                          {ok, Entries0} ->
                              case maps:get(PeerId, Entries0, undefined) of
                                  Expected ->
-                                     {ok, #{schema_version => 1,
+                                     {ok, #{schema_version => ?PROVISIONING_SCHEMA_VERSION,
                                             entries => Entries0#{PeerId => Entry}}};
                                  _ ->
                                      {error, provisioning_projection_conflict}
@@ -688,6 +718,38 @@ persist_command_phase(Command, Digest, Phase, PreviousHead, State) ->
             {error, {provisioning_ledger_commit_failed, Reason}};
         Other ->
             {error, {invalid_provisioning_ledger_result, Other}}
+    end.
+
+migrate_legacy_head(Command, Digest, Head, State) ->
+    PeerId = maps:get(peer_id, Command),
+    Migrated = (maps:remove(durable, Head))#{digest => Digest,
+                                             digest_version =>
+                                                 vpn_provisioning_command_digest:schema_version()},
+    Expected = maps:remove(durable, Head),
+    Update = fun(Section0) ->
+                     case normalize_provisioning_section(Section0) of
+                         {ok, Entries0} ->
+                             case maps:get(PeerId, Entries0, undefined) of
+                                 Expected ->
+                                     {ok, #{schema_version => ?PROVISIONING_SCHEMA_VERSION,
+                                            entries => Entries0#{PeerId => Migrated}}};
+                                 _ ->
+                                     {error, provisioning_projection_conflict}
+                             end;
+                         {error, _} = Error -> Error
+                     end
+             end,
+    case vpn_projection:update(provisioning, Update) of
+        {ok, _Version, _Projection} ->
+            Durable = Migrated#{durable => true},
+            {ok, put_head(PeerId, Durable, State), Durable};
+        {ok, unchanged, _Version, _Projection} ->
+            Durable = Migrated#{durable => true},
+            {ok, put_head(PeerId, Durable, State), Durable};
+        {error, Reason} ->
+            {error, {provisioning_digest_migration_failed, Reason}};
+        Other ->
+            {error, {invalid_provisioning_digest_migration_result, Other}}
     end.
 
 persistent_head(#{durable := true} = Head) ->
@@ -714,6 +776,7 @@ ledger_entry(Command, Digest, pending, PreviousHead) ->
                                              SafeDesired),
     Base = #{revision => maps:get(revision, Command),
              digest => Digest,
+             digest_version => vpn_provisioning_command_digest:schema_version(),
              phase => pending,
              operation => Operation,
              source => maps:get(source, Command),
@@ -1194,7 +1257,7 @@ remove_orphan_heads(Heads, State) ->
                                     end,
                                     PeerIds) of
                                  true ->
-                                     {ok, #{schema_version => 1,
+                                     {ok, #{schema_version => ?PROVISIONING_SCHEMA_VERSION,
                                             entries =>
                                                 lists:foldl(fun maps:remove/2,
                                                             Entries0,
@@ -1241,8 +1304,10 @@ provisioning_status(State) ->
                                              pending_commands => Pending}.
 
 command_digest(Command) ->
-    Canonical = maps:remove(dynamic_device_id, Command),
-    crypto:hash(sha256, term_to_binary(Canonical, [deterministic])).
+    vpn_provisioning_command_digest:digest(Command).
+
+legacy_command_digest(Command) ->
+    vpn_provisioning_command_digest:legacy_digest(Command).
 
 command_summary(Command) when is_map(Command) ->
     maps:with([peer_id, revision, operation, source], Command);

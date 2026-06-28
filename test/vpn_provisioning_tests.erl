@@ -393,7 +393,7 @@ durable_ledger_survives_provisioning_restart_test_() ->
 
                           {ok, _ProjectionVersion,
                            #{provisioning :=
-                                 #{schema_version := 1,
+                                 #{schema_version := 2,
                                    entries := Entries}}} = vpn_projection:get(),
                           Entry = maps:get(peer_a, Entries),
                           ?assertEqual(4, maps:get(revision, Entry)),
@@ -641,6 +641,7 @@ orphan_decommission_request(DeviceId) ->
                       [#{peer_id => PeerId,
                          revision => maps:get(revision, Head),
                          digest => maps:get(digest, Head),
+                         digest_version => maps:get(digest_version, Head),
                          phase => maps:get(phase, Head),
                          source => ias}
                        || {PeerId, Head} <- maps:to_list(Heads),
