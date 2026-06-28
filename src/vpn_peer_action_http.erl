@@ -32,9 +32,9 @@ run_action(Action, PeerIdBin) ->
     ok.
 
 apply_action(start, PeerId) ->
-    vpn_manager:start_peer(PeerId);
+    vpn_runtime_command:start_peer(PeerId);
 apply_action(stop, PeerId) ->
-    vpn_manager:stop_peer(PeerId).
+    vpn_runtime_command:stop_peer(PeerId).
 
 find_peer_id(PeerIdBin) ->
     case [PeerId || PeerId <- vpn_manager:list_peers(),

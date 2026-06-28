@@ -435,3 +435,84 @@ wait_until_stopped(SupPid, Attempts) ->
             timer:sleep(10),
             wait_until_stopped(SupPid, Attempts - 1)
     end.
+
+external_runtime_command_publishes_event_test_() ->
+    {setup,
+     fun start_peer_sup_with_event_bus/0,
+     fun stop_peer_sup_with_event_bus/1,
+     fun({_SupPid, _EventBusPid}) ->
+             [?_test(begin
+                          {ok, _Subscription} = vpn_event_bus:subscribe(self()),
+                          ?assertEqual(ok, vpn_runtime_command:stop_peer(peer_a)),
+                          StopEvent = receive_vpn_event(),
+                          ?assertMatch(#{schema_version := 1,
+                                         type := peer_runtime_changed,
+                                         source := external_command,
+                                         action := stop,
+                                         peer_id := peer_a},
+                                       StopEvent),
+                          ?assertEqual(false, vpn_manager:peer_running(peer_a)),
+
+                          ?assertMatch({ok, Pid} when is_pid(Pid),
+                                       vpn_runtime_command:start_peer(peer_a)),
+                          StartEvent = receive_vpn_event(),
+                          ?assertMatch(#{schema_version := 1,
+                                         type := peer_runtime_changed,
+                                         source := external_command,
+                                         action := start,
+                                         peer_id := peer_a},
+                                       StartEvent),
+                          ?assertEqual(true, vpn_manager:peer_running(peer_a))
+                      end)]
+     end}.
+
+failed_external_runtime_command_does_not_publish_event_test_() ->
+    {setup,
+     fun start_peer_sup_with_event_bus/0,
+     fun stop_peer_sup_with_event_bus/1,
+     fun({_SupPid, _EventBusPid}) ->
+             [?_test(begin
+                          {ok, _Subscription} = vpn_event_bus:subscribe(self()),
+                          ?assertEqual({error, not_found},
+                                       vpn_runtime_command:stop_peer(missing_peer)),
+                          receive
+                              {vpn_event, UnexpectedEvent} ->
+                                  error({unexpected_vpn_event, UnexpectedEvent})
+                          after 100 ->
+                              ok
+                          end
+                      end)]
+     end}.
+
+start_peer_sup_with_event_bus() ->
+    SupPid = start_peer_sup(),
+    stop_registered_process(vpn_event_bus),
+    {ok, EventBusPid} = vpn_event_bus:start_link(),
+    {SupPid, EventBusPid}.
+
+stop_peer_sup_with_event_bus({SupPid, EventBusPid}) ->
+    stop_process(EventBusPid),
+    stop_peer_sup(SupPid).
+
+receive_vpn_event() ->
+    receive
+        {vpn_event, Event} -> Event
+    after 1000 ->
+        error(vpn_event_timeout)
+    end.
+
+stop_registered_process(Name) ->
+    case whereis(Name) of
+        undefined -> ok;
+        Pid -> stop_process(Pid)
+    end.
+
+stop_process(Pid) ->
+    case is_process_alive(Pid) of
+        true ->
+            unlink(Pid),
+            exit(Pid, shutdown),
+            wait_until_stopped(Pid, 20);
+        false ->
+            ok
+    end.
