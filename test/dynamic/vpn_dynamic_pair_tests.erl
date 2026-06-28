@@ -1148,12 +1148,17 @@ copy_fixture(Name, Destination) ->
     file:write_file(Destination, Binary).
 
 temp_root() ->
-    Root = filename:join(os:getenv("TMPDIR", "/tmp"),
-                         lists:flatten(io_lib:format(
-                           "vpn-dynamic-pair-~p",
-                           [erlang:unique_integer([positive, monotonic])]))),
-    ok = file:make_dir(Root),
-    Root.
+    Root = filename:join(
+             os:getenv("TMPDIR", "/tmp"),
+             lists:flatten(
+               io_lib:format(
+                 "vpn-dynamic-pair-~p-~p",
+                 [erlang:system_time(nanosecond),
+                  erlang:unique_integer([positive, monotonic])]))),
+    case file:make_dir(Root) of
+        ok -> Root;
+        {error, eexist} -> temp_root()
+    end.
 
 summary_peer(PeerId, Peers) ->
     hd([Peer || #{id := Id} = Peer <- Peers, Id =:= PeerId]).
