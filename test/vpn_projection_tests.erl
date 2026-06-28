@@ -20,7 +20,7 @@ projection_store_foundation_test_() ->
                           ?assertMatch(#{state := ready,
                                          persistence := durable,
                                          backend := vpn_projection_store_kvs,
-                                         schema_version := 1,
+                                         schema_version := 2,
                                          projection_version := 0},
                                        vpn_projection:status()),
 
@@ -69,15 +69,13 @@ projection_store_foundation_test_() ->
                           ConflictVersion = 1,
                           ConflictUpdatedAt = 1,
                           ConflictChecksum =
-                              crypto:hash(
-                                sha256,
-                                term_to_binary(
-                                  {1,
-                                   ConflictVersion,
-                                   Projection1,
-                                   ConflictUpdatedAt})),
+                              vpn_projection_checksum:checksum(
+                                2,
+                                ConflictVersion,
+                                Projection1,
+                                ConflictUpdatedAt),
                           ConflictEnvelope =
-                              #{schema_version => 1,
+                              #{schema_version => 2,
                                 projection_version => ConflictVersion,
                                 checksum => ConflictChecksum,
                                 payload => Projection1,
@@ -117,7 +115,7 @@ unsupported_schema_and_checksum_fail_closed_test_() ->
                           ok = write_raw(
                                  #vpn_projection{
                                     id = current,
-                                    schema_version = 1,
+                                    schema_version = 2,
                                     projection_version = 1,
                                     checksum = <<0:256>>,
                                     payload = Projection,
@@ -129,6 +127,105 @@ unsupported_schema_and_checksum_fail_closed_test_() ->
                              start_projection_fail_closed(
                                {projection_load_failed,
                                 invalid_projection_checksum}))
+                      end)]
+     end}.
+
+
+portable_checksum_is_canonical_test() ->
+    ProjectionA =
+        #{allocator => #{instance => <<"a">>, slots => [3, 1, 2]},
+          provisioning => #{peer_b => #{revision => 2},
+                            peer_a => #{revision => 1}}},
+    ProjectionB =
+        maps:from_list(
+          [{provisioning,
+            maps:from_list([{peer_a, #{revision => 1}},
+                            {peer_b, #{revision => 2}}])},
+           {allocator,
+            maps:from_list([{slots, [3, 1, 2]},
+                            {instance, <<"a">>}])}]),
+    ?assertEqual(vpn_projection_checksum:canonical_binary(ProjectionA),
+                 vpn_projection_checksum:canonical_binary(ProjectionB)),
+    ?assertEqual(vpn_projection_checksum:checksum(2, 7, ProjectionA, 1234),
+                 vpn_projection_checksum:checksum(2, 7, ProjectionB, 1234)),
+    ?assertNotEqual(vpn_projection_checksum:canonical_binary({a, b}),
+                    vpn_projection_checksum:canonical_binary([a, b])).
+
+legacy_checksum_migration_test_() ->
+    {setup,
+     fun setup_store_only/0,
+     fun cleanup/1,
+     fun(_Context) ->
+             [?_test(begin
+                          Projection = #{allocator => #{legacy => true},
+                                         provisioning => #{}},
+                          Version = 3,
+                          UpdatedAt = 123,
+                          LegacyChecksum =
+                              vpn_projection_checksum:legacy_checksum(
+                                1, Version, Projection, UpdatedAt),
+                          ok = write_raw(
+                                 #vpn_projection{
+                                    id = current,
+                                    schema_version = 1,
+                                    projection_version = Version,
+                                    checksum = LegacyChecksum,
+                                    payload = Projection,
+                                    updated_at = UpdatedAt}),
+                          ?assertMatch(
+                             {ok, #{state := legacy,
+                                    legacy_checksum_valid := true}},
+                             vpn_projection_migration:inspect()),
+                          ?assertMatch(
+                             {ok, #{state := migrated,
+                                    projection_version := Version,
+                                    legacy_verification := verified}},
+                             vpn_projection_migration:
+                                 migrate_legacy_checksum()),
+                          ?assertMatch(
+                             {ok, Version, #{schema_version := 2}},
+                             vpn_projection_store_kvs:load()),
+                          {ok, ProjectionPid} = vpn_projection:start_link(),
+                          ?assertEqual({ok, Version, Projection},
+                                       vpn_projection:get()),
+                          stop_pid(ProjectionPid)
+                      end)]
+     end}.
+
+unverifiable_legacy_checksum_requires_explicit_confirmation_test_() ->
+    {setup,
+     fun setup_store_only/0,
+     fun cleanup/1,
+     fun(_Context) ->
+             [?_test(begin
+                          Projection = #{allocator => #{legacy => true},
+                                         provisioning => #{}},
+                          Version = 4,
+                          ok = write_raw(
+                                 #vpn_projection{
+                                    id = current,
+                                    schema_version = 1,
+                                    projection_version = Version,
+                                    checksum = <<0:256>>,
+                                    payload = Projection,
+                                    updated_at = 456}),
+                          ?assertEqual(
+                             {error,
+                              legacy_checksum_not_verifiable_on_this_otp},
+                             vpn_projection_migration:
+                                 migrate_legacy_checksum()),
+                          ?assertMatch(
+                             {ok, #{state := migrated,
+                                    projection_version := Version,
+                                    legacy_verification :=
+                                        operator_accepted_unverifiable}},
+                             vpn_projection_migration:
+                                 migrate_legacy_checksum(
+                                   accept_unverifiable_legacy_checksum)),
+                          {ok, ProjectionPid} = vpn_projection:start_link(),
+                          ?assertEqual({ok, Version, Projection},
+                                       vpn_projection:get()),
+                          stop_pid(ProjectionPid)
                       end)]
      end}.
 

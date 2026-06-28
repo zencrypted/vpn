@@ -15,7 +15,9 @@
          get/0,
          update/2,
          replace/2,
-         status/0]).
+         status/0,
+         validate_payload/1,
+         build_envelope/3]).
 -export([init/1,
          handle_call/3,
          handle_cast/2,
@@ -24,7 +26,8 @@
          code_change/3]).
 
 -define(SERVER, ?MODULE).
--define(SCHEMA_VERSION, 1).
+-define(SCHEMA_VERSION, 2).
+-define(LEGACY_SCHEMA_VERSION, 1).
 
 -record(state, {
     backend,
@@ -178,7 +181,15 @@ validate_loaded_envelope(Version,
                                      EnvelopeVersion,
                                      Projection,
                                      UpdatedAt,
-                                     Checksum);
+                                     Checksum,
+                                     current);
+        ?LEGACY_SCHEMA_VERSION ->
+            validate_loaded_contents(Version,
+                                     EnvelopeVersion,
+                                     Projection,
+                                     UpdatedAt,
+                                     Checksum,
+                                     legacy);
         _ ->
             {error, {unsupported_schema_version, SchemaVersion}}
     end;
@@ -189,16 +200,18 @@ validate_loaded_contents(Version,
                          Version,
                          Projection,
                          UpdatedAt,
-                         Checksum)
+                         Checksum,
+                         ChecksumKind)
   when is_integer(Version), Version > 0,
        is_integer(UpdatedAt), UpdatedAt >= 0,
        is_binary(Checksum), byte_size(Checksum) =:= 32 ->
     case validate_projection(Projection) of
         ok ->
-            ExpectedChecksum = projection_checksum(?SCHEMA_VERSION,
-                                                   Version,
-                                                   Projection,
-                                                   UpdatedAt),
+            ExpectedChecksum =
+                loaded_checksum(ChecksumKind,
+                                Version,
+                                Projection,
+                                UpdatedAt),
             case secure_equal(Checksum, ExpectedChecksum) of
                 true -> {ok, Version, Projection, UpdatedAt};
                 false -> {error, invalid_projection_checksum}
@@ -210,7 +223,8 @@ validate_loaded_contents(_Version,
                          _EnvelopeVersion,
                          _Projection,
                          _UpdatedAt,
-                         _Checksum) ->
+                         _Checksum,
+                         _ChecksumKind) ->
     {error, invalid_projection_envelope}.
 
 commit_projection(ExpectedVersion, Projection, State) ->
@@ -256,11 +270,21 @@ build_envelope(Version, Projection, UpdatedAt) ->
       updated_at => UpdatedAt}.
 
 projection_checksum(SchemaVersion, Version, Projection, UpdatedAt) ->
-    crypto:hash(sha256,
-                term_to_binary({SchemaVersion,
-                                Version,
-                                Projection,
-                                UpdatedAt})).
+    vpn_projection_checksum:checksum(SchemaVersion,
+                                     Version,
+                                     Projection,
+                                     UpdatedAt).
+
+loaded_checksum(current, Version, Projection, UpdatedAt) ->
+    projection_checksum(?SCHEMA_VERSION, Version, Projection, UpdatedAt);
+loaded_checksum(legacy, Version, Projection, UpdatedAt) ->
+    vpn_projection_checksum:legacy_checksum(?LEGACY_SCHEMA_VERSION,
+                                            Version,
+                                            Projection,
+                                            UpdatedAt).
+
+validate_payload(Projection) ->
+    validate_projection(Projection).
 
 validate_projection(#{allocator := Allocator,
                       provisioning := Provisioning} = Projection)

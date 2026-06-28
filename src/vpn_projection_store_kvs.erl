@@ -9,7 +9,7 @@
 
 -behaviour(vpn_projection_store).
 
--export([load/0, commit/2]).
+-export([load/0, commit/2, rewrite/2]).
 
 -include("vpn_projection.hrl").
 
@@ -38,6 +38,22 @@ commit(ExpectedVersion, Envelope)
 commit(_ExpectedVersion, _Envelope) ->
     {error, invalid_commit_arguments}.
 
+rewrite(ExpectedVersion, Envelope)
+  when is_integer(ExpectedVersion), ExpectedVersion > 0, is_map(Envelope) ->
+    case envelope_to_record(ExpectedVersion - 1, Envelope) of
+        {ok, Record = #vpn_projection{projection_version = ExpectedVersion}} ->
+            case vpn_kvs_transaction:run(
+                   fun() -> rewrite_record(ExpectedVersion, Record) end) of
+                {ok, ok} -> {ok, ExpectedVersion};
+                {error, conflict} -> {error, conflict};
+                {error, Reason} -> {error, {kvs_rewrite_failed, Reason}}
+            end;
+        {error, Reason} ->
+            {error, Reason}
+    end;
+rewrite(_ExpectedVersion, _Envelope) ->
+    {error, invalid_rewrite_arguments}.
+
 load_record() ->
     case catch kvs:get(vpn_projection, current) of
         {error, not_found} ->
@@ -65,6 +81,18 @@ commit_record(0, Record) ->
             vpn_kvs_transaction:abort(Reason)
     end;
 commit_record(ExpectedVersion, Record) ->
+    case get_record_in_transaction() of
+        {ok, #vpn_projection{projection_version = ExpectedVersion}} ->
+            put_record_in_transaction(Record);
+        not_found ->
+            vpn_kvs_transaction:abort(conflict);
+        {ok, #vpn_projection{}} ->
+            vpn_kvs_transaction:abort(conflict);
+        {error, Reason} ->
+            vpn_kvs_transaction:abort(Reason)
+    end.
+
+rewrite_record(ExpectedVersion, Record) ->
     case get_record_in_transaction() of
         {ok, #vpn_projection{projection_version = ExpectedVersion}} ->
             put_record_in_transaction(Record);

@@ -87,9 +87,14 @@ KVS/Mnesia. `vpn_projection` serializes updates to one versioned record, while
 `vpn_projection_store_kvs` performs compare-and-set through ordinary KVS record
 access inside the configured `vpn_kvs_transaction` provider. The record carries
 separate `allocator` and `provisioning` maps, a schema version, a monotonic
-projection version, and a SHA-256 checksum. Corrupt
-or unsupported records fail application startup instead of silently discarding
-revision or revocation barriers.
+projection version, and a SHA-256 checksum. Projection schema version 2 hashes a
+repository-owned canonical binary encoding rather than Erlang External Term
+Format bytes, so the integrity envelope remains stable across OTP major-version
+upgrades. Corrupt or unsupported records fail application startup instead of
+silently discarding revision or revocation barriers. Legacy schema-version-1
+records remain readable when their old checksum can still be verified on the
+current runtime; cross-OTP legacy records require the explicit, operator-audited
+migration described in `docs/PROJECTION-CHECKSUM-MIGRATION.md`.
 
 The default transaction provider uses synchronous Mnesia transactions, while
 projection code itself only calls KVS. The configured Mnesia directory is
