@@ -53,17 +53,19 @@ generate_other_ca_signed_peer(Dir) ->
     OtherPeerKey = filename:join(Dir, "other_peer.key"),
     OtherPeerCsr = filename:join(Dir, "other_peer.csr"),
     OtherPeerCert = filename:join(Dir, "other_peer.crt"),
-    run("openssl req -x509 -newkey rsa:2048 -keyout " ++ OtherCaKey ++
-        " -out " ++ OtherCaCert ++
-        " -days 365 -nodes -subj /CN=OtherDevCA"),
-    run("openssl req -newkey rsa:2048 -keyout " ++ OtherPeerKey ++
-        " -out " ++ OtherPeerCsr ++
-        " -nodes -subj /CN=other_peer"),
-    run("openssl x509 -req -in " ++ OtherPeerCsr ++
-        " -CA " ++ OtherCaCert ++
-        " -CAkey " ++ OtherCaKey ++
-        " -CAcreateserial -out " ++ OtherPeerCert ++
-        " -days 365"),
+    run(["req", "-x509", "-newkey", "rsa:2048",
+         "-keyout", OtherCaKey,
+         "-out", OtherCaCert,
+         "-days", "365", "-nodes", "-subj", "/CN=OtherDevCA"]),
+    run(["req", "-newkey", "rsa:2048",
+         "-keyout", OtherPeerKey,
+         "-out", OtherPeerCsr,
+         "-nodes", "-subj", "/CN=other_peer"]),
+    run(["x509", "-req", "-in", OtherPeerCsr,
+         "-CA", OtherCaCert,
+         "-CAkey", OtherCaKey,
+         "-CAcreateserial", "-out", OtherPeerCert,
+         "-days", "365"]),
     OtherPeerCert.
 
 load_cert(CertPath) ->
@@ -71,8 +73,8 @@ load_cert(CertPath) ->
     [{_, Der, _} | _] = public_key:pem_decode(Pem),
     {ok, public_key:pkix_decode_cert(Der, otp)}.
 
-run(Command) ->
-    [] = os:cmd(Command ++ " >/dev/null 2>&1"),
+run(Args) ->
+    {ok, _Output} = vpn_openssl:run(Args),
     ok.
 
 cleanup_tmp_dir(Dir) ->

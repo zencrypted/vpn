@@ -34,15 +34,27 @@ run(Args) when is_list(Args) ->
 -spec environment(file:filename()) -> [{string(), string()}].
 environment(Executable) ->
     Prefix = filename:dirname(filename:dirname(Executable)),
-    LocalDirectories = [Directory || Directory <-
-                                         [filename:join(Prefix, "lib64"),
-                                          filename:join(Prefix, "lib")],
-                                     filelib:is_dir(Directory)],
+    LocalDirectories = local_library_directories(Prefix),
     Existing = existing_library_path(),
     case unique_paths(LocalDirectories ++ split_paths(Existing)) of
         [] -> [];
         Paths -> [{"LD_LIBRARY_PATH", string:join(Paths, ":")}]
     end.
+
+
+local_library_directories(Prefix) ->
+    case is_system_prefix(Prefix) of
+        true -> [];
+        false ->
+            [Directory || Directory <-
+                              [filename:join(Prefix, "lib64"),
+                               filename:join(Prefix, "lib")],
+                          filelib:is_dir(Directory)]
+    end.
+
+is_system_prefix("/") -> true;
+is_system_prefix("/usr") -> true;
+is_system_prefix(_) -> false.
 
 find_candidate([]) ->
     {error, openssl_not_found};
