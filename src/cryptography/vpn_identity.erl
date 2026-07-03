@@ -154,62 +154,19 @@ verify_pem_key_match(_CertPem, _PrivateKeyPath) ->
     {error, invalid_key_match_input}.
 
 compare_openssl_public_keys(CertPath, PrivateKeyPath) ->
-    case openssl_executable() of
-        {ok, OpenSSL} ->
-            case run_executable(OpenSSL, ["x509", "-in", CertPath, "-pubkey", "-noout"]) of
-                {ok, CertPublicKey} ->
-                    case run_executable(OpenSSL,
-                                        ["pkey", "-in", PrivateKeyPath, "-pubout"]) of
-                        {ok, PrivatePublicKey} ->
-                            case normalize_pem(CertPublicKey) =:= normalize_pem(PrivatePublicKey) of
-                                true -> ok;
-                                false -> {error, key_mismatch}
-                            end;
-                        {error, Reason} ->
-                            {error, {private_key_parse_failed, PrivateKeyPath, Reason}}
+    case vpn_openssl:run(["x509", "-in", CertPath, "-pubkey", "-noout"]) of
+        {ok, CertPublicKey} ->
+            case vpn_openssl:run(["pkey", "-in", PrivateKeyPath, "-pubout"]) of
+                {ok, PrivatePublicKey} ->
+                    case normalize_pem(CertPublicKey) =:= normalize_pem(PrivatePublicKey) of
+                        true -> ok;
+                        false -> {error, key_mismatch}
                     end;
                 {error, Reason} ->
-                    {error, {certificate_public_key_failed, Reason}}
+                    {error, {private_key_parse_failed, PrivateKeyPath, Reason}}
             end;
-        {error, _} = Error ->
-            Error
-    end.
-
-openssl_executable() ->
-    Candidate = case os:getenv("OPENSSL3") of
-                    false -> "openssl";
-                    Value -> Value
-                end,
-    case filename:pathtype(Candidate) of
-        absolute ->
-            case filelib:is_regular(Candidate) of
-                true -> {ok, Candidate};
-                false -> {error, openssl_not_found}
-            end;
-        _ ->
-            case os:find_executable(Candidate) of
-                false -> {error, openssl_not_found};
-                Path -> {ok, Path}
-            end
-    end.
-
-run_executable(Executable, Args) ->
-    Port = open_port({spawn_executable, Executable},
-                     [binary, exit_status, use_stdio, stderr_to_stdout,
-                      {args, Args}]),
-    collect_port(Port, []).
-
-collect_port(Port, Acc) ->
-    receive
-        {Port, {data, Data}} ->
-            collect_port(Port, [Acc, Data]);
-        {Port, {exit_status, 0}} ->
-            {ok, iolist_to_binary(Acc)};
-        {Port, {exit_status, Status}} ->
-            {error, {openssl_exit_status, Status, iolist_to_binary(Acc)}}
-    after 10000 ->
-        catch port_close(Port),
-        {error, openssl_timeout}
+        {error, Reason} ->
+            {error, {certificate_public_key_failed, Reason}}
     end.
 
 normalize_pem(Pem) ->

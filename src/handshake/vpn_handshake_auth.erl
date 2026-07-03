@@ -56,13 +56,8 @@ proof_data(SenderPeerId, ReceiverPeerId,
 sign(Data, PrivateKeyPath) when is_binary(Data) ->
     with_temp_file(Data,
       fun(DataPath) ->
-          case openssl_executable() of
-              {ok, OpenSSL} ->
-                  run_executable(OpenSSL,
-                                 ["dgst", "-sha256", "-sign",
-                                  filename_to_list(PrivateKeyPath), DataPath]);
-              {error, _} = Error -> Error
-          end
+          vpn_openssl:run(["dgst", "-sha256", "-sign",
+                           filename_to_list(PrivateKeyPath), DataPath])
       end);
 sign(_Data, _PrivateKeyPath) ->
     {error, invalid_sign_input}.
@@ -133,33 +128,27 @@ verify_signature(CertificateDer, Data, Signature) ->
        {data, Data},
        {signature, Signature}],
       fun(Paths) ->
-          case openssl_executable() of
-              {ok, OpenSSL} ->
-                  CertPath = maps:get(certificate, Paths),
-                  DataPath = maps:get(data, Paths),
-                  SignaturePath = maps:get(signature, Paths),
-                  PubPath = temp_path("vpn-handshake-pub", ".pem"),
-                  try
-                      case run_executable(OpenSSL,
-                                          ["x509", "-in", CertPath,
-                                           "-pubkey", "-noout"]) of
-                          {ok, PublicKeyPem} ->
-                              ok = file:write_file(PubPath, PublicKeyPem, [exclusive]),
-                              case run_executable(OpenSSL,
-                                                  ["dgst", "-sha256",
-                                                   "-verify", PubPath,
-                                                   "-signature", SignaturePath,
-                                                   DataPath]) of
-                                  {ok, _} -> ok;
-                                  {error, Reason} -> {error, {signature_invalid, Reason}}
-                              end;
-                          {error, Reason} ->
-                              {error, {public_key_extract_failed, Reason}}
-                      end
-                  after
-                      _ = file:delete(PubPath)
-                  end;
-              {error, _} = Error -> Error
+          CertPath = maps:get(certificate, Paths),
+          DataPath = maps:get(data, Paths),
+          SignaturePath = maps:get(signature, Paths),
+          PubPath = temp_path("vpn-handshake-pub", ".pem"),
+          try
+              case vpn_openssl:run(["x509", "-in", CertPath,
+                                    "-pubkey", "-noout"]) of
+                  {ok, PublicKeyPem} ->
+                      ok = file:write_file(PubPath, PublicKeyPem, [exclusive]),
+                      case vpn_openssl:run(["dgst", "-sha256",
+                                            "-verify", PubPath,
+                                            "-signature", SignaturePath,
+                                            DataPath]) of
+                          {ok, _} -> ok;
+                          {error, Reason} -> {error, {signature_invalid, Reason}}
+                      end;
+                  {error, Reason} ->
+                      {error, {public_key_extract_failed, Reason}}
+              end
+          after
+              _ = file:delete(PubPath)
           end
       end).
 
@@ -194,37 +183,6 @@ write_entries([{Name, Binary} | Rest], Paths) ->
     case file:write_file(maps:get(Name, Paths), Binary, [exclusive]) of
         ok -> write_entries(Rest, Paths);
         {error, Reason} -> {error, {temporary_file_failed, Name, Reason}}
-    end.
-
-openssl_executable() ->
-    Candidate = case os:getenv("OPENSSL3") of false -> "openssl"; Value -> Value end,
-    case filename:pathtype(Candidate) of
-        absolute ->
-            case filelib:is_regular(Candidate) of
-                true -> {ok, Candidate};
-                false -> {error, openssl_not_found}
-            end;
-        _ ->
-            case os:find_executable(Candidate) of
-                false -> {error, openssl_not_found};
-                Path -> {ok, Path}
-            end
-    end.
-
-run_executable(Executable, Args) ->
-    Port = open_port({spawn_executable, Executable},
-                     [binary, exit_status, use_stdio, stderr_to_stdout, {args, Args}]),
-    collect_port(Port, []).
-
-collect_port(Port, Acc) ->
-    receive
-        {Port, {data, Data}} -> collect_port(Port, [Acc, Data]);
-        {Port, {exit_status, 0}} -> {ok, iolist_to_binary(Acc)};
-        {Port, {exit_status, Status}} ->
-            {error, {openssl_exit_status, Status, iolist_to_binary(Acc)}}
-    after 10000 ->
-        catch port_close(Port),
-        {error, openssl_timeout}
     end.
 
 temp_path(Prefix, Suffix) ->
