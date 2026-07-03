@@ -2,6 +2,7 @@
 set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+. "$SCRIPT_DIR/openssl-env.sh"
 GENERATOR="$SCRIPT_DIR/generate-device-csr.sh"
 WORK_DIR=$(mktemp -d)
 trap 'rm -rf "$WORK_DIR"' EXIT HUP INT TERM
@@ -15,7 +16,7 @@ CSR=$(find csr -type f -name 'laptop-*.csr' -print)
 [ -f "$CSR" ]
 [ "$(stat -c '%a' "$KEY")" = "600" ]
 [ "$(stat -c '%a' "$CSR")" = "644" ]
-openssl req -in "$CSR" -noout -verify -subject | grep 'subject=CN=laptop' >/dev/null
+"$OPENSSL" req -in "$CSR" -noout -verify -subject | grep 'subject=CN=laptop' >/dev/null
 
 "$GENERATOR" \
     --common-name laptop-plan-001 \
@@ -24,7 +25,7 @@ openssl req -in "$CSR" -noout -verify -subject | grep 'subject=CN=laptop' >/dev/
 
 [ -f local/keys/laptop-plan-001.key ]
 [ -f local/csr/laptop-plan-001.csr ]
-openssl req -in local/csr/laptop-plan-001.csr -noout -verify -subject \
+"$OPENSSL" req -in local/csr/laptop-plan-001.csr -noout -verify -subject \
     | grep 'subject=CN=laptop-plan-001' >/dev/null
 
 if "$GENERATOR" \

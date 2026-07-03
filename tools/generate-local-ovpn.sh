@@ -1,8 +1,8 @@
 #!/bin/sh
 set -eu
 
-OPENSSL="${OPENSSL3:-openssl}"
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+. "$SCRIPT_DIR/openssl-env.sh"
 CSR_GENERATOR="$SCRIPT_DIR/generate-device-csr.sh"
 NAME=""
 REMOTE=""

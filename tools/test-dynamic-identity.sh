@@ -2,8 +2,8 @@
 set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+. "$SCRIPT_DIR/openssl-env.sh"
 ENSURE="$SCRIPT_DIR/ensure-dynamic-identity.sh"
-OPENSSL="${OPENSSL3:-openssl}"
 STAMP="$$"
 ROOT="local/test-dynamic-identity-$STAMP"
 BUNDLE="$ROOT/bundle"

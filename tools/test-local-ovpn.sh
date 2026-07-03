@@ -2,6 +2,7 @@
 set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+. "$SCRIPT_DIR/openssl-env.sh"
 INIT_CA="$SCRIPT_DIR/init-local-ca.sh"
 GEN_OVPN="$SCRIPT_DIR/generate-local-ovpn.sh"
 WORK_DIR=$(mktemp -d)
@@ -14,8 +15,8 @@ cd "$WORK_DIR"
 [ -f local/ca/ca.crt ]
 [ "$(stat -c '%a' local/ca/ca.key)" = "600" ]
 [ "$(stat -c '%a' local/ca/ca.crt)" = "644" ]
-openssl verify -CAfile local/ca/ca.crt local/ca/ca.crt >/dev/null
-openssl x509 -in local/ca/ca.crt -noout -text | grep 'CA:TRUE' >/dev/null
+"$OPENSSL" verify -CAfile local/ca/ca.crt local/ca/ca.crt >/dev/null
+"$OPENSSL" x509 -in local/ca/ca.crt -noout -text | grep 'CA:TRUE' >/dev/null
 
 OUTPUT=$("$GEN_OVPN" --name client_a --remote 127.0.0.1 --port 5556)
 OVPN=$(printf '%s\n' "$OUTPUT" | sed -n 's/^OVPN: //p')
@@ -29,8 +30,8 @@ CSR=$(printf '%s\n' "$OUTPUT" | sed -n 's/^CSR: //p')
 [ -f "$CSR" ]
 [ "$(stat -c '%a' "$KEY")" = "600" ]
 [ "$(stat -c '%a' "$OVPN")" = "644" ]
-openssl verify -CAfile local/ca/ca.crt -purpose sslclient "$CERT" >/dev/null
-openssl req -in "$CSR" -noout -verify >/dev/null
+"$OPENSSL" verify -CAfile local/ca/ca.crt -purpose sslclient "$CERT" >/dev/null
+"$OPENSSL" req -in "$CSR" -noout -verify >/dev/null
 
 grep '^client$' "$OVPN" >/dev/null
 grep '^dev tun$' "$OVPN" >/dev/null
