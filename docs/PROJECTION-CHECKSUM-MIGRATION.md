@@ -13,7 +13,7 @@ encoding with explicit type and length boundaries. Map entries are ordered by
 their canonical key bytes. Its checksum no longer depends on ETF map encoding or
 map traversal order.
 
-## Normal upgrade
+## Normal checksum migration
 
 A schema-version-1 projection whose checksum still verifies on the current OTP
 release is accepted at startup. Migrate it while the `vpn_projection` process is
@@ -59,11 +59,13 @@ checksum, so it must never be run as an automatic boot fallback.
   produces `conflict` rather than overwriting newer state.
 - Application startup never ignores an invalid checksum and never migrates
   records automatically.
+
 ## Separate provisioning-head migration
 
-This document covers only the outer checksum of the complete projection record.
-IAS provisioning heads stored inside the projection have their own command
-digest and schema version. Legacy provisioning-head digests are migrated
-automatically during normal VPN recovery after the outer projection checksum has
-been accepted. See `VPN-UPGRADE-MIGRATION.md` for the complete upgrade order and
-verification procedure.
+This runbook intentionally covers only the outer checksum of the complete
+projection record. IAS provisioning heads stored inside the projection have
+their own command digest and schema version and are outside this migration
+boundary. Legacy provisioning-head digests are migrated automatically during
+normal VPN recovery after the outer projection checksum has been accepted. See
+`VPN-UPGRADE-MIGRATION.md` for the coordinated upgrade order and verification
+procedure.
