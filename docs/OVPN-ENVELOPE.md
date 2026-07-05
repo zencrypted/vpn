@@ -1,6 +1,20 @@
 # Canonical OVPN Envelope
 
-Status: **Stage 27C local identity validation implemented**
+Status: **Implemented current contract**
+
+Implemented in the current runtime:
+
+- canonical `ovpn/v1` envelope constants and validation rules;
+- strict parsing, normalization, and peer-config conversion;
+- local CA, certificate, and Device-local private-key ownership validation;
+- RSA and EC P-384 development/IAS identity support;
+- OVPN-backed runtime configuration;
+- certificate-authenticated control-plane handshakes;
+- ephemeral P-384 ECDH traffic-key derivation;
+- dataplane replay windows and key-epoch rollover.
+
+The envelope does not carry IAS authorization policy, Device-lock or 2FA
+requirements, provisioning ownership, session keys, or replay state.
 
 Contract version: **`ovpn/v1`**
 
@@ -208,10 +222,12 @@ The importer combines this parsed configuration with separate trusted runtime
 state containing authorization, Device binding, 2FA requirements, and
 provisioning lineage.
 
-The mapping does not imply that the current `vpn_peer` PSK configuration is the
-final session model. Local identity validation is complete; the next stage must
-replace or encapsulate the temporary PSK dataplane with a certificate-authenticated
-session.
+The mapping does not make the envelope a session-authorization token or a traffic
+key container. The current runtime can use OVPN-backed identity with
+`handshake_mode => certificate_control`; that control plane authenticates peers
+with certificates and derives directional ephemeral traffic keys before enabling
+the dataplane. Legacy/debug PSK configuration remains a separate bounded runtime
+mode and is not part of the `ovpn/v1` envelope contract.
 
 ## Canonical example
 
@@ -276,17 +292,19 @@ documentation, together with explicit producer/consumer coordination.
 No security-relevant version, profile, Device identifier, or 2FA value is stored
 in comments.
 
-## Implementation stages
+## Implementation boundary
 
-```text
-Stage 27A  Canonical ordinary OVPN subset and machine-readable constants
-Stage 27B  Strict parser, validator, and internal peer-config conversion (implemented)
-Stage 27C  Certificate-authenticated session, Device lock, and 2FA hook
-```
+`vpn_ovpn_envelope` exposes the machine-readable `ovpn/v1` contract and
+validation constants. `vpn_ovpn_parser` performs strict parsing, normalization,
+and internal peer-config conversion. Parsing is intentionally side-effect free:
+it does not resolve a private-key file, validate X.509 cryptography, mutate the
+runtime registry, or start a VPN session.
 
-`vpn_ovpn_parser` now implements Stage 27B parsing and normalization. It does
-not resolve the private-key reference, validate X.509 cryptography, mutate the
-runtime registry, or start a VPN session. Those remain later stages.
+`vpn_ovpn_identity` owns local identity validation after parsing. Session and
+runtime modules consume the validated identity/configuration through their own
+lifecycle boundaries. Authorization, Device-lock, and 2FA decisions remain
+external policy inputs and are not implemented by the parser or encoded in the
+envelope.
 
 ## Local identity validation
 
