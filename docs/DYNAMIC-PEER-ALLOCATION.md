@@ -2,42 +2,66 @@
 
 ## Purpose
 
-The verified IAS demo currently maps two Devices into a bounded pair of trusted
-runtime slots:
+Dynamic peer allocation replaces the bounded `client_a` / `client_b` debug
+slots with VPN-owned transport reservations for arbitrary IAS Devices.
 
-```text
-Alice Device -> client_a <-> peer_b
-Bob Device   -> client_b <-> peer_c
-```
+IAS remains the identity, policy, and desired-state authority. VPN owns dynamic
+transport resources, runtime peer topology, local identity materialization for
+development mode, and durable allocation/provisioning projections.
 
-That topology proves concurrent provisioning and encrypted dataplane operation,
-but it cannot admit a third Device without editing trusted VPN configuration.
-Dynamic allocation replaces that fixed mapping with VPN-owned reservations.
-IAS remains the identity and policy source of truth; VPN owns transport
-resources and runtime topology.
-
-## Ownership model
+The current contract is:
 
 ```text
 IAS Device ID
     |
-    | ensure allocation
+    | reserve allocation
     v
-VPN peer allocator
+vpn_peer_allocator
     |
     +-> client peer ID
     +-> gateway peer ID
     +-> client/gateway TUN names
     +-> client/gateway tunnel addresses
     +-> client/gateway UDP ports
+    |
+    | revisioned dynamic provisioning
+    v
+vpn_provisioning:apply_dynamic/2
+    |
+    +-> identity materialization
+    +-> runtime configuration resolution
+    +-> pair registry update
+    +-> gateway-first reconciliation
+    +-> certificate-control establishment
+    +-> durable provisioning-head commit
 ```
 
 Peer IDs are binaries. Dynamic allocation must never create atoms from external
 or Device-derived values.
 
-## Stage 1 — reservation allocator
+## Ownership Boundary
 
-`vpn_peer_allocator` is the first completed stage. It exposes:
+VPN owns:
+
+- allocation slots and allocation generations;
+- allocator instance identity;
+- peer IDs;
+- TUN interface names;
+- tunnel addresses;
+- local and remote UDP ports;
+- client/gateway pairing;
+- runtime peer registry entries;
+- durable VPN allocation and provisioning projections.
+
+IAS may supply only the Device identity and approved desired-state metadata.
+IAS must not choose dynamic transport resources or runtime peer identifiers.
+
+Private-key bodies, session keys, replay windows, ECDH material, packet state,
+and raw runtime configuration are not durable allocation or provisioning data.
+
+## Durable Allocation Contract
+
+`vpn_peer_allocator` exposes:
 
 ```erlang
 vpn_peer_allocator:ensure(DeviceId).
@@ -50,20 +74,16 @@ vpn_peer_allocator:status().
 
 `ensure/1` is idempotent for a non-empty binary Device ID. Distinct active
 Devices receive distinct peer IDs, TUN names, tunnel addresses, and UDP ports.
-`released/1` reads the persisted release barrier without mutating it.
-`release/1` makes the numeric transport slot reusable, returns a snapshot marked
-`state => released`, and a later allocation receives a fresh peer-ID generation
-so a different Device does not inherit the released peer identifiers.
 
-Since Stage 8A.2, the allocator instance namespace, monotonic
-`next_generation`, active Device allocations, and the most recent release barrier
-per Device are stored in the durable VPN projection. A process or projection
-restart restores the same active allocation. A released allocation stays absent
-after restart, while a repeated release returns the same safe released snapshot
-until that Device is allocated again. The persisted generation barrier prevents
-the reused slot from recreating its former allocation or peer IDs.
+An allocation has a stable identity only for its current generation. The durable
+allocator projection stores:
 
-An allocation contains only resource metadata, for example:
+- one allocator instance namespace;
+- monotonic `next_generation` state;
+- active Device-to-allocation mappings;
+- the most recent release barrier per Device.
+
+A representative allocation is:
 
 ```erlang
 #{device_id => <<"device-123">>,
@@ -88,17 +108,22 @@ An allocation contains only resource metadata, for example:
                remote_udp_port => 20000}}.
 ```
 
-The allocator does not create certificate material and does not start peer
-processes. Stage 2 can consume an existing reservation, but reservation itself
-remains an explicit operation. Reserve and release are acknowledged only after
-their projection commit succeeds; a failed commit leaves the in-memory allocator
-unchanged.
+Reserve and release operations become visible only after projection commit.
+When persistence fails, the allocator call returns an error and the previous
+in-memory state remains authoritative for the running process.
 
-### Configuration
+`release/1` makes the numeric transport slot reusable and records a released
+snapshot. Repeated release of the same generation is idempotent. A later
+allocation receives a fresh generation and therefore fresh peer IDs; a reused
+slot cannot recreate its former allocation identity.
 
-Defaults are safe for the current local debug topology and avoid its existing
-TUN names, addresses, and ports. They can be overridden through the
-`dynamic_peer_allocator` application environment:
+Allocator recovery reconstructs the slot index from the durable projection and
+validates it against current allocator configuration. Malformed, duplicated, or
+configuration-incompatible state fails startup closed.
+
+### Allocator Configuration
+
+The allocator is configured through `dynamic_peer_allocator`:
 
 ```erlang
 {dynamic_peer_allocator, #{
@@ -120,21 +145,20 @@ Configuration fails closed when host or port ranges are invalid, client and
 gateway UDP ranges overlap, or generated interface names can exceed Linux's
 15-byte interface-name limit.
 
-## Planned stages
+## Dynamic Runtime Resolution
 
-### Stage 2 — dynamic runtime resolver (completed)
-
-`vpn_runtime_config_resolver` now supports `dynamic_allocator` and exposes:
+`vpn_runtime_config_resolver` supports the `dynamic_allocator` source and
+exposes:
 
 ```erlang
 vpn_runtime_config_resolver:resolve(PeerId, Desired).
 vpn_runtime_config_resolver:resolve_pair(DeviceId, Desired).
 ```
 
-Resolution is lookup-only: the Device must already have an active reservation.
-`resolve_pair/2` returns validated client-side and gateway-side runtime maps.
-The following fields always come from `vpn_peer_allocator` and cannot be
-provided by IAS or trusted defaults:
+Resolution is lookup-only. The Device must already own an active allocation.
+The resolver never reserves transport resources as a side effect.
+
+The following values always come from the allocator:
 
 - runtime peer IDs;
 - TUN interface names;
@@ -142,9 +166,11 @@ provided by IAS or trusted defaults:
 - local and remote UDP endpoints;
 - client/gateway pairing.
 
-IAS desired state contributes only client profile, certificate fingerprint,
-authorization, enabled, and revoked metadata. Trusted VPN configuration supplies non-transport and non-identity defaults
-through:
+IAS desired state contributes only approved profile, certificate fingerprint,
+authorization, enabled, revoked, revision, source, and operation metadata.
+
+Trusted VPN configuration supplies non-transport defaults through
+`dynamic_runtime_config_defaults`, for example:
 
 ```erlang
 {dynamic_runtime_config_defaults, #{
@@ -161,12 +187,14 @@ through:
 ```
 
 Transport, OVPN, certificate, private-key, CA, or unknown keys in these defaults
-fail closed. The resolver consumes peer-specific identity paths only from the
-dynamic identity provider. It materializes the client through
-`vpn_session_config:from_spec/1`, validates the gateway direct runtime map, and
-still neither writes the pair to `vpn_peer_registry` nor starts it.
+fail closed.
 
-### Stage 3 — development identity factory (completed)
+The resolver consumes peer-specific identity paths only from the configured
+dynamic identity provider. It materializes the client through
+`vpn_session_config:from_spec/1`, validates the gateway runtime map, and does not
+write registry entries or start peers.
+
+## Development Identity Materialization
 
 `vpn_dynamic_identity_factory` provides:
 
@@ -176,7 +204,7 @@ vpn_dynamic_identity_factory:lookup(AllocationId).
 vpn_dynamic_identity_factory:release(AllocationId).
 ```
 
-The factory is development-only and requires explicit configuration:
+The built-in factory is development-only and must be explicitly configured:
 
 ```erlang
 {dynamic_identity_factory, #{
@@ -194,79 +222,122 @@ For each allocation it creates or reuses:
   envelope whose CN equals the allocated client peer ID;
 - an RSA gateway key, CSR, and CA-signed certificate whose CN equals the
   allocated gateway peer ID;
-- a small versioned manifest containing only allocation/peer metadata.
+- a versioned manifest containing only safe allocation and peer metadata.
 
 The factory validates chain trust, key ownership, file type, private-key
 permissions, OVPN key containment, certificate-file/OVPN fingerprint equality,
-and exact CN-to-peer-ID binding. A partial, symlinked, mismatched, or damaged
-bundle fails closed rather than being silently trusted. `release/1` explicitly
-erases the bundle directory; allocator release remains a separate operation.
+and exact CN-to-peer-ID binding. Partial, symlinked, mismatched, or damaged
+bundles fail closed.
 
 Returned maps contain file references and certificate fingerprints only. PEM
-bodies and private-key contents are never stored in allocator state, the
-manifest, or public factory results. Production identity issuance still belongs
-to IAS/the configured CA workflow.
+bodies and private-key contents are not stored in allocator state, manifests, or
+public factory results.
 
-### Stage 4 — IAS reservation integration (completed in IAS)
+Production identity issuance remains outside this development factory and
+belongs to IAS and the configured CA workflow.
 
-IAS now reserves an allocation before CSR preparation and stores only the safe
-allocation projection with the Device and wizard draft: allocation ID, allocator
-instance ID, client/gateway peer IDs, slot, generation, state, persistence, and
-creation time. Transport internals, identity file paths, PEM, and private-key
-material remain VPN-owned. The existing two-slot delivery path remains active
-until the final dynamic cutover.
+## Revisioned Dynamic Provisioning
 
-### Stage 5 — VPN runtime pair reconciliation (completed)
+`vpn_provisioning:apply_dynamic/2` is the canonical provisioning boundary for an
+allocated Device:
 
-`vpn_dynamic_pair` exposes:
+```erlang
+vpn_provisioning:apply_dynamic(DeviceId, Command).
+```
+
+The command must be a positive-revision dynamic `upsert` whose `peer_id` is the
+client peer owned by the Device allocation. The Device identifier is normalized
+into desired state and bound into the deterministic command digest.
+
+One serialized operation:
+
+1. validates revision ordering and idempotency;
+2. verifies the Device-to-client allocation binding;
+3. creates or reuses the configured identity bundle;
+4. resolves client and gateway runtime maps;
+5. writes both registry entries with final IAS revision/source/operation
+   metadata in one batch;
+6. reconciles the gateway before the client;
+7. waits for required peer replacement and for both certificate-control
+   handshakes to become established;
+8. commits the durable provisioning head only after the intended runtime
+   generation is established.
+
+A duplicate command returns `unchanged`. Stale or conflicting revisions are
+rejected before runtime mutation.
+
+Resolution, registry, startup, or handshake failure restores previous
+registry/runtime state. If the operation created a development identity bundle,
+rollback also attempts to remove that bundle. The allocation remains reserved,
+so the same revision can be retried safely.
+
+The older composition:
+
+```text
+vpn_dynamic_pair:ensure/2
+    -> vpn_provisioning:apply/1
+```
+
+remains a compatibility path for older IAS delivery. New dynamic IAS `upsert`
+delivery uses `apply_dynamic/2`. Allocation reservation remains a separate
+operation because a reserved-only allocation must not start peers or expose a
+revision-zero runtime pair.
+
+## Pair Runtime and Lifecycle Semantics
+
+`vpn_dynamic_pair` exposes the pair-level compatibility and administration API:
 
 ```erlang
 vpn_dynamic_pair:ensure(DeviceId, Desired).
 vpn_dynamic_pair:status(DeviceId).
+vpn_dynamic_pair:decommission(DeviceId).
+vpn_dynamic_pair:decommission(DeviceId, #{remove_identity => true}).
 ```
 
-`ensure/2` is lookup-only with respect to allocation ownership: IAS must already
-have reserved the Device. The VPN then:
+For pair reconciliation, VPN:
 
-1. materializes or reuses the development identity bundle;
-2. resolves the client and gateway runtime maps from the allocation;
-3. validates that existing registry entries, if any, belong to the same
-   allocation and Device;
+1. materializes or reuses the identity bundle;
+2. resolves client and gateway runtime maps;
+3. validates that existing registry entries belong to the same allocation and
+   Device;
 4. writes both peers through one registry batch;
 5. reconciles the gateway before the client;
 6. waits until both certificate-control handshakes report `established`.
 
-The registry batch prevents observers from seeing only one desired side of a
-new pair. A startup or handshake timeout restores the previous registry state
-and stops newly started partial peers. Repeating `ensure/2` for an already
-established unchanged pair does not restart it. A following IAS revisioned
-`upsert` that changes only revision bookkeeping metadata updates the registry
-in place and preserves both peer PIDs and the established handshake; runtime,
+The registry batch prevents observers from seeing only one desired side of a new
+pair. A startup or handshake timeout restores the previous registry state and
+stops newly started partial peers.
+
+Repeating unchanged reconciliation does not restart an established pair.
+Revision-only bookkeeping changes can update registry metadata in place; runtime,
 identity, authorization, or transport changes still trigger reconciliation.
-Revisioned lifecycle operations on a dynamic client are pair-aware. `disable`
-updates the dedicated gateway and client in one registry batch, reconciles the
-gateway first, and returns only after both processes are stopped. `enable`
-re-enables the gateway first, then the client, and returns only after both
-certificate-control handshakes report `established`. Dynamic peers use a short
-VPN-owned handshake-start quarantine before emitting the first control frame.
-While that timer is pending, packets arriving on the newly rebound UDP sockets
-are discarded. This drains delayed control/data frames from the previous pair
-incarnation so an immediate Disable -> Enable cycle cannot contaminate the new
-certificate transcript with an old rekey exchange. The debug default is:
+
+Dynamic lifecycle operations are pair-aware:
+
+- `disable` updates both registry entries in one batch, reconciles the gateway
+  first, and returns only after both processes are stopped;
+- `enable` enables the gateway first, then the client, and returns only after
+  both certificate-control handshakes are established;
+- failed enable rolls both sides back to `enabled => false`;
+- `revoke` uses the same gateway-first quiesce path and returns only after both
+  processes are stopped, while only the client is marked revoked.
+
+The gateway remains authorized and unrevoked after client revoke so an explicit
+higher-level reissue can reuse the reserved pair without leaving an orphaned
+handshake timer.
+
+Dynamic peers use a VPN-owned handshake-start quarantine before emitting the
+first control frame. Packets arriving on newly rebound UDP sockets while the
+timer is pending are discarded, which drains delayed frames from the previous
+pair incarnation. The debug default is:
 
 ```erlang
 handshake_start_delay_ms => 250
 ```
 
-Static peers retain the zero-delay default. If enable cannot establish the pair,
-both sides are rolled back to `enabled => false`. `revoke` uses the same
-gateway-first quiesce path and is acknowledged only after both runtime processes
-are stopped, but only the client is marked revoked. The gateway remains
-authorized and unrevoked so an explicit higher-level reissue can reuse the
-reserved identity without leaving an orphaned handshake timer. The synchronous
-stop boundary also allows immediate decommission after a successful revoke.
+Static peers retain the zero-delay default.
 
-The wait policy is VPN-owned and configurable:
+The pair wait policy is configured through:
 
 ```erlang
 {dynamic_pair_reconcile, #{
@@ -275,155 +346,126 @@ The wait policy is VPN-owned and configurable:
 }}.
 ```
 
-Public pair status and administration summaries expose allocation ownership,
-runtime state, and handshake state without exposing OVPN identity internals,
-private-key paths, PEM bodies, or session secrets. The pair-level `state` is
-derived from the two runtime peers (`established`, `stopped`, `reconciling`, or
-`reserved` before runtime materialization); the durable allocator lifecycle is
-reported separately as `allocation_state`.
+Public pair status exposes allocation ownership, runtime state, and handshake
+state without OVPN identity internals, private-key paths, PEM bodies, or session
+secrets. Pair `state` is derived from both runtime peers (`established`,
+`stopped`, `reconciling`, or `reserved` before runtime materialization).
+`allocation_state` reports the durable allocator lifecycle separately.
 
-### Stage 6 — IAS dynamic cutover and end-to-end tests (completed)
+## Decommission Boundary
 
-IAS now reserves a dynamic pair before certificate preparation, delivers
-provisioning to the allocated client peer, reconciles the VPN-owned pair, and
-records safe allocation metadata in the Wizard and Device views. The integration
-suite proves that an arbitrary Device can obtain a client/gateway pair without a
-`sys.config` slot, both handshakes establish, lifecycle revisions apply to the
-dynamic client, and revoke quiesces both sides without exposing key or session
-material. The original `client_a`/`client_b` topology remains only as a bounded
-low-level debug fixture and compatibility fallback.
+Decommission is intentionally separate from disable and revoke.
 
-Still outstanding before production use:
+The pair must already be quiesced: both runtime processes must be stopped and
+both registry entries disabled. Active pairs fail closed.
 
-- allocator exhaustion must remain fail-closed across the IAS workflow;
-- revision and decommission tombstones must survive process/node restart;
-- durable allocation recovery must replace the volatile reservation process.
+For a valid owned pair, decommission:
 
-### Stage 6.5 — single-RPC revisioned dynamic bootstrap (completed in VPN)
+1. validates Device, allocation, and peer-role ownership;
+2. removes gateway and client registry entries as one batch;
+3. releases the allocator slot;
+4. optionally erases the development identity bundle.
 
-`vpn_provisioning:apply_dynamic/2` is the additive provisioning boundary for a
-reserved dynamic pair:
+A reserved allocation that never reached runtime may also be decommissioned.
+Partial or ambiguous registry ownership fails closed.
 
-```erlang
-vpn_provisioning:apply_dynamic(DeviceId, Command).
-```
+The result contains only safe allocation identifiers and cleanup state. It does
+not contain PEM, OVPN internals, private-key paths, or session material.
 
-It accepts only a positive-revision `upsert` whose `peer_id` is the client peer
-owned by the Device allocation. The Device identifier is normalized into the
-desired state and bound into the command digest. The provisioning process then
-serializes one operation that:
+If optional identity erasure fails, registry and allocation cleanup remain
+completed and the caller receives a safe decommission summary so identity
+cleanup can be retried explicitly by allocation ID.
 
-1. validates revision ordering and idempotency;
-2. verifies the Device-to-client allocation binding;
-3. creates or reuses the dynamic identity bundle;
-4. resolves both client and gateway runtime configurations;
-5. writes both registry entries with the final IAS revision/source/operation
-   metadata in one batch;
-6. waits for any required peer-process replacement and for both
-   certificate-control handshakes to become established;
-7. commits the provisioning head only after the intended runtime generation is
-   established.
+A completed allocator release persists a generation barrier. Stale dynamic
+provisioning state for the former client peer cannot recreate the released peer
+IDs or attach to a later allocation generation.
 
-A duplicate command returns `unchanged`. Stale or conflicting revisions are
-rejected before runtime mutation. Resolution, registry, startup, or handshake
-failure restores the previous registry/runtime state. If this operation created
-a development identity bundle, it also attempts to remove that bundle on
-rollback. The allocation itself remains reserved so the same revision can be
-retried safely.
+## Durable Provisioning Projection and Startup Recovery
 
-The former compatibility path remains available:
+VPN stores allocator and provisioning sections in the versioned, checksummed
+projection managed behind `vpn_projection_store`.
+
+The provisioning section stores only safe durable metadata:
+
+- accepted peer revisions;
+- deterministic command digests;
+- approved desired-state fields;
+- revoked lifecycle state;
+- remove tombstones;
+- `pending` and `applied` operation barriers.
+
+Matching retry can finish an interrupted idempotent operation while newer
+revisions remain blocked by the durable pending head.
+
+Durable projection state never contains private-key bodies or paths, PSKs,
+session keys, replay windows, ECDH material, raw runtime configuration, or packet
+state.
+
+`vpn_runtime_recovery` reconstructs registry state after the projection and
+allocator have passed validation and before `vpn_peer_sup` starts.
+
+For active allocations, recovery combines:
+
+- the durable allocation;
+- the durable provisioning head;
+- the validated local identity bundle;
+- trusted runtime configuration defaults.
+
+Disabled and revoked dynamic pairs are restored with both runtime peers stopped.
+Remove tombstones and incomplete active/enable pending heads suppress peer IDs.
+A persisted allocator release barrier also suppresses stale provisioning state
+left by completed decommission.
+
+Missing identity material, allocation mismatch, or peer ownership collision
+fails startup closed.
+
+The top-level supervisor uses `rest_for_one`, so projection, allocator, or
+registry restart also restarts dependent runtime children after durable recovery.
+
+## IAS/VPN Integration Boundary
+
+The dynamic IAS/VPN contract is deliberately split:
 
 ```text
-vpn_dynamic_pair:ensure/2
-    -> vpn_provisioning:apply/1
+IAS
+  owns Device identity, authorization, certificate policy, desired revision
+  reserves a VPN allocation before Device CSR preparation
+  stores only safe allocation identifiers in IAS durable state
+  delivers revisioned desired state to the allocated client peer
+
+VPN
+  owns transport allocation and generation
+  validates Device-to-client allocation binding
+  owns runtime pair topology
+  materializes configured local identity references
+  applies and persists dynamic provisioning state
+  reconciles both runtime peers
+  owns release and runtime decommission mechanics
 ```
 
-It is retained only so an older IAS release can still operate while IAS is
-migrated. New IAS dynamic `upsert` delivery should use `apply_dynamic/2`; the
-separate allocator reservation remains intentional because a reserved-only
-allocation does not start peers or expose a revision-zero runtime pair.
+The original `client_a` / `client_b` topology remains only as a bounded low-level
+debug fixture and compatibility fallback. It is not the dynamic allocation
+model.
 
-### Stage 7 — dynamic pair decommission (completed)
+## Current Remaining Gap
 
-`vpn_dynamic_pair:decommission/1,2` is the explicit resource-removal boundary.
-It is intentionally separate from disable and revoke:
+The allocator release and provisioning tombstone are durable, and startup
+recovery suppresses stale released generations. They are not yet committed as
+one atomic cross-section decommission transaction.
 
-```erlang
-vpn_dynamic_pair:decommission(DeviceId).
-vpn_dynamic_pair:decommission(DeviceId, #{remove_identity => true}).
-```
+A crash between the allocator and provisioning projection commits is therefore
+handled by recovery barriers rather than by one atomic decommission record.
+Closing this gap requires an explicit atomic allocator-plus-provisioning
+decommission barrier. The active backlog is tracked in `TECHNICAL-DEBT.md`.
 
-The pair must already be quiesced: both runtime processes are stopped and both
-registry entries are disabled. Active pairs fail closed. Decommission validates
-Device/allocation/role ownership, removes the gateway and client registry entries
-as one batch, releases the allocator slot, and optionally erases the development
-identity bundle. The public result contains only safe allocation identifiers and
-cleanup state; it never contains PEM, OVPN internals, private-key paths, or
-session material.
+## Non-Goals
 
-A reserved allocation that has never reached runtime may also be decommissioned.
-Partial registry ownership fails closed rather than deleting an ambiguous
-orphan. The in-memory provisioning head for the old client peer remains a stale
-revision barrier, and newer resolver-based commands cannot recreate the old peer
-IDs after allocator release. If optional identity erasure fails, registry and
-allocation cleanup remain completed and the error returns a safe decommission
-summary so the identity bundle can be retried explicitly by allocation ID.
-Durable tombstones across restart remain Stage 8.
+Dynamic peer allocation does not:
 
-### Stage 8 — durable allocation projection
-
-Stage 8A.1 completed the storage foundation. VPN owns a versioned, checksummed
-KVS/Mnesia projection record behind the replaceable `vpn_projection_store`
-behaviour. The projection process starts before the allocator and rejects
-corrupt, unsupported, or secret-bearing payloads fail-closed.
-
-Stage 8A.2 connects `vpn_peer_allocator` to that projection. The allocator
-initializes and restores a versioned allocator section containing:
-
-- one stable allocator instance namespace;
-- a monotonic `next_generation` barrier;
-- active Device-to-allocation mappings;
-- the most recent released allocation per Device for idempotent release recovery.
-
-Reserve and release mutations are committed before they become visible through
-the allocator API. If persistence fails, the previous in-memory allocation state
-remains authoritative for the running process and the call returns an error.
-Restored allocations are reconstructed into the slot index and checked against
-the current allocator configuration; malformed, duplicated, or incompatible
-state stops allocator startup instead of silently reallocating resources.
-
-Stage 8A.3 adds a separate provisioning section to the same projection. Accepted
-client-peer revisions, deterministic command digests, safe desired-state fields,
-revoked lifecycle state, and remove tombstones now survive restart. Commands use
-a durable `pending` barrier followed by an `applied` commit, so matching retry can
-finish an interrupted idempotent operation while newer revisions stay blocked.
-
-Durable state never contains private-key bodies or paths, PSKs, session keys,
-replay windows, ECDH material, raw runtime configuration, or packet state.
-
-Stage 8A.4 reconstructs the registry after both allocator and provisioning
-sections have passed validation and before `vpn_peer_sup` starts. Active dynamic
-pairs are rebuilt from the durable allocation plus the validated local identity
-bundle; disabled and revoked pairs are restored with both runtime peers stopped.
-Remove tombstones and incomplete active/enable pending heads suppress the peer
-IDs. A persisted allocator release barrier also suppresses the stale dynamic
-provisioning head left by a completed decommission. If that Device later receives
-a new allocation generation, the old peer-keyed head is treated as stale
-ownership and cannot attach to the new peer IDs. Static peers are rebuilt from
-trusted bootstrap configuration or a configured resolver template. Missing
-identity material, allocation mismatch, or
-peer ownership collision fails startup closed. The top-level supervisor is
-`rest_for_one`, so a projection, allocator, or registry restart also restarts all
-dependent runtime children after recovery.
-
-An atomic cross-section decommission barrier remains later Stage 8A work
-described in `TECHNICAL-DEBT.md`.
-
-## Current non-goals after the single-RPC bootstrap and Stage 7
-
-The completed dynamic allocation, IAS cutover, synchronized lifecycle, and
-explicit decommission stages do not:
-
-- persist an atomic allocator-plus-provisioning decommission barrier;
-- automatically erase retained development identities unless explicitly asked;
-- accept allocator resource choices from IAS, trusted defaults, or an OVPN file.
+- accept transport resource choices from IAS, trusted defaults, or OVPN input;
+- persist private-key bodies, session secrets, replay state, or raw runtime
+  configuration;
+- make the development identity factory a production issuance mechanism;
+- automatically erase retained development identities unless decommission is
+  explicitly requested with identity removal;
+- remove the requirement for IAS authorization and certificate policy.
