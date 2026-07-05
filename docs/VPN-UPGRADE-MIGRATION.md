@@ -1,7 +1,11 @@
-# VPN OTP 28 migration runbook
+# VPN durable-state upgrade and migration runbook
 
-This runbook covers an existing VPN installation whose durable KVS/Mnesia state
-was written on an older Erlang/OTP release and is being started on OTP 28.
+This runbook defines the coordinated VPN-side upgrade and migration procedure
+for an existing installation when durable projection checksums or IAS
+provisioning-head digests cross a runtime or representation boundary. It was
+introduced during the Erlang/OTP 28 transition, when OTP-dependent digest
+representations exposed the need for an explicit cross-release migration
+contract.
 
 The VPN contains two independent integrity layers. They must not be confused:
 
@@ -62,7 +66,7 @@ schema. Full constraints and failure modes are documented in
 
 ## 2. Start VPN and migrate provisioning heads
 
-Start VPN normally on OTP 28:
+Start VPN normally on the upgraded runtime:
 
 ```bash
 ERL_FLAGS="-name vpn@127.0.0.1 -setcookie node_runner" rebar3 shell
@@ -109,7 +113,7 @@ If a head is still divergent, compare its revision, peer ID, safe desired state
 and digest version before taking any action. Do not use Replay until a real
 state difference has been established.
 
-## 4. OTP JSON dependency cleanup
+## 4. OTP 28 JSON dependency cleanup
 
 OTP 28 provides the standard `json` module in `stdlib`. VPN therefore no longer
 requires the external `jiffy` NIF dependency. After applying the source update,
@@ -125,10 +129,10 @@ rebar3 ct
 `vpn_admin:summary_json/0` still returns a binary; the implementation converts
 `json:encode/1` iodata with `iolist_to_binary/1`.
 
-## Recommended order for the paired IAS/VPN upgrade
+## Recommended coordinated IAS/VPN upgrade order
 
 1. Stop both nodes and back up both Mnesia directories.
-2. Apply and build the OTP 28-compatible VPN and IAS code.
+2. Apply and build the coordinated VPN and IAS upgrade.
 3. Explicitly migrate the VPN outer projection checksum.
 4. Start VPN normally so provisioning heads migrate to digest version 2.
 5. Explicitly migrate IAS authority records.

@@ -95,7 +95,7 @@ silently discarding revision or revocation barriers. Legacy schema-version-1
 records remain readable when their old checksum can still be verified on the
 current runtime; cross-OTP legacy records require the explicit, operator-audited
 migration described in `docs/PROJECTION-CHECKSUM-MIGRATION.md`.
-For a complete paired IAS/VPN OTP 28 upgrade, including automatic provisioning-head digest migration and OTP JSON cleanup, follow `docs/OTP-28-MIGRATION.md`.
+For a complete paired IAS/VPN OTP 28 upgrade, including automatic provisioning-head digest migration and OTP JSON cleanup, follow `docs/VPN-UPGRADE-MIGRATION.md`.
 
 The default transaction provider uses synchronous Mnesia transactions, while
 projection code itself only calls KVS. The configured Mnesia directory is
