@@ -2,18 +2,19 @@
 
 VPN Overlay Network for the Zencrypted ecosystem.
 
-This repository currently contains a minimal Erlang/OTP VPN dataplane prototype.
-Certificate-control peers now derive directional dataplane keys with ephemeral ECDH and HKDF-SHA256. Legacy non-certificate peers may still use PSK mode. A runtime peer registry supports trusted inventory mutation and automatic live reconciliation, while allocator reservations, provisioning revision barriers, registry entries, and eligible peer runtime are recovered through KVS/Mnesia. CA services, IAS authority persistence, and IAS/VPN reconciliation remain future work.
+The repository implements an Erlang/OTP VPN runtime with TUN/TAP and UDP transport, certificate-authenticated peer sessions, ephemeral directional traffic keys, revisioned IAS provisioning, VPN-owned dynamic peer allocation, durable KVS/Mnesia projections, and fail-closed startup recovery.
+
+The runtime is **not** an OpenVPN wire-protocol implementation. A strict subset of ordinary `.ovpn` syntax is used as an IAS-to-VPN identity and endpoint envelope.
 
 ## Architecture
 
-The current local validation path is:
+The dataplane remains deliberately small:
 
 ```text
 TUN/TAP <-> Erlang <-> UDP <-> Erlang <-> TUN/TAP
 ```
 
-Runtime layering:
+The main runtime layering is:
 
 ```text
 vpn_peer
@@ -24,245 +25,174 @@ vpn_udp
 vpn_tun
 ```
 
-`vpn_peer` is the stable public runtime API. `vpn_link` is a lower-level
-transport component.
+`vpn_peer` is the stable public peer API. `vpn_link` owns the lower-level bidirectional transport path.
 
-X.509 PKI integration is expected to use `synrc/ca` in a later milestone.
-The current development trust store only verifies that configured peer
-certificates are signed by the local development CA fixture.
+The broader runtime adds explicit control and persistence boundaries:
 
-## Canonical OVPN Envelope
+```text
+IAS desired state
+      |
+      v
+vpn_provisioning
+      |
+      +--> vpn_peer_allocator
+      +--> vpn_runtime_config_resolver
+      +--> vpn_dynamic_identity_factory
+      |
+      v
+vpn_peer_registry
+      |
+      v
+vpn_manager / vpn_dynamic_pair
+      |
+      v
+certificate-control session
+      |
+      v
+TUN/TAP <-> encrypted UDP dataplane
 
-Stage 27A defines the canonical IAS-to-VPN provisioning envelope in
-[`docs/OVPN-ENVELOPE.md`](docs/OVPN-ENVELOPE.md). The format is a strict subset
-of ordinary `.ovpn` syntax carrying the endpoint, public certificates, and a
-Device-local key reference. It defines no vendor-prefixed metadata.
-
-This is an interchange envelope only. It does **not** mean that this runtime
-implements the OpenVPN wire protocol or accepts arbitrary third-party `.ovpn`
-configuration.
-
-Device lock, 2FA, authorization, and provisioning lineage remain in trusted
-IAS/VPN runtime state outside the file. The machine-readable contract surface is `vpn_ovpn_envelope`; a public example
-is available at `priv/examples/peer_a.ovpn`. Stage 27B adds the strict
-`vpn_ovpn_parser`, which accepts only this subset and converts it into a
-normalized peer configuration without resolving keys or starting a session.
-
-Stage 27C adds `vpn_ovpn_identity`, which resolves the relative `key` reference
-from the directory containing the `.ovpn` file, validates the inline CA and
-client certificate, verifies the certificate chain and validity policy, and
-proves that RSA or EC P-384 private-key ownership matches the certificate. The
-private-key body is never returned or logged.
-
-## Modules
-
-- `vpn_app` - OTP application entry point.
-- `vpn_sup` - top-level supervisor.
-- `vpn` - public API.
-- `vpn_tun` - TUN/TAP integration layer.
-- `vpn_udp` - UDP transport worker.
-- `vpn_link` - bidirectional TUN/TAP to UDP link.
-- `vpn_udp_sink` - local UDP test sink.
-- `vpn_peer` - public runtime peer abstraction.
-- `vpn_manager` - management API for supervised peers.
-- `vpn_peer_registry` - ETS-backed runtime registry reconstructed from trusted application configuration and durable provisioning state.
-- `vpn_peer_allocator` - VPN-owned durable reservations for dynamic client/gateway peer resources.
-- `vpn_kvs` - KVS/Mnesia schema registration and fail-closed startup boundary.
-- `vpn_projection` - serialized versioned projection process and backend-neutral API.
-- `vpn_projection_store` - replaceable durable projection backend contract.
-- `vpn_projection_store_kvs` - backend-neutral compare-and-set implementation using KVS record access.
-- `vpn_kvs_transaction` - configurable transaction-provider boundary for atomic KVS operations.
-- `vpn_runtime_recovery` - fail-closed reconstruction of registry/runtime configuration before peer supervision.
-- `vpn_dynamic_identity_factory` - development-only dynamic client OVPN and gateway certificate materialization.
-- `vpn_provisioning` - revisioned, idempotent IAS-to-VPN desired-state command contract.
-- `vpn_trust_store` - development CA certificate trust store.
-- `vpn_ovpn_envelope` - canonical OVPN subset constants and value validators.
-- `vpn_ovpn_parser` - strict OVPN parser and normalized peer-config conversion.
-- `vpn_ovpn_identity` - local OVPN certificate, trust, and key-ownership validation.
-
-## Durable projection foundation
-
-Stage 8A.1 introduces a backend-neutral durable projection boundary backed by
-KVS/Mnesia. `vpn_projection` serializes updates to one versioned record, while
-`vpn_projection_store_kvs` performs compare-and-set through ordinary KVS record
-access inside the configured `vpn_kvs_transaction` provider. The record carries
-separate `allocator` and `provisioning` maps, a schema version, a monotonic
-projection version, and a SHA-256 checksum. Projection schema version 2 hashes a
-repository-owned canonical binary encoding rather than Erlang External Term
-Format bytes, so the integrity envelope remains stable across OTP major-version
-upgrades. Corrupt or unsupported records fail application startup instead of
-silently discarding revision or revocation barriers. Legacy schema-version-1
-records remain readable when their old checksum can still be verified on the
-current runtime; cross-OTP legacy records require the explicit, operator-audited
-migration described in `docs/PROJECTION-CHECKSUM-MIGRATION.md`.
-For a complete paired IAS/VPN OTP 28 upgrade, including automatic provisioning-head digest migration and OTP JSON cleanup, follow `docs/VPN-UPGRADE-MIGRATION.md`.
-
-The default transaction provider uses synchronous Mnesia transactions, while
-projection code itself only calls KVS. The configured Mnesia directory is
-`local/mnesia`, which remains outside Git. RocksDB is not downloaded because the
-existing KVS rebar override removes its dependency and application declaration.
-The storage backend remains replaceable through the `vpn_projection_store`
-behaviour together with a matching transaction provider.
-
-Stage 8A.2 routes allocator initialization, reservation, and release through
-`vpn_projection`. The persisted allocator section contains a schema version, one
-stable allocator instance namespace, a monotonic `next_generation` barrier,
-active Device allocations, and the most recent released allocation per Device.
-A reservation or release becomes visible only after the synchronous projection
-commit succeeds. Repeating a completed release returns the persisted release
-barrier until that Device is allocated again. Restored allocations are checked
-against the current transport configuration; incompatible or malformed state
-fails allocator startup instead of silently reallocating resources.
-
-Stage 8A.3 stores each accepted provisioning head in the same durable projection.
-Every new revision is first committed as a `pending` barrier, then the idempotent
-registry/runtime action runs, and a second commit marks the head `applied`. If the
-runtime action or final commit fails, re-delivery of the same revision and digest
-resumes the pending command; newer revisions remain blocked until recovery
-completes. Applied revision digests, safe desired-state metadata, revoked state,
-and remove tombstones therefore survive provisioning-process and VPN-node
-restart. The ledger excludes `runtime_config` and all known secret-bearing fields.
-
-Stage 8A.4 reconstructs registry entries before `vpn_peer_sup` starts. Dynamic
-pairs are resolved only from a restored allocator reservation plus a validated
-local identity bundle; static peers are recovered from trusted bootstrap
-configuration or a configured runtime template. Applied active heads are started,
-disabled and revoked heads remain configured but stopped, remove tombstones are
-suppressed, and incomplete active/enable heads remain stopped until matching
-command replay completes. A durable allocator release barrier suppresses stale
-dynamic provisioning heads after completed decommission. If the same Device is
-reserved again with a new generation, the old peer-keyed head is suppressed
-rather than rebound to the new allocation. Missing
-allocation/identity material, ownership
-collisions, or unrecoverable active runtime configuration fail startup closed.
-The top-level supervisor uses `rest_for_one`, so projection, allocator, or
-registry failure restarts all dependent runtime components in recovery order.
-
-Provisioning history and counters remain bounded, volatile operational telemetry
-rather than durable audit storage.
-
-## Runtime peer registry
-
-`vpn_peer_registry` is the trusted runtime inventory for provisioned peers. It
-first loads `peers` and `ovpn_sessions` as trusted bootstrap configuration, then
-applies the validated durable provisioning heads before `vpn_peer_sup` starts. Public `list/0` and `get/1`
-results contain only safe provisioning metadata and never include PSKs, private
-key paths, or complete runtime configuration.
-
-The first registry stage supports runtime inventory mutation:
-
-```erlang
-vpn_peer_registry:list().
-vpn_peer_registry:get(PeerId).
-vpn_peer_registry:put(PeerConfig).
-vpn_peer_registry:disable(PeerId).
-vpn_peer_registry:enable(PeerId).
-vpn_peer_registry:remove(PeerId).
+vpn_projection + KVS/Mnesia
+      |
+      +--> allocator state
+      +--> provisioning heads and barriers
+      +--> startup recovery input
 ```
 
-`vpn_manager:reload_config/0` reconciles supervised peers against the enabled
-registry entries. Completed reconciliations are also published through
-`vpn_event_bus`. A connected Erlang process may subscribe with
-`vpn_event_bus:subscribe/1` and receives `{vpn_event, Event}` notifications with
-an event-stream identifier and monotonically increasing sequence. These events
-contain only sanitized completion metadata and are wake-up signals: subscribers
-must re-read current VPN state through the normal management APIs. Live automatic
-reconciliation and IAS synchronization remain
-separate follow-up stages.
+IAS owns Device identity, authorization decisions, certificate policy, and desired revisions. VPN owns transport allocation, peer IDs, pair topology, runtime lifecycle, allocator generations, and durable VPN projection state.
 
-## Revisioned provisioning commands
+## Current capabilities
 
-`vpn_provisioning:apply/1` accepts monotonic per-peer commands from a trusted
-provisioning source. Repeated delivery of the same revision and payload is
-idempotent, lower revisions are rejected as stale, and conflicting payloads at
-the same revision are rejected. Supported operations are `upsert`, `enable`,
-`disable`, `revoke`, and `remove`.
+The current runtime provides:
 
-```erlang
-vpn_provisioning:apply(#{
-    peer_id => client_a,
-    revision => 3,
-    operation => upsert,
-    source => ias,
-    desired_state => #{
-        enabled => true,
-        device_id => <<"device-123">>,
-        authorization_mode => policy,
-        authorized => true,
-        certificate_fingerprint => <<"ABCD...">>
-    }
-}).
+- TUN/TAP and UDP dataplane transport;
+- strict `ovpn/v1` parsing and local identity validation;
+- X.509 trust and certificate/private-key ownership validation;
+- certificate-authenticated control-plane handshakes;
+- ephemeral P-384 ECDH with HKDF-SHA256 directional traffic keys;
+- key epochs, authenticated rekey, replay windows, and previous-epoch grace;
+- trusted runtime peer registry and live reconciliation;
+- revisioned, idempotent IAS-to-VPN provisioning commands;
+- VPN-owned durable dynamic peer allocation;
+- single-RPC dynamic pair provisioning through `vpn_provisioning:apply_dynamic/2`;
+- durable allocator/provisioning projections and fail-closed startup recovery;
+- JSON/HTML administration surfaces and an interactive N2O dashboard.
+
+Active production hardening work is tracked in [`docs/TECHNICAL-DEBT.md`](docs/TECHNICAL-DEBT.md).
+
+## Canonical OVPN envelope
+
+The IAS-to-VPN interchange contract is documented in [`docs/OVPN-ENVELOPE.md`](docs/OVPN-ENVELOPE.md).
+
+The envelope is a strict subset of ordinary `.ovpn` syntax carrying:
+
+- endpoint and transport metadata;
+- inline public CA and client certificate material;
+- a Device-local relative private-key reference.
+
+The envelope does not carry IAS authorization, Device-lock, 2FA, provisioning lineage, session keys, replay state, or private-key bodies.
+
+Implementation boundaries are explicit:
+
+- `vpn_ovpn_envelope` defines the machine-readable `ovpn/v1` contract;
+- `vpn_ovpn_parser` performs strict, side-effect-free parsing and normalization;
+- `vpn_ovpn_identity` resolves the local key reference and validates trust, certificate policy, and key ownership;
+- session/runtime modules consume validated configuration through their normal lifecycle boundaries.
+
+A public example is available at `priv/examples/peer_a.ovpn`.
+
+## Certificate session model
+
+For certificate-control peers, the current session path is:
+
+```text
+validated OVPN identity
+        |
+        v
+trusted runtime authorization
+        |
+        v
+mutual certificate proof
+        |
+        v
+P-384 ECDH
+        |
+        v
+HKDF-SHA256 directional keys
+        |
+        v
+established encrypted dataplane
+        |
+        +--> authenticated rekey
+        +--> replay-window enforcement
+        +--> previous-epoch grace
 ```
 
-A new peer must include `runtime_config` inside `desired_state`; updates to an
-existing peer merge trusted desired-state metadata into its internal runtime
-configuration. `revoke` disables the peer, clears authorization, and prevents a
-plain `enable` command until a higher-revision `upsert` explicitly sets
-`revoked => false`. Public registry and provisioning history responses never
-contain PSKs or private-key material.
+Legacy/debug PSK modes remain bounded development and test paths. They are not the current certificate-control security model and are not part of the canonical `ovpn/v1` envelope contract.
 
-IAS canonical commands intentionally do not own VPN transport internals. When a
-new IAS peer has no stored runtime config, VPN may resolve it locally through
-`runtime_config_resolver`:
+## Dynamic allocation and provisioning
 
-- `disabled` keeps the default fail-closed behavior and returns
-  `{error, runtime_config_required}`;
-- `static_template` derives runtime config from trusted VPN application
-  configuration;
-- `dynamic_allocator` resolves both sides of an existing
-  `vpn_peer_allocator` reservation. IAS supplies only the Device ID and client
-  identity/policy metadata; peer IDs, interfaces, addresses, and UDP ports are
-  taken exclusively from the VPN-owned allocation.
+The current dynamic allocation contract is documented in [`docs/DYNAMIC-PEER-ALLOCATION.md`](docs/DYNAMIC-PEER-ALLOCATION.md).
 
-`static_template` is for development and integration flows. It may reuse
-explicit configured local key, certificate, or OVPN references, but it does not
-inherit session keys, replay state, ECDH material, PIDs, counters, or other
-ephemeral runtime data from the template.
+The preferred IAS bootstrap for a reserved Device is:
 
-A single `runtime_config_template` remains supported for backward
-compatibility. A trusted `runtime_config_templates` map can define a bounded
-pool keyed by runtime peer ID. The shipped debug profile provides `client_a`
-and `client_b`; each slot has its own OVPN identity, TUN/UDP resources, and a
-compatible gateway-side peer. Unknown slot IDs fail closed. This pool is for a
-two-user demo and is not dynamic production allocation.
+```erlang
+vpn_provisioning:apply_dynamic(DeviceId, Command).
+```
 
-Dynamic resolution is lookup-only and fails closed until the Device has an
-active allocation, a validated development identity bundle, and
-`dynamic_runtime_config_defaults` supplies trusted non-transport runtime
-defaults. The resolver exposes `vpn_runtime_config_resolver:resolve_pair/2` to
-produce client and gateway runtime maps together. Identity paths come only from
-`vpn_dynamic_identity_factory`; transport and identity paths supplied through
-IAS desired state or dynamic defaults are rejected/ignored.
+The operation validates revision/idempotency rules, binds the Device to the allocated client peer, materializes the configured identity bundle, resolves both runtime peers, writes the registry pair, reconciles the gateway before the client, waits for both certificate-control handshakes, and commits the durable provisioning head only after success.
 
-`vpn_provisioning:apply_dynamic/2` now provides the preferred single-RPC IAS
-bootstrap for a reserved Device. It validates a positive revision, binds the
-allocated client peer, writes final revision metadata to both sides before
-startup, waits for both handshakes, and commits the provisioning head only after
-success. The older `vpn_dynamic_pair:ensure/2` plus `vpn_provisioning:apply/1`
-sequence remains temporarily available for IAS migration compatibility.
+A repeated command with the same revision and digest is idempotent. Stale or conflicting revisions fail before runtime mutation. Matching pending commands can be safely retried after interruption.
 
-`vpn_dynamic_pair:ensure/2` now consumes that resolved pair, writes both sides
-through one registry batch, reconciles the gateway and client, and waits for
-both certificate-control handshakes to become `established`. Repeated calls for
-an unchanged established pair do not restart it. Revision bookkeeping updates
-(`revision`, `provisioning_source`, `last_provisioning_operation`, and
-`updated_at`) are also applied to the registry without restarting an already
-running peer. Transport, identity, handshake, authorization, enabled, or other
-runtime configuration changes still reconcile the process. Revisioned `disable` and `enable` operations on a dynamic client are also
-pair-aware. Disable quiesces the gateway before the client and returns only after
-both processes are stopped. Enable starts the gateway before the client and
-returns only after both certificate-control handshakes are `established`.
-Dynamic peers delay the first handshake briefly and discard packets received
-while the newly rebound UDP sockets are in that startup quarantine. This keeps
-old rekey/control frames from a just-disabled pair out of the new certificate
-transcript. A failed enable rolls the pair back to the disabled state. A revisioned revoke
-uses the same gateway-first quiesce path, waits until both runtime processes are
-stopped before acknowledging the command, but marks only the client revoked.
-This prevents orphaned handshake retries, makes immediate decommission safe,
-and preserves the gateway identity for an explicit higher-level reissue.
+Dynamic pair lifecycle operations are exposed by:
 
-Use `vpn_provisioning:status/0` for counters and
-`vpn_provisioning:history/1` for bounded per-peer audit history.
+```erlang
+vpn_dynamic_pair:ensure(DeviceId, Desired).
+vpn_dynamic_pair:status(DeviceId).
+vpn_dynamic_pair:decommission(DeviceId).
+vpn_dynamic_pair:decommission(DeviceId, #{remove_identity => true}).
+```
+
+Disable, enable, and revoke are pair-aware. Gateway shutdown/start ordering is preserved, and failed enable returns the pair to the disabled state.
+
+The remaining atomic cross-section decommission gap is tracked as TD-013 in [`docs/TECHNICAL-DEBT.md`](docs/TECHNICAL-DEBT.md).
+
+## Durable state and recovery
+
+VPN persists allocator and provisioning projections through KVS/Mnesia. Projection updates are serialized and versioned. The current projection checksum uses a repository-owned canonical encoding rather than Erlang External Term Format bytes.
+
+Startup recovery reconstructs eligible registry and runtime state before peer supervision. Corrupt, unsupported, or ownership-inconsistent durable state fails closed.
+
+The durable projection intentionally excludes private-key material, PSKs, session keys, replay windows, ECDH material, PIDs, counters, raw runtime configuration, and packet state.
+
+Detailed contracts and migration procedures are in:
+
+- [`docs/DYNAMIC-PEER-ALLOCATION.md`](docs/DYNAMIC-PEER-ALLOCATION.md) — allocator, provisioning, lifecycle, and recovery semantics;
+- [`docs/PROJECTION-CHECKSUM-MIGRATION.md`](docs/PROJECTION-CHECKSUM-MIGRATION.md) — outer projection checksum migration;
+- [`docs/VPN-UPGRADE-MIGRATION.md`](docs/VPN-UPGRADE-MIGRATION.md) — coordinated VPN/IAS durable-state upgrade procedure.
+
+## Main modules
+
+- `vpn_app` — OTP application entry point.
+- `vpn_sup` — top-level supervisor.
+- `vpn` — public API.
+- `vpn_tun` — TUN/TAP integration layer.
+- `vpn_udp` — UDP transport worker.
+- `vpn_link` — bidirectional TUN/TAP-to-UDP link.
+- `vpn_peer` — public runtime peer abstraction.
+- `vpn_manager` — management and reconciliation API for supervised peers.
+- `vpn_peer_registry` — trusted runtime inventory reconstructed from bootstrap and durable provisioning state.
+- `vpn_peer_allocator` — durable VPN-owned Device-to-pair resource allocation.
+- `vpn_projection` — serialized versioned projection process.
+- `vpn_projection_store` — durable projection backend contract.
+- `vpn_projection_store_kvs` — KVS-backed compare-and-set projection store.
+- `vpn_runtime_recovery` — fail-closed registry/runtime reconstruction before peer supervision.
+- `vpn_dynamic_identity_factory` — development-only dynamic identity materialization.
+- `vpn_dynamic_pair` — dynamic pair reconciliation and lifecycle boundary.
+- `vpn_provisioning` — revisioned IAS-to-VPN desired-state command contract.
+- `vpn_trust_store` — development CA trust store.
+- `vpn_ovpn_envelope` — canonical OVPN subset contract.
+- `vpn_ovpn_parser` — strict OVPN parser and normalized peer-config conversion.
+- `vpn_ovpn_identity` — local certificate, trust, and key-ownership validation.
 
 ## Build
 
@@ -277,9 +207,17 @@ rebar3 eunit
 ./tools/test-dynamic-identity.sh
 ```
 
+Repository-specific shell helpers also have focused smoke tests, including:
+
+```sh
+./tools/test-generate-device-csr.sh
+./tools/test-local-ovpn.sh
+./tools/test-debug-ovpn.sh
+```
+
 ## Validate an IAS-generated OVPN identity
 
-Keep the envelope and its relative `keys/` directory together, for example:
+Keep the envelope and its relative `keys/` directory together:
 
 ```text
 local/
@@ -294,23 +232,17 @@ local/
 vpn_ovpn_identity:load("/absolute/path/to/local/client.ovpn").
 ```
 
-A successful result contains `trusted => true`, `key_match => true`, and
-`identity_ready => true`. Use `vpn_ovpn_identity:safe_info/1` before presenting
-identity state; it excludes the embedded public PEM material and never exposes
-the private-key body.
+A successful result contains `trusted => true`, `key_match => true`, and `identity_ready => true`. Use `vpn_ovpn_identity:safe_info/1` before presenting identity state; it excludes embedded public PEM material and never exposes the private-key body.
 
 ## Generate a Device key and CSR
 
-The shared helper supports both an ad-hoc timestamped mode and exact filenames
-selected by an IAS provisioning plan.
-
-Ad-hoc mode:
+The helper supports an ad-hoc mode:
 
 ```sh
 ./tools/generate-device-csr.sh laptop
 ```
 
-IAS-planned mode:
+The current IAS Device enrollment flow can also supply the exact common name and local paths:
 
 ```sh
 ./tools/generate-device-csr.sh \
@@ -319,16 +251,7 @@ IAS-planned mode:
   --csr-file local/csr/laptop-20260622-164258-106.csr
 ```
 
-The planned mode creates the exact private-key reference that IAS will later
-place in the `.ovpn` envelope. Paths must be safe and relative; existing files
-are never overwritten. The private key is written with mode `600`, while the
-public CSR is written with mode `644`.
-
-Run the helper smoke tests with:
-
-```sh
-./tools/test-generate-device-csr.sh
-```
+The second form creates the exact Device-local private-key reference used by IAS Device CSR enrollment. Paths must be safe and relative; existing files are never overwritten. The private key is written with mode `600`, while the public CSR is written with mode `644`.
 
 ## Generate a standalone local OVPN bundle
 
@@ -338,8 +261,7 @@ Local development does not require IAS. Initialize a development-only CA once:
 ./tools/init-local-ca.sh
 ```
 
-Then generate a Device-local EC P-384 key, CSR, CA-signed client certificate,
-and canonical OVPN envelope:
+Then generate a Device-local EC P-384 key, CSR, CA-signed client certificate, and canonical OVPN envelope:
 
 ```sh
 ./tools/generate-local-ovpn.sh \
@@ -348,117 +270,53 @@ and canonical OVPN envelope:
   --port 5556
 ```
 
-The generated material is written beneath the Git-ignored `local/` directory:
+Generated material is written beneath the Git-ignored `local/` directory. The OVPN file contains public CA/client certificates and a relative `key keys/...` reference. The private key remains local with mode `600`.
 
-```text
-local/
-├── ca/
-│   ├── ca.key
-│   └── ca.crt
-├── keys/
-├── csr/
-├── certs/
-└── client_a-<timestamp>.ovpn
-```
-
-The OVPN file contains only public CA/client certificates and a relative
-`key keys/...` reference. The private key remains local with mode `600`. This
-flow is intentionally development-only and does not reproduce IAS Device
-binding, authorization, 2FA, audit, or revocation state.
-
-Run the local provisioning smoke tests with:
-
-```sh
-./tools/test-local-ovpn.sh
-```
+This flow is development-only and does not reproduce IAS Device binding, authorization, 2FA, audit, or revocation state.
 
 ## One-command debug startup
 
-The debug bootstrap keeps stable local identities for both trusted client
-slots and the second gateway peer. It creates the development CA and the
-`client_a` and `client_b` OVPN bundles plus the RSA `peer_c` gateway identity only when they are missing or incompatible, then
-reuses them on later starts:
+The supported entry point for the bounded two-slot debug topology is:
 
 ```sh
 ./tools/run-debug.sh
 ```
 
-This is the supported entry point for the two-slot debug topology. It prepares
-all required files before starting `rebar3 as debug shell` with
-`config/sys.debug.config`. When `ERL_FLAGS` is not already set, it starts the
-node as `vpn@127.0.0.1` with cookie `node_runner`. The configured pairs are
-`client_a <-> peer_b` and `client_b <-> peer_c`.
+It prepares stable development identities before starting `rebar3 as debug shell` with `config/sys.debug.config`. When `ERL_FLAGS` is not set, the node starts as `vpn@127.0.0.1` with cookie `node_runner`.
 
-Do not use a raw `rebar3 as debug shell` on a fresh checkout: the application
-fails closed when a configured OVPN identity is missing. To prepare files
-without starting Erlang, run:
+The configured pairs are:
+
+```text
+client_a <-> peer_b
+client_b <-> peer_c
+```
+
+Prepare files without starting Erlang:
 
 ```sh
 ./tools/prepare-debug-topology.sh
 ```
 
-Use an explicit rotation only when needed:
+Rotate Device identity material explicitly:
 
 ```sh
 ./tools/run-debug.sh --force
 ```
 
-`--force` replaces the Device key, CSR, certificate, and OVPN envelope while
-keeping the existing local development CA. The bootstrap can also be run
-without starting Erlang:
+Do not use a raw `rebar3 as debug shell` on a fresh checkout: configured OVPN identities are required and startup fails closed when they are missing.
 
-```sh
-./tools/ensure-debug-ovpn.sh
-```
+## Bounded two-user IAS demo topology
 
-Run its smoke test with:
-
-```sh
-./tools/test-debug-ovpn.sh
-```
-
-### Verified two-user IAS demo topology
-
-The bounded debug topology now supports two IAS-managed client slots at the
-same time:
+The debug topology supports two IAS-managed client slots simultaneously:
 
 ```text
 IAS Alice Device -> client_a <-> peer_b
 IAS Bob Device   -> client_b <-> peer_c
 ```
 
-`client_a` and `client_b` are trusted runtime slots. Each slot has its own
-OVPN identity, certificate, private key, TUN name, tunnel address, UDP port,
-and expected gateway peer. `peer_b` and `peer_c` are infrastructure-side debug
-peers and are not provisioned as IAS user identities.
+`client_a` and `client_b` are trusted runtime slots. `peer_b` and `peer_c` are infrastructure-side debug peers and are not IAS user identities.
 
-The complete flow has been verified manually from the IAS Provisioning Wizard:
-
-```text
-User
--> Device
--> Security Profile
--> Client Certificate
--> VPN Service
--> IAS revisioned provisioning command
--> trusted VPN runtime slot
--> certificate-authenticated handshake
--> encrypted UDP dataplane
-```
-
-The following runtime checks succeeded simultaneously for both pairs:
-
-- all four peer processes were running;
-- `client_a <-> peer_b` and `client_b <-> peer_c` reported
-  `handshake_status => established`;
-- an Alice payload sent from `client_a` was received only by `peer_b`;
-- a Bob payload sent from `client_b` was received only by `peer_c`;
-- both IAS-managed client slots retained the selected Device ID, Security
-  Profile, authorization decision, certificate fingerprint, and revision;
-- certificate trust and private-key matching succeeded;
-- crypto-failure and rejected-frame counters remained zero.
-
-A compact shell verification is:
+Useful runtime checks are:
 
 ```erlang
 vpn_manager:running_peers().
@@ -471,24 +329,11 @@ vpn_peer_registry:get(client_b).
 vpn_admin:summary().
 ```
 
-This is intentionally a bounded demo pool, not a general dynamic allocator.
-
-The dynamic-allocation flow now spans VPN allocation, runtime resolution,
-development identities, IAS reservation and delivery, pair reconciliation,
-pair-aware enable/disable/revoke, and explicit decommission. Normal IAS
-provisioning can create and operate a reserved binary client/gateway pair without
-editing trusted peer configuration. Reservations are durable while identity
-manifests remain local development state. The allocator instance namespace and
-monotonic generation barrier survive allocator and projection restarts, so an
-active Device keeps the same allocation and a released slot cannot reuse its old
-peer IDs. The ownership model and staged integration plan are documented in
-[`docs/DYNAMIC-PEER-ALLOCATION.md`](docs/DYNAMIC-PEER-ALLOCATION.md).
+This topology remains a bounded development fixture. Normal IAS provisioning uses VPN-owned dynamic reservations and `vpn_provisioning:apply_dynamic/2`.
 
 ## Materialize a dynamic development identity bundle
 
-The development identity factory is explicit and disabled outside configured
-debug environments. With `config/sys.debug.config`, reserve a Device and then
-materialize its client/gateway identities:
+With the debug identity factory configured:
 
 ```erlang
 {ok, Allocation} = vpn_peer_allocator:ensure(<<"device-a">>).
@@ -507,22 +352,17 @@ local/dynamic/<allocation-id>/
 └── identity.manifest
 ```
 
-The client uses a canonical OVPN envelope with a Device-local EC P-384 key. The
-gateway uses a directly configured RSA key/certificate pair compatible with
-`vpn_identity`. Certificate CN values must exactly match the allocated binary
-peer IDs. `ensure/1` reuses a complete valid bundle and rejects partial,
-symlinked, mismatched, or insecure material. To erase one bundle explicitly:
+The client uses a canonical OVPN envelope with a Device-local EC P-384 key. The gateway uses a directly configured RSA key/certificate pair compatible with `vpn_identity`.
+
+Erase one development bundle explicitly with:
 
 ```erlang
 vpn_dynamic_identity_factory:release(maps:get(allocation_id, Allocation)).
 ```
 
-Allocator release and identity release are deliberately separate operations.
-Neither public result contains PEM bodies or private-key contents.
+Allocator release and identity release are intentionally separate operations.
 
 ## Reconcile a reserved dynamic pair
-
-With a live reservation and the debug identity factory configured:
 
 ```erlang
 DeviceId = <<"device-dynamic-smoke">>.
@@ -538,15 +378,11 @@ Desired = #{device_id => DeviceId,
 vpn_dynamic_pair:status(DeviceId).
 ```
 
-The result contains only allocation ownership, safe registry metadata, running
-state, and handshake state. Administration summaries also expose
-`allocation_id`, allocator instance, slot, generation, role, and Device ID for
-dynamic peers.
+Public results contain safe allocation, registry, running, and handshake metadata only.
 
 ## Decommission a dynamic pair
 
-Disable or revoke the pair first, then remove its runtime projection and release
-the allocator slot:
+Quiesce the pair through the revisioned lifecycle, then decommission it:
 
 ```erlang
 vpn_dynamic_pair:decommission(DeviceId).
@@ -558,157 +394,63 @@ Development identity removal is explicit:
 vpn_dynamic_pair:decommission(DeviceId, #{remove_identity => true}).
 ```
 
-Decommission fails closed while either peer is running or either registry entry
-is still enabled. It removes both registry entries as one batch, releases the
-VPN-owned allocation, and returns only safe ownership metadata. The default
-retains the local identity bundle for audit/debug use; `remove_identity => true`
-erases it through the configured identity factory. Existing provisioning heads
-continue to reject stale revisions, while a newer command cannot reconstruct the
-old peer IDs after the allocation has been released.
+Decommission validates ownership and quiescence, removes both registry entries as one batch, releases the VPN-owned allocation, and returns safe ownership metadata. It is not equivalent to `disable` or `revoke`.
 
-## Demo Guide
+## Runtime peer registry
 
-This guide shows the current end-to-end VPN milestone: encrypted TUN peers,
-X.509 identity, CA trust verification, JSON/HTML administration, and the
-interactive N2O dashboard.
+`vpn_peer_registry` is the trusted runtime inventory for provisioned peers. It loads trusted bootstrap configuration and validated durable provisioning heads before peer supervision starts.
 
-Architecture overview:
+Public `list/0` and `get/1` results contain safe provisioning metadata and never expose PSKs, private-key paths, or complete runtime configuration.
 
-```text
-peer_a (10.20.20.1)
-      |
- encrypted UDP
-      |
-peer_b (10.20.20.2)
-```
-
-Packet path:
-
-```text
-TUN -> VPN -> UDP -> VPN -> TUN
-```
-
-### Start the demo
-
-Build and start the application:
-
-```sh
-rebar3 compile
-rebar3 shell
-```
-
-The configured peers are started by the OTP supervision tree from
-`config/sys.config`.
-
-### Verify the tunnel
-
-From another terminal, ping `peer_b` through the local tunnel:
-
-```sh
-ping -4 -c 5 10.20.20.2
-```
-
-Expected result:
-
-```text
-0% packet loss
-```
-
-### Verify certificate identity
-
-In the Erlang shell:
+Core mutation API:
 
 ```erlang
-Children = supervisor:which_children(vpn_peer_sup).
-{_, Peer, _, _} = lists:keyfind({vpn_peer, peer_a}, 1, Children).
-vpn_peer:identity_info(Peer).
+vpn_peer_registry:list().
+vpn_peer_registry:get(PeerId).
+vpn_peer_registry:put(PeerConfig).
+vpn_peer_registry:disable(PeerId).
+vpn_peer_registry:enable(PeerId).
+vpn_peer_registry:remove(PeerId).
 ```
 
-Expected certificate metadata includes:
+`vpn_manager:reload_config/0` reconciles supervised peers against enabled registry entries. Completed reconciliations are published through `vpn_event_bus` as sanitized wake-up events; subscribers must re-read current state through the management API.
 
-```text
-issuer  = Zencrypted Dev CA
-subject = peer_a
-```
+## Revisioned provisioning commands
 
-### Verify management APIs
+`vpn_provisioning:apply/1` accepts monotonic per-peer commands from a trusted provisioning source. Supported operations are `upsert`, `enable`, `disable`, `revoke`, and `remove`.
 
 ```erlang
-vpn_manager:running_peers().
-vpn_manager:status().
-vpn_manager:certificates().
+vpn_provisioning:apply(#{
+    peer_id => client_a,
+    revision => 3,
+    operation => upsert,
+    source => ias,
+    desired_state => #{
+        enabled => true,
+        device_id => <<"device-123">>,
+        authorization_mode => policy,
+        authorized => true,
+        certificate_fingerprint => <<"ABCD...">>
+    }
+}).
 ```
 
-### Verify JSON API
+Repeated delivery of the same revision and payload is idempotent. Lower revisions are rejected as stale. Conflicting payloads at the same revision are rejected.
 
-```sh
-curl http://localhost:8080/api/admin/summary | jq .
+Use:
+
+```erlang
+vpn_provisioning:status().
+vpn_provisioning:history(PeerId).
 ```
 
-Expected JSON includes:
+for bounded operational counters and per-peer history.
 
-```text
-counts
-peers
-certificate information
-```
+## Management and administration
 
-### Verify Cowboy dashboard
+The current runtime exposes management, read-only administration, JSON, HTML, and N2O dashboard surfaces.
 
-Open:
-
-```text
-http://localhost:8080/admin
-```
-
-Expected:
-
-```text
-peer table visible
-counts visible
-```
-
-### Current Milestone
-
-```text
-VPN dataplane operational
-PKI identity operational
-CA trust validation operational
-Certificate/key ownership verification operational
-JSON API operational
-Cowboy dashboard operational
-N2O dashboard operational
-Interactive peer management operational
-Canonical OVPN envelope contract defined
-Canonical OVPN parser operational
-OVPN local identity validation operational
-Certificate-authenticated session establishment operational
-Ephemeral ECDH/HKDF traffic keys operational
-Authenticated rekey and replay protection operational
-IAS revisioned runtime provisioning operational
-Two simultaneous trusted IAS client slots operational
-Volatile dynamic peer reservation allocator operational
-Allocator-backed runtime pair resolution operational
-Development dynamic identity factory operational
-IAS dynamic allocation reservation operational
-Dynamic client/gateway registry reconciliation operational
-Dynamic pair lifecycle synchronization operational
-Dynamic pair decommission and allocation release operational
-```
-
-The original two-user topology remains a bounded low-level development fixture.
-Normal IAS provisioning now uses VPN-owned dynamic reservations, identity
-materialization, pair startup, synchronized lifecycle actions, and explicit
-decommission/release. Durable Device-to-allocation recovery across VPN restarts
-remains future work.
-See [`docs/DYNAMIC-PEER-ALLOCATION.md`](docs/DYNAMIC-PEER-ALLOCATION.md) and
-[`docs/TECHNICAL-DEBT.md`](docs/TECHNICAL-DEBT.md). Production Device-lock
-enforcement and a real 2FA provider also remain future work.
-
-## VPN Management API
-
-`vpn_manager` is the initial management layer for supervised peers. It is
-intended to become the backend surface for the future N2O/EXO admin UI.
+Common management calls:
 
 ```erlang
 vpn_manager:list_peers().
@@ -717,962 +459,93 @@ vpn_manager:status().
 vpn_manager:peer_status(peer_a).
 vpn_manager:peer_info(peer_a).
 vpn_manager:peer_stats(peer_a).
-
 vpn_manager:stop_peer(peer_a).
 vpn_manager:start_peer(peer_a).
 vpn_manager:reload_config().
 ```
 
-`list_peers/0` returns configured peers from application config.
-`running_peers/0` returns currently active supervised peers.
-`status/0` returns an aggregate snapshot for dashboard consumers:
+Read-only administration summaries:
 
 ```erlang
-#{
-    configured => [peer_a, peer_b],
-    running => [peer_a, peer_b],
-    peers => #{peer_a => #{running => true}}
-}
-```
-
-`peer_info/1` returns identity and operational config:
-
-```erlang
-#{
-    id => peer_a,
-    identity => IdentityInfo,
-    config => Config
-}
-```
-
-Unknown peers return:
-
-```erlang
-{error, not_found}
-```
-
-Starting an already running peer returns:
-
-```erlang
-{error, already_started}
-```
-
-`reload_config/0` synchronizes runtime peers with the current application
-configuration. It starts configured peers that are not running, stops running
-peers that are no longer configured, and leaves already running configured peers
-untouched:
-
-```erlang
-#{
-    started => [peer_c],
-    stopped => [peer_x],
-    unchanged => [peer_a, peer_b],
-    failed => []
-}
-```
-
-The management API can start, stop, and reload configured peers. It does not
-create, delete, persist, or hot-update peer configuration yet.
-
-## Administration API
-
-`vpn_admin` is the read-only facade intended as the future backend contract for
-N2O/EXO dashboard pages:
-
-```erlang
-vpn_admin:dashboard().
 vpn_admin:summary().
-vpn_admin:summary_view().
-vpn_admin:overview().
-vpn_admin:peer_counts().
+vpn_admin:peers().
+vpn_admin:peer(peer_a).
 ```
 
-`dashboard/0` aggregates raw manager status and certificate inventory.
-`summary/0` returns a compact first-screen view:
+JSON summary endpoint:
 
-```erlang
-#{
-    counts => #{configured => 2, running => 2, stopped => 0, certificates => 2},
-    peers => [
-        #{
-            id => peer_a,
-            running => true,
-            mode => tun,
-            ip => "10.20.20.1",
-            remote_peer_id => peer_b,
-            crypto_failures => 0,
-            frames_rejected => 0,
-            certificate => #{trusted => true, key_match => true}
-        }
-    ]
-}
+```sh
+curl http://localhost:8080/api/admin/summary | jq .
 ```
 
-## Admin View Model
-
-`summary_view/0` converts the compact summary into JSON-safe values for future
-N2O/Cowboy/REST/UI layers. It does not encode JSON and does not add a JSON
-library dependency.
-
-```erlang
-vpn_admin:summary_view().
-```
-
-Example shape:
-
-```erlang
-#{
-    counts => #{configured => 2, running => 2, stopped => 0, certificates => 2},
-    peers => [
-        #{
-            id => <<"peer_a">>,
-            running => true,
-            mode => <<"tun">>,
-            ip => <<"10.20.20.1">>,
-            remote_peer_id => <<"peer_b">>,
-            crypto_failures => 0,
-            frames_rejected => 0,
-            certificate => #{
-                subject_cn => <<"peer_a">>,
-                issuer_cn => <<"Zencrypted Dev CA">>,
-                trusted => true,
-                key_match => true,
-                not_after => <<"270606195431Z">>
-            }
-        }
-    ]
-}
-```
-
-`overview/0` returns compact dashboard counts:
-
-```erlang
-#{
-    configured_peers => 2,
-    running_peers => 2,
-    stopped_peers => 0,
-    certificates => 2
-}
-```
-
-Lifecycle operations remain in `vpn_manager`.
-
-## Administration JSON Export
-
-`summary_json/0` encodes the JSON-safe administration summary for future
-Cowboy/N2O handlers. `summary_json_pretty/0` currently returns the same binary
-and is reserved as a formatting extension point.
-
-```erlang
-vpn_admin:summary_json().
-vpn_admin:summary_json_pretty().
-```
-
-Shell validation:
-
-```erlang
-Json = vpn_admin:summary_json().
-is_binary(Json).
-
-Decoded = json:decode(Json).
-maps:get(<<"counts">>, Decoded).
-maps:get(<<"peers">>, Decoded).
-```
-
-## HTTP Admin Endpoint
-
-The application starts a local read-only Cowboy endpoint for the admin summary.
-The port is configured with `{http_port, 8080}` under the `vpn` application
-environment.
-
-```bash
-curl http://localhost:8080/api/admin/summary
-```
-
-Expected response:
-
-```json
-{
-  "counts": {},
-  "peers": []
-}
-```
-
-The endpoint only supports `GET /api/admin/summary`. Peer lifecycle actions,
-configuration writes, certificate issuance, TLS, authentication, and UI routes
-are intentionally not exposed here.
-
-## HTML Dashboard
-
-The same Cowboy listener also serves a minimal read-only HTML dashboard:
+HTML dashboard:
 
 ```text
-http://localhost:8080/
 http://localhost:8080/admin
 ```
 
-The page renders counts and a peer table from `vpn_admin:summary_view/0`.
-It does not use JavaScript, templates, N2O, Nitro, WebSockets, or management
-actions.
+The administration surfaces expose sanitized state and certificate metadata. Private-key bodies, PSKs, session keys, and secret-bearing runtime configuration are not presentation data.
 
-Runtime validation:
+## Local demo
 
-```bash
-curl -i http://localhost:8080/
-curl -i http://localhost:8080/admin
-```
-
-Expected:
-
-```text
-HTTP/1.1 200 OK
-content-type: text/html
-```
-
-## Dashboard Actions
-
-The dashboard includes simple HTML forms for local peer control:
-
-```text
-Start peer
-Stop peer
-Reload config
-```
-
-Routes:
-
-```text
-POST /admin/peer/peer_a/start
-POST /admin/peer/peer_a/stop
-POST /admin/reload
-```
-
-Each action redirects back to `/admin` with `HTTP 303 See Other`. The controls
-delegate to the existing `vpn_manager` functions and do not add JavaScript,
-WebSockets, authentication, authorization, or certificate management.
-
-## Certificate Inventory
-
-`vpn_manager` exposes certificate inventory helpers for administration screens:
-
-```erlang
-vpn_manager:certificates().
-vpn_manager:certificate_info(peer_a).
-```
-
-An inventory entry includes runtime state and safe certificate metadata:
-
-```erlang
-#{
-    peer_id => peer_a,
-    running => true,
-    trusted => true,
-    key_match => true,
-    subject => Subject,
-    issuer => Issuer,
-    serial_number => Serial,
-    certificate_path => "priv/certs/peer_a.crt"
-}
-```
-
-The inventory uses already-loaded peer identity data for running peers. It does
-not re-read private keys or re-run trust validation for every request.
-
-## Peer-Based Validation
-
-Use `vpn_peer` for runtime validation. It owns the peer config and wraps the
-lower-level `vpn_link`.
-
-```erlang
-PeerB = #{
-    id => peer_b,
-    remote_peer_id => peer_a,
-    psk => <<"0123456789abcdef0123456789abcdef">>,
-    mode => tun,
-    ifname => <<"tun1">>,
-    ip => "10.20.20.2",
-    local_udp_port => 5556,
-    remote_ip => {127,0,0,1},
-    remote_udp_port => 5555,
-    certificate_path => "priv/certs/peer_b.crt",
-    private_key_path => "priv/certs/peer_b.key",
-    ca_certificate_path => "priv/certs/ca.crt"
-}.
-
-PeerA = #{
-    id => peer_a,
-    remote_peer_id => peer_b,
-    psk => <<"0123456789abcdef0123456789abcdef">>,
-    mode => tun,
-    ifname => <<"tun0">>,
-    ip => "10.20.20.1",
-    local_udp_port => 5555,
-    remote_ip => {127,0,0,1},
-    remote_udp_port => 5556,
-    certificate_path => "priv/certs/peer_a.crt",
-    private_key_path => "priv/certs/peer_a.key",
-    ca_certificate_path => "priv/certs/ca.crt"
-}.
-```
-
-Start both peers and reset counters:
-
-```erlang
-{ok, B} = vpn_peer:start_link(PeerB).
-{ok, A} = vpn_peer:start_link(PeerA).
-
-vpn_peer:reset_stats(A).
-vpn_peer:reset_stats(B).
-```
-
-Run validation ping from another terminal:
-
-```sh
-ping -4 -c 10 10.20.20.2
-```
-
-Inspect peer statistics:
-
-```erlang
-vpn_peer:identity(A).
-vpn_peer:config(A).
-vpn_peer:stats(A).
-vpn_peer:stats(B).
-```
-
-`identity/1` returns identity metadata, `config/1` returns operational
-configuration without certificate paths, and `stats/1` returns runtime counters:
-
-```erlang
-#{
-    id => PeerId,
-    link => LinkStats
-}
-```
-
-## Encrypted PSK Dataplane
-
-Required peer config fields:
-
-```text
-id
-remote_peer_id
-psk
-mode
-ifname
-ip
-local_udp_port
-remote_ip
-remote_udp_port
-certificate_path
-private_key_path
-ca_certificate_path
-```
-
-Packet pipeline:
-
-```text
-TUN -> vpn_frame -> vpn_crypto -> UDP
-UDP -> vpn_crypto -> vpn_frame -> peer validation -> TUN
-```
-
-Successful validation:
+Build and start the application:
 
 ```sh
 rebar3 compile
-rebar3 eunit
-rebar3 shell
-ping -4 -c 10 10.20.20.2
-```
-
-Expected ping result:
-
-```text
-10 packets transmitted
-10 packets received
-0% packet loss
-```
-
-Expected link stats:
-
-```erlang
-#{
-    crypto_failures => 0,
-    frames_rejected => 0,
-    frames_accepted => N
-}
-```
-
-where `N > 0`.
-
-Negative PSK test: set different `psk` values for `peer_a` and `peer_b`.
-Expected result: ping fails and `crypto_failures` increases.
-
-The PSK is temporary and will later be replaced by CA/PKI-based key
-establishment.
-
-## Development Certificate Trust
-
-Development fixtures live in `priv/certs`:
-
-```text
-ca.crt
-ca.key
-peer_a.crt
-peer_a.key
-peer_b.crt
-peer_b.key
-```
-
-`peer_a.crt` and `peer_b.crt` are signed by the development CA. During peer
-startup, `vpn_identity` loads the peer certificate/key PEM files, parses safe
-certificate metadata, loads `ca_certificate_path` through `vpn_trust_store`, and
-verifies that the peer certificate issuer matches the trusted CA and its
-signature validates against that CA.
-
-This is only local trust-store verification. It does not implement CRL, OCSP,
-enrollment, certificate renewal, key exchange, or replacement of the temporary
-PSK dataplane.
-
-## Certificate Ownership Verification
-
-A trusted certificate alone is insufficient. During peer startup,
-`vpn_identity` also parses the configured private key and verifies that its
-public part matches the public key in the configured certificate.
-
-For example, configuring `peer_a.crt` with `peer_b.key` causes peer startup to
-fail with a key mismatch. This check proves local certificate/key ownership for
-the development fixtures; it does not implement certificate-based session keys
-or a handshake yet.
-
-## Config Driven Startup
-
-Peers can be started from application configuration. Add `peers` under the `vpn`
-application environment:
-
-```erlang
-{vpn, [
-    {peers, [
-        #{
-            id => peer_a,
-            name => <<"Peer A">>,
-            remote_peer_id => peer_b,
-            psk => <<"0123456789abcdef0123456789abcdef">>,
-            mode => tun,
-            ifname => <<"tun0">>,
-            ip => "10.20.20.1",
-            local_udp_port => 5555,
-            remote_ip => {127,0,0,1},
-            remote_udp_port => 5556,
-            certificate_path => "priv/certs/peer_a.crt",
-            private_key_path => "priv/certs/peer_a.key",
-            ca_certificate_path => "priv/certs/ca.crt"
-        },
-        #{
-            id => peer_b,
-            remote_peer_id => peer_a,
-            psk => <<"0123456789abcdef0123456789abcdef">>,
-            mode => tun,
-            ifname => <<"tun1">>,
-            ip => "10.20.20.2",
-            local_udp_port => 5556,
-            remote_ip => {127,0,0,1},
-            remote_udp_port => 5555,
-            certificate_path => "priv/certs/peer_b.crt",
-            private_key_path => "priv/certs/peer_b.key",
-            ca_certificate_path => "priv/certs/ca.crt"
-        }
-    ]}
-]}.
-```
-
-When the application starts, `vpn_peer_sup` reads:
-
-```erlang
-application:get_env(vpn, peers, []).
-```
-
-Then it starts and supervises one `vpn_peer` child per config entry. With no
-configured peers, the application boots normally.
-
-Start the shell and inspect configured children:
-
-```sh
 rebar3 shell
 ```
 
-```erlang
-supervisor:which_children(vpn_peer_sup).
-```
+Configured peers are started by the OTP supervision tree from `config/sys.config`.
 
-## Local Tunnel Validation
-
-The Erlang VM must have permission to create and configure TAP/TUN interfaces.
-
-### Linux Setup
-
-On Linux, give the active `beam.smp` binary `cap_net_admin` before starting the shell:
+For the standard local tunnel, verify the peer address:
 
 ```sh
-sudo setcap cap_net_admin=ep <beam.smp>
+ping -4 -c 5 10.20.20.2
 ```
 
-### macOS Setup
-
-On macOS, setuid permissions must be configured for the `procket` helper binary.
-
-1. Build the project first to compile `procket`:
-   ```sh
-   rebar3 compile
-   ```
-
-2. Copy the compiled helper binary to a system directory (like `/usr/local/bin`) and make it owned by root with setuid permissions enabled:
-   ```sh
-   sudo cp _build/default/lib/procket/priv/procket /usr/local/bin/procket
-   sudo chown root /usr/local/bin/procket
-   sudo chmod 4750 /usr/local/bin/procket
-   ```
-
-   *Note: In `config/sys.config`, the `procket` app is configured to use `/usr/local/bin/procket` for the helper executable via `{port_executable, "/usr/local/bin/procket"}`.*
-
-Start the project shell:
-
-```sh
-rebar3 shell
-```
-
-Start both local tunnel endpoints:
+Inspect runtime state in the Erlang shell:
 
 ```erlang
-{ok, B} = vpn_link:start_link(
-    <<"vpn1">>,
-    "10.10.10.2",
-    5556,
-    {127,0,0,1},
-    5555).
-
-{ok, A} = vpn_link:start_link(
-    <<"vpn0">>,
-    "10.10.10.1",
-    5555,
-    {127,0,0,1},
-    5556).
+vpn_manager:running_peers().
+vpn_manager:status().
+vpn_manager:certificates().
+vpn_admin:summary().
 ```
 
-Reset counters before a focused run:
+## TUN/TAP prerequisites
+
+The runtime requires platform TUN/TAP support and permissions appropriate to the selected interface mode.
+
+On Linux, verify `/dev/net/tun` and the privileges/capabilities required to create and configure the interface. On macOS, use the platform-supported tunnel backend configured for the project.
+
+The repository test suite and debug profiles are designed to keep privileged integration paths separate from pure Erlang unit tests.
+
+## Debug session probes
+
+Debug profiles expose bounded inspection and fault-injection helpers for handshake, rekey, replay-window, burst, and peer-restart verification. These controls are development/test surfaces and are tracked for production hardening under TD-010.
+
+Useful examples include:
 
 ```erlang
-vpn_link:reset_stats(A).
-vpn_link:reset_stats(B).
+vpn_manager:debug_session_state(client_a).
+vpn_manager:debug_session_state(peer_b).
 ```
 
-Run IPv4 ping from another terminal:
-
-```sh
-ping -4 -c 10 10.10.10.2
-```
-
-Inspect counters:
-
-```erlang
-vpn_link:stats(A).
-vpn_link:stats(B).
-```
-
-Expected ping result:
-
-```text
-10 packets transmitted
-10 packets received
-0% packet loss
-```
-
-Packet diagnostics classify frames as:
-
-```text
-arp
-ipv4_icmp_echo_request
-ipv4_icmp_echo_reply
-ipv4_udp
-ipv4_other
-ipv6
-unknown
-```
-
-## TUN Mode Validation
-
-### 1. Start shell
-
-```sh
-rebar3 shell
-```
-
-### 2. Start endpoint B
-
-```erlang
-{ok, B} =
-    vpn_link:start_link(
-        <<"tun1">>,
-        "10.20.20.2",
-        tun,
-        5556,
-        {127,0,0,1},
-        5555).
-```
-
-### 3. Start endpoint A
-
-```erlang
-{ok, A} =
-    vpn_link:start_link(
-        <<"tun0">>,
-        "10.20.20.1",
-        tun,
-        5555,
-        {127,0,0,1},
-        5556).
-```
-
-### 4. Reset counters
-
-```erlang
-vpn_link:reset_stats(A).
-vpn_link:reset_stats(B).
-```
-
-### 5. Run validation ping
-
-```sh
-ping -4 -c 10 10.20.20.2
-```
-
-Expected result:
-
-```text
-10 packets transmitted
-10 packets received
-0% packet loss
-```
-
-### 6. Inspect statistics
-
-```erlang
-vpn_link:stats(A).
-vpn_link:stats(B).
-```
-
-Example healthy result:
-
-```erlang
-#{
-  tun_rx_packets => N,
-  udp_tx_packets => N,
-  udp_rx_packets => N,
-  tun_tx_packets => N
-}
-```
-
-Packet counters should be approximately symmetric between both endpoints.
-
-### 7. Packet diagnostics
-
-Current packet classification:
-
-```text
-arp
-ipv4_icmp_echo_request
-ipv4_icmp_echo_reply
-ipv4_udp
-ipv4_other
-ipv6
-unknown
-```
-
-Diagnostics are intended for tunnel validation and troubleshooting.
-
-## Notes
-
-- No Elixir.
-- No umbrella project.
-- No external framework dependencies.
-- No CA/PKI logic or key exchange yet.
-
-## OVPN-backed Session Startup
-
-A validated IAS-generated OVPN envelope can now supply the certificate identity,
-remote endpoint, transport, and tunnel mode for a runtime peer. Runtime-only
-values remain in trusted application configuration.
-
-Configure `ovpn_sessions` under the `vpn` application environment:
-
-```erlang
-{ovpn_sessions, [
-    #{
-        id => client_a,
-        name => <<"Client A">>,
-        ovpn_path => "local/client_a.ovpn",
-        ifname => <<"tun0">>,
-        ip => "10.20.20.1",
-        local_udp_port => 5555,
-        remote_peer_id => gateway,
-        psk => <<"temporary-development-psk-32bytes">>
-    }
-]}
-```
-
-At startup, `vpn_session_config` validates the OVPN identity before any peer is
-started. It then maps the OVPN endpoint and `dev tun` settings into the existing
-runtime peer configuration. An invalid certificate, mismatched private key,
-unsafe key permissions, missing key, or malformed OVPN envelope fails the
-session startup.
-
-The static `psk` remains a temporary dataplane requirement. This stage wires the
-validated certificate identity into startup but does not yet implement a
-certificate-authenticated handshake or derive traffic keys from certificates.
-
-For a direct inspection without starting the tunnel:
-
-```erlang
-Runtime = #{
-    id => client_a,
-    ifname => <<"tun0">>,
-    ip => "10.20.20.1",
-    local_udp_port => 5555,
-    remote_peer_id => gateway,
-    psk => <<"temporary-development-psk-32bytes">>
-},
-{ok, Session} = vpn_session_config:load("local/client_a.ovpn", Runtime),
-vpn_session_config:safe_info(Session).
-```
-
-### Debug authorization
-
-The debug profile explicitly sets `authorization_mode => development_bypass`. Ordinary OVPN sessions fail closed unless trusted runtime configuration supplies `authorized => true`; this state is never accepted from OVPN input.
-
-### Development control-plane handshake
-
-The debug profile enables `handshake_mode => development_control` for both
-local peers. Before encrypted PSK data frames are accepted, the peers exchange
-distinct `VPNH` control frames, verify the configured peer identifiers and
-move to `established`. TUN packets are blocked until establishment.
-
-This is a protocol skeleton, not certificate authentication. The existing PSK
-still protects data frames. Certificate exchange, transcript signatures and
-ephemeral key agreement are intentionally left for the next stages.
-
-Inspect the state after `./tools/run-debug.sh`:
-
-```erlang
-vpn_manager:peer_stats(client_a).
-vpn_manager:peer_stats(peer_b).
-```
-
-The nested link stats contain `handshake.status`, control-frame counters and
-blocked-packet/failure counters.
-
-### Mutual certificate proof in debug mode
-
-The debug profile uses `handshake_mode => certificate_control` for both peers. Each side trusts an explicitly configured remote CA, exchanges its certificate, and signs the session IDs and nonces before TUN traffic is enabled. Inspect the result with:
-
-```erlang
-vpn_manager:peer_stats(client_a).
-vpn_manager:peer_stats(peer_b).
-```
-
-The handshake map should report `status => established`, `remote_authenticated => true`, `session_keys_ready => true`, `key_source => ephemeral_ecdh_hkdf_sha256`, and a `remote_certificate_fingerprint`. Certificate-control peers no longer require `psk`: the authenticated ephemeral ECDH exchange is expanded with HKDF-SHA256 into distinct TX and RX keys before the dataplane opens.
-
-
-### Ephemeral ECDH session keys
-
-Handshake version 3 carries a fresh P-384 ephemeral public key in each certificate hello. The certificate proof transcript binds both ephemeral public keys, peer IDs, session IDs, nonces, and the sender certificate fingerprint. After mutual proof succeeds, each peer computes ECDH and applies HKDF-SHA256 to derive two directional ChaCha20-Poly1305 keys. The lower lexical peer ID uses the first derived key for TX and the second for RX; the other peer uses the reverse mapping.
-
-The debug profile therefore contains no `psk` values. Inspect the active key source without exposing key bytes:
-
-```erlang
-#{link := Link} = vpn_manager:peer_stats(client_a),
-maps:get(crypto, Link),
-maps:get(handshake, Link).
-```
-
-Expected fields include `#{key_source => ephemeral_ecdh_hkdf_sha256}` and `session_keys_ready => true`. Legacy disabled/development-control peers retain the PSK path for compatibility. Rekeying and replay windows remain separate follow-up work.
-
-### Session lifecycle and key epochs
-
-Certificate-authenticated sessions now expose lifecycle metadata for the active
-ephemeral traffic-key generation. Data frames carry an explicit `key_epoch`,
-and the AEAD nonce derivation binds both the epoch and sequence number. The
-initial certificate handshake installs epoch `1`; later authenticated rekeying
-will advance it without reusing nonce space.
-
-Inspect the current lifecycle with:
-
-```erlang
-#{link := Link} = vpn_manager:peer_stats(client_a),
-maps:get(session, Link).
-```
-
-The session map contains `established_at`, `session_age_seconds`, `key_epoch`,
-`last_rekey_at`, directional packet/byte counters, and aggregate
-`packets_since_rekey` / `bytes_since_rekey`. This stage records lifecycle data
-only; automatic or manual rekey exchange is implemented separately.
-
-### Manual authenticated rekey
-
-Certificate-control peers can rotate their traffic keys without restarting the TUN or UDP workers:
-
-```erlang
-vpn_manager:rekey(client_a).
-```
-
-The rekey performs a fresh certificate-authenticated ephemeral P-384 ECDH exchange, advances the key epoch, resets per-epoch counters, and temporarily retains the previous receive key for delayed UDP packets.
-
-### Replay protection and previous-epoch grace
-Dataplane packets carry an authenticated cleartext epoch/sequence header so stale epochs are rejected before AEAD decryption; the header itself is bound as AEAD associated data.
-
-Authenticated data frames carry a key epoch and monotonic sequence number. Each
-receive epoch has an independent 64-packet sliding replay window: limited UDP
-reordering is accepted, while duplicate and out-of-window frames are rejected.
-After an authenticated rekey, the previous receive key and its replay window are
-kept for a configurable grace interval so delayed UDP packets can finish in
-flight; the previous key is then erased from the link state. The production
-default is five seconds. The debug profile uses fifteen seconds so the live
-state can be inspected comfortably from the Erlang shell.
-
-Runtime verification:
-
-```erlang
-#{link := Link} = vpn_manager:peer_stats(client_a),
-maps:get(replay, Link),
-maps:with([replay_drops, duplicate_frames, stale_epoch_drops,
-           previous_epoch_accepted], Link).
-```
-
-### Debug replay verification
-
-The debug profile enables an explicit encrypted-frame replay hook. It is disabled by default and must never be enabled in production. After `./tools/run-debug.sh`, inspect retained outbound frames with:
-
-```erlang
-vpn_manager:debug_frame_history(client_a).
-```
-
-Replay a retained frame by epoch and sequence number:
-
-```erlang
-vpn_manager:debug_replay_frame(client_a, 1, 0).
-```
-
-This sends the exact retained ciphertext again, allowing the remote peer replay window to be verified without exposing session keys or plaintext. Generate more than 64 packets and replay an old retained sequence to test the too-old path. Retain an epoch-1 frame, rekey, wait for the previous-epoch grace period to expire, and replay it to test stale-epoch rejection.
-
-
-### Debug dataplane burst for replay-window verification
-
-When `debug_replay_controls => true`, a running certificate session can send a
-controlled burst of unique encrypted dataplane frames without relying on host
-routing through the local TUN addresses:
-
-```erlang
-vpn_manager:debug_send_frames(client_a, 70).
-```
-
-The call returns the current key epoch and the generated sequence range. The
-frames use the normal VPN framing, AEAD encryption, UDP transport, peer checks,
-and receive replay window. Counts from 1 through 256 are accepted. The helper is
-debug-only and returns `debug_replay_disabled` when the controls are disabled.
-
-A retained early frame from the same epoch can then be replayed with
-`debug_replay_frame/3` to verify the `too_old` path once the receive window has
-advanced by at least 64 sequence numbers.
-
-### Automatic authenticated rekey
-
-Certificate-control peers may trigger the existing authenticated ECDH rekey automatically.
-The feature is disabled unless at least one threshold is positive:
-
-```erlang
-#{auto_rekey_after_seconds => 3600,
-  auto_rekey_after_packets => 1000000,
-  auto_rekey_check_interval_ms => 1000,
-  auto_rekey_failure_cooldown_ms => 5000}
-```
-
-The first reached threshold starts one rekey operation. Concurrent automatic attempts are
-suppressed, failures enter a cooldown, and runtime/admin statistics expose the trigger,
-progress, and completion counters. Production defaults keep automatic rekey disabled.
-
-
-### Automatic rekey jitter
-
-Automatic rekey checks may add a bounded random delay before initiating a new authenticated exchange:
-
-```erlang
-#{auto_rekey_jitter_ms => 1000}
-```
-
-A value of `0` preserves immediate triggering. While the delay is pending, repeated checks do not schedule duplicate rekeys. Runtime statistics expose `pending`, `pending_reason`, and `pending_remaining_ms`. If another exchange refreshes the key epoch before the delay expires, the pending trigger is re-evaluated and safely abandoned.
-
-### Authenticated peer restart recovery
-
-Handshake version 4 marks initial exchanges separately from rekeys. When an
-already authenticated peer presents a fresh initial session, the remote link
-pauses dataplane delivery until certificate authentication completes, then
-installs a fresh epoch-1 session and clears obsolete replay/key state. This
-prevents restart traffic from being misclassified as AEAD failures while
-preserving normal epoch-incrementing rekeys.
-
-### IAS certificate fingerprint binding
-
-When an IAS provisioning command includes `certificate_fingerprint`, the VPN
-runtime resolver compares it with the certificate fingerprint loaded from the
-resolved OVPN identity. A missing or different runtime fingerprint is rejected
-fail-closed with `certificate_fingerprint_unavailable` or
-`certificate_fingerprint_mismatch`; the runtime template cannot silently replace
-the IAS certificate identity. Development tests must therefore provision the
-actual fingerprint of the certificate referenced by the configured OVPN
-artifact.
-
-
-### Debug dataplane payload probe
-
-When `debug_replay_controls` is enabled for a peer, the runtime exposes a
-userspace dataplane probe that exercises the real session framing, encryption,
-UDP transport, decryption, peer validation, epoch validation, and replay
-window without requiring a kernel TUN assertion.
-
-```erlang
-ok = vpn_manager:debug_clear_received_payloads(peer_b),
-Payload = <<"ias-vpn-dataplane-probe">>,
-{ok, Sent} = vpn_manager:debug_send_payload(client_a, Payload),
-{ok, Received} = vpn_manager:debug_received_payloads(peer_b).
-```
-
-Each received entry contains the original payload, byte count, key epoch,
-sequence number, peer id, and SHA-256 digest. The history is bounded and is
-available only when debug replay controls are enabled.
-
-### Debug rekey probes
-
-Debug runtimes with `debug_replay_controls` enabled expose a concise, secret-free
-session snapshot and an epoch wait helper for cross-repository integration tests:
-
-```erlang
-{ok, Before} = vpn_manager:debug_session_state(client_a),
-CurrentEpoch = maps:get(current_epoch, Before),
-{ok, NextEpoch} = vpn_manager:rekey(client_a),
-{ok, After} = vpn_manager:debug_wait_for_epoch(client_a, NextEpoch, 5000).
-```
-
-The snapshot reports handshake status, current and previous key epochs, previous
-epoch grace time, rekey counters, and packet counters since the latest rekey. It
-never exposes session keys or private key material.
-
-### Debug peer restart probes
-
-When `debug_replay_controls` is enabled, integration tests may force a supervised peer restart without changing provisioning state:
-
-```erlang
-{ok, OldPid} = vpn_manager:debug_peer_pid(client_a),
-{ok, OldPid} = vpn_manager:debug_restart_peer(client_a),
-{ok, NewPid} = vpn_manager:debug_wait_for_peer_restart(client_a, OldPid, 5000).
-```
-
-The supervisor restarts the existing permanent child specification, so the runtime registry entry and provisioning revision are preserved. These APIs expose process identifiers only and never return session keys or private identity material.
+Detailed replay and lifecycle controls should be exercised only under the debug configuration. Production policy and packaging boundaries are tracked in [`docs/TECHNICAL-DEBT.md`](docs/TECHNICAL-DEBT.md).
+
+## Documentation
+
+- [`docs/OVPN-ENVELOPE.md`](docs/OVPN-ENVELOPE.md) — canonical OVPN profile and identity-validation boundary.
+- [`docs/DYNAMIC-PEER-ALLOCATION.md`](docs/DYNAMIC-PEER-ALLOCATION.md) — durable allocation, dynamic provisioning, pair lifecycle, and startup recovery contract.
+- [`docs/PROJECTION-CHECKSUM-MIGRATION.md`](docs/PROJECTION-CHECKSUM-MIGRATION.md) — projection checksum migration procedure.
+- [`docs/VPN-UPGRADE-MIGRATION.md`](docs/VPN-UPGRADE-MIGRATION.md) — coordinated VPN/IAS durable-state upgrade runbook.
+- [`docs/TECHNICAL-DEBT.md`](docs/TECHNICAL-DEBT.md) — active technical debt only.
+
+## Project boundaries
+
+- Erlang/OTP implementation.
+- Not an OpenVPN wire-protocol implementation.
+- Canonical `.ovpn` support is intentionally a strict ordinary-syntax subset.
+- Production Device-lock enforcement and 2FA provider integration are not yet implemented.
+- Production authentication and authorization of IAS delivery callers remains an active hardening item.
+- Dynamic allocator release and the matching provisioning tombstone are durable but not yet one atomic cross-section decommission transaction.
